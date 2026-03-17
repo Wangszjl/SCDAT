@@ -1,0 +1,10 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-branch-clone,
+  bugprone-infinite-loop,
+  bugprone-macro-parentheses,
+  performance-for-range-copy
+WarningsAsErrors: '*'
+HeaderFilterRegex: '^(Toolkit|tests)/'
+FormatStyle: file

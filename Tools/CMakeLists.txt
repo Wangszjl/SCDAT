@@ -1,0 +1,72 @@
+# ==============================================================================
+# SCDAT — Tools 子库目录
+#
+# 策略：每个子目录自动扫描 .cpp/.h 并注册为独立静态库。
+# 新增源文件后只需重新运行 CMake（无需手动修改本文件），
+# 原理：set_property CMAKE_CONFIGURE_DEPENDS 监听目录变化，
+#       文件增减时 CMake 自动重新配置。
+# ==============================================================================
+
+# 所有 Tools 模块目录（名称 = CMake target 后缀 = 子目录名）
+set(TOOLS_MODULES
+    Basic
+    Interactions
+    Matrix
+    Mesh
+    Parallel
+    PICcore
+    Scripts
+    UI
+    Vector
+    Visualization
+)
+
+foreach(module IN LISTS TOOLS_MODULES)
+    set(_dir "${CMAKE_CURRENT_SOURCE_DIR}/${module}")
+
+    # ── 监听目录：新增 / 删除文件时触发重新配置 ──────────────────────────────
+    set_property(
+        DIRECTORY "${CMAKE_SOURCE_DIR}"
+        APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_dir}"
+    )
+
+    # ── 自动收集源文件与头文件 ────────────────────────────────────────────────
+    file(GLOB_RECURSE _sources
+        "${_dir}/*.cpp"
+        "${_dir}/*.cc"
+        "${_dir}/*.cxx"
+    )
+    file(GLOB_RECURSE _headers
+        "${_dir}/*.h"
+        "${_dir}/*.hpp"
+        "${_dir}/*.hxx"
+    )
+
+    # ── 注册库目标 ────────────────────────────────────────────────────────────
+    if(_sources)
+        # 目录非空：创建真实静态库
+        add_library(Tools_${module} STATIC ${_sources} ${_headers})
+        target_include_directories(Tools_${module}
+            PUBLIC
+                $<BUILD_INTERFACE:${_dir}>
+                $<INSTALL_INTERFACE:include/SCDAT/Tools/${module}>
+        )
+        message(STATUS "[SCDAT] Tools::${module} — STATIC (${_dir})")
+    else()
+        # 目录暂无源文件：创建 INTERFACE 占位库，头文件仍可用
+        add_library(Tools_${module} INTERFACE)
+        target_include_directories(Tools_${module}
+            INTERFACE
+                $<BUILD_INTERFACE:${_dir}>
+                $<INSTALL_INTERFACE:include/SCDAT/Tools/${module}>
+        )
+        message(STATUS "[SCDAT] Tools::${module} — INTERFACE (empty, ${_dir})")
+    endif()
+
+    # ── 命名空间别名：target_link_libraries(... SCDAT::Tools::Basic) ─────────
+    add_library(SCDAT::Tools::${module} ALIAS Tools_${module})
+
+    unset(_dir)
+    unset(_sources)
+    unset(_headers)
+endforeach()
