@@ -42,6 +42,10 @@ foreach(module IN LISTS TOOLS_MODULES)
         "${_dir}/*.hxx"
     )
 
+    # 测试代码由独立测试目标管理，避免混入模块库目标。
+    list(FILTER _sources EXCLUDE REGEX ".*/test/.*")
+    list(FILTER _headers EXCLUDE REGEX ".*/test/.*")
+
     # ── 注册库目标 ────────────────────────────────────────────────────────────
     if(_sources)
         # 目录非空：创建真实静态库

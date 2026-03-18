@@ -18,5 +18,6 @@
  */
 int main(int argc, char* argv[])
 {
+    std::cout << "Welcome to Spacecraft Charging and Discharging Analysis Toolkit!" << std::endl;
     return 0;
 }
