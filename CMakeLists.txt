@@ -13,6 +13,8 @@ project(SCDAT
     LANGUAGES   CXX
 )
 
+include(CTest)
+
 # ------------------------------------------------------------------------------
 # 全局 C++ 标准
 # ------------------------------------------------------------------------------
@@ -42,3 +44,7 @@ include_directories(
 add_subdirectory(Tools)
 add_subdirectory(Toolkit)
 add_subdirectory(Main)
+
+if(BUILD_TESTING)
+    add_subdirectory(Tools/Geometry/test)
+endif()

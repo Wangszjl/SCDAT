@@ -10,8 +10,8 @@
 # 所有 Tools 模块目录（名称 = CMake target 后缀 = 子目录名）
 set(TOOLS_MODULES
     Basic
+    Geometry
     Interactions
-    Matrix
     Mesh
     Parallel
     PICcore
@@ -70,3 +70,8 @@ foreach(module IN LISTS TOOLS_MODULES)
     unset(_sources)
     unset(_headers)
 endforeach()
+
+# 兼容旧的链接名：历史上Main模块链接到SCDAT::Tools::Matrix。
+if(TARGET Tools_Geometry AND NOT TARGET SCDAT::Tools::Matrix)
+    add_library(SCDAT::Tools::Matrix ALIAS Tools_Geometry)
+endif()
