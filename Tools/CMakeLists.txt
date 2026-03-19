@@ -13,6 +13,7 @@ set(TOOLS_MODULES
     Geometry
     Interactions
     Mesh
+    Particle
     Parallel
     PICcore
     Scripts
@@ -78,4 +79,8 @@ endforeach()
 # 兼容旧的链接名：历史上Main模块链接到SCDAT::Tools::Matrix。
 if(TARGET Tools_Geometry AND NOT TARGET SCDAT::Tools::Matrix)
     add_library(SCDAT::Tools::Matrix ALIAS Tools_Geometry)
+endif()
+
+if(TARGET Tools_Particle AND TARGET Tools_Geometry)
+    target_link_libraries(Tools_Particle PUBLIC Tools_Geometry)
 endif()

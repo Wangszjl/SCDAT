@@ -1,0 +1,471 @@
+#pragma once
+#include <cstdint>
+
+namespace ParticleSimulation
+{
+
+// ============================================================================
+// 粒子生命周期状态（互斥，粒子同一时刻只能处于一种状态）
+// ============================================================================
+enum class ParticleStatus : std::uint8_t
+{
+    // --- 初始态 ---
+    UNINITIALIZED   = 0,   // 未初始化
+    CREATED         = 1,   // 已创建，等待注入模拟
+    
+    // --- 活跃态 ---
+    ACTIVE          = 10,  // 正在被追踪
+    SUSPENDED       = 11,  // 暂停追踪（等待后续处理）
+    WAITING         = 12,  // 等待队列中（多线程调度）
+    
+    // --- 终止态（粒子生命结束）---
+    ABSORBED        = 20,  // 被材料完全吸收
+    ESCAPED         = 21,  // 逃逸出模拟边界
+    DEAD            = 22,  // 能量低于截断阈值
+    LOST            = 23,  // 权重过低被俄罗斯轮盘赌淘汰
+    DECAYED         = 24,  // 粒子衰变
+    ANNIHILATED     = 25,  // 湮灭（如正负电子对湮灭）
+    CAPTURED        = 26,  // 被俘获（如中子俘获）
+    FUSED           = 27,  // 聚变
+    FISSIONED       = 28,  // 裂变
+    THERMALIZED     = 29,  // 热化（能量降至热平衡）
+    STUCK           = 30,  // 卡住（数值问题，无法继续）
+    TIME_EXCEEDED   = 31,  // 超过最大模拟时间
+    STEP_EXCEEDED   = 32,  // 超过最大步数限制
+    
+    // --- 错误态 ---
+    ERROR           = 250, // 发生错误
+    INVALID         = 255, // 无效状态
+};
+
+// ============================================================================
+// 交互事件类型（描述粒子经历的物理过程）
+// ============================================================================
+enum class InteractionType : std::uint8_t
+{
+    NONE                    = 0,   // 无交互
+    
+    // --- 碰撞与散射 ---
+    ELASTIC_COLLISION       = 10,  // 弹性碰撞
+    INELASTIC_COLLISION     = 11,  // 非弹性碰撞
+    COULOMB_SCATTERING      = 12,  // 库仑散射
+    RUTHERFORD_SCATTERING   = 13,  // 卢瑟福散射
+    COMPTON_SCATTERING      = 14,  // 康普顿散射
+    RAYLEIGH_SCATTERING     = 15,  // 瑞利散射
+    MIE_SCATTERING          = 16,  // 米氏散射
+    THOMSON_SCATTERING      = 17,  // 汤姆逊散射
+    RAMAN_SCATTERING        = 18,  // 拉曼散射
+    BRILLOUIN_SCATTERING    = 19,  // 布里渊散射
+    NUCLEAR_ELASTIC         = 20,  // 核弹性散射
+    NUCLEAR_INELASTIC       = 21,  // 核非弹性散射
+    
+    // --- 电子相关过程 ---
+    IONIZATION              = 30,  // 电离
+    EXCITATION              = 31,  // 激发
+    RECOMBINATION           = 32,  // 复合
+    ATTACHMENT              = 33,  // 电子附着
+    DETACHMENT              = 34,  // 电子脱附
+    AUGER_EMISSION          = 35,  // 俄歇电子发射
+    SECONDARY_EMISSION      = 36,  // 二次电子发射
+    FIELD_EMISSION          = 37,  // 场发射
+    THERMIONIC_EMISSION     = 38,  // 热电子发射
+    PHOTOELECTRIC           = 39,  // 光电效应
+    
+    // --- 光子相关过程 ---
+    PAIR_PRODUCTION         = 40,  // 电子对产生
+    PHOTONUCLEAR            = 41,  // 光核反应
+    FLUORESCENCE            = 42,  // 荧光发射
+    PHOSPHORESCENCE         = 43,  // 磷光发射
+    BREMSSTRAHLUNG          = 44,  // 韧致辐射
+    CHERENKOV               = 45,  // 切伦科夫辐射
+    SYNCHROTRON             = 46,  // 同步辐射
+    TRANSITION_RADIATION    = 47,  // 渡越辐射
+    
+    // --- 界面事件 ---
+    REFLECTION              = 50,  // 反射
+    SPECULAR_REFLECTION     = 51,  // 镜面反射
+    DIFFUSE_REFLECTION      = 52,  // 漫反射
+    TOTAL_INTERNAL_REFLECTION = 53, // 全内反射
+    REFRACTION              = 54,  // 折射
+    TRANSMISSION            = 55,  // 透射
+    ABSORPTION              = 56,  // 吸收
+    PARTIAL_ABSORPTION      = 57,  // 部分吸收
+    
+    // --- 核反应 ---
+    FISSION                 = 60,  // 裂变
+    FUSION                  = 61,  // 聚变
+    SPALLATION              = 62,  // 散裂
+    NEUTRON_CAPTURE         = 63,  // 中子俘获
+    PROTON_CAPTURE          = 64,  // 质子俘获
+    ALPHA_CAPTURE           = 65,  // α粒子俘获
+    PHOTODISINTEGRATION     = 66,  // 光致蜕变
+    
+    // --- 衰变过程 ---
+    ALPHA_DECAY             = 70,  // α衰变
+    BETA_MINUS_DECAY        = 71,  // β⁻衰变
+    BETA_PLUS_DECAY         = 72,  // β⁺衰变
+    GAMMA_DECAY             = 73,  // γ衰变
+    ELECTRON_CAPTURE        = 74,  // 电子俘获
+    INTERNAL_CONVERSION     = 75,  // 内转换
+    
+    // --- 其他过程 ---
+    ANNIHILATION            = 80,  // 湮灭
+    MATERIALIZATION         = 81,  // 物质化
+    MULTIPLE_SCATTERING     = 82,  // 多重散射（混合处理）
+    ENERGY_STRAGGLING       = 83,  // 能量歧离
+    CHANNELING              = 84,  // 沟道效应
+    BLOCKING                = 85,  // 阻塞效应
+    DIFFUSION               = 86,  // 扩散
+    DRIFT                   = 87,  // 漂移
+    TRAPPING                = 88,  // 陷阱俘获
+    DETRAPPING              = 89,  // 脱陷
+    
+    // --- 表面过程 ---
+    SPUTTERING              = 90,  // 溅射
+    IMPLANTATION            = 91,  // 注入
+    DESORPTION              = 92,  // 脱附
+    ADSORPTION              = 93,  // 吸附
+    SURFACE_DIFFUSION       = 94,  // 表面扩散
+    
+    // --- 化学过程 ---
+    CHEMICAL_REACTION       = 100, // 化学反应
+    DISSOCIATION            = 101, // 解离
+    ASSOCIATION             = 102, // 缔合
+    CHARGE_EXCHANGE         = 103, // 电荷交换
+    
+    // --- 特殊标记 ---
+    BOUNDARY_CROSSING       = 200, // 越过几何边界（非物理过程）
+    STEP_LIMIT              = 201, // 达到步长限制
+    VIRTUAL                 = 202, // 虚过程（权重调整）
+    USER_DEFINED            = 250, // 用户自定义
+};
+
+// ============================================================================
+// 边界交互类型
+// ============================================================================
+enum class BoundaryType : std::uint8_t
+{
+    NONE            = 0,   // 无边界交互
+    
+    // --- 几何边界 ---
+    ENTER_VOLUME    = 1,   // 进入体积
+    EXIT_VOLUME     = 2,   // 离开体积
+    ENTER_CELL      = 3,   // 进入网格单元
+    EXIT_CELL       = 4,   // 离开网格单元
+    
+    // --- 模拟域边界 ---
+    WORLD_BOUNDARY  = 10,  // 到达世界边界
+    PERIODIC        = 11,  // 周期性边界
+    REFLECTING      = 12,  // 反射边界
+    ABSORBING       = 13,  // 吸收边界
+    VACUUM          = 14,  // 真空边界
+    
+    // --- 材料界面 ---
+    MATERIAL_INTERFACE = 20, // 材料界面
+    LAYER_BOUNDARY     = 21, // 层边界
+    SURFACE            = 22, // 表面
+};
+
+// ============================================================================
+// 粒子类型
+// ============================================================================
+enum class ParticleType : std::uint8_t
+{
+    UNKNOWN         = 0,
+    
+    // --- 轻子 ---
+    ELECTRON        = 1,
+    POSITRON        = 2,
+    MUON_MINUS      = 3,
+    MUON_PLUS       = 4,
+    TAU_MINUS       = 5,
+    TAU_PLUS        = 6,
+    ELECTRON_NEUTRINO   = 7,
+    MUON_NEUTRINO       = 8,
+    TAU_NEUTRINO        = 9,
+    
+    // --- 光子 ---
+    PHOTON          = 10,
+    GAMMA           = 11,  // 特指高能γ射线
+    XRAY            = 12,  // X射线
+    OPTICAL_PHOTON  = 13,  // 光学光子（可见光/UV/IR）
+    
+    // --- 重子 ---
+    PROTON          = 20,
+    ANTIPROTON      = 21,
+    NEUTRON         = 22,
+    ANTINEUTRON     = 23,
+    
+    // --- 介子 ---
+    PION_PLUS       = 30,
+    PION_MINUS      = 31,
+    PION_ZERO       = 32,
+    KAON_PLUS       = 33,
+    KAON_MINUS      = 34,
+    
+    // --- 离子/原子核 ---
+    ALPHA           = 40,  // He-4 核
+    DEUTERON        = 41,  // 氘核
+    TRITON          = 42,  // 氚核
+    HELION          = 43,  // He-3 核
+    HEAVY_ION       = 44,  // 重离子（通用）
+    
+    // --- 原子/分子 ---
+    ATOM            = 50,  // 原子
+    MOLECULE        = 51,  // 分子
+    ION             = 52,  // 离子
+    RADICAL         = 53,  // 自由基
+    
+    // --- 复合粒子 ---
+    CLUSTER         = 60,  // 团簇
+    NANOPARTICLE    = 61,  // 纳米粒子
+    DUST            = 62,  // 尘埃粒子
+    DROPLET         = 63,  // 液滴
+    BUBBLE          = 64,  // 气泡
+    
+    // --- 准粒子 ---
+    PHONON          = 70,  // 声子
+    PLASMON         = 71,  // 等离激元
+    MAGNON          = 72,  // 磁振子
+    EXCITON         = 73,  // 激子
+    POLARON         = 74,  // 极化子
+    HOLE            = 75,  // 空穴
+    COOPER_PAIR     = 76,  // 库珀对
+    
+    // --- 虚拟/追踪粒子 ---
+    VIRTUAL_PHOTON  = 80,  // 虚光子
+    GEANTINO        = 81,  // 几何追踪粒子（Geant4）
+    TRACER          = 82,  // 示踪粒子
+    
+    // --- 用户扩展 ---
+    USER_DEFINED_1  = 240,
+    USER_DEFINED_2  = 241,
+    USER_DEFINED_3  = 242,
+    GENERIC         = 255,
+};
+
+// ============================================================================
+// 材料相态
+// ============================================================================
+enum class MaterialPhase : std::uint8_t
+{
+    UNKNOWN     = 0,
+    VACUUM      = 1,
+    GAS         = 2,
+    LIQUID      = 3,
+    SOLID       = 4,
+    PLASMA      = 5,
+    
+    // --- 细分类型 ---
+    AMORPHOUS   = 10,  // 非晶态
+    CRYSTALLINE = 11,  // 晶态
+    POLYCRYSTAL = 12,  // 多晶
+    LIQUID_CRYSTAL = 13, // 液晶
+    
+    SUPERCONDUCTOR  = 20,
+    SUPERFLUID      = 21,
+    
+    // --- 复合 ---
+    MIXTURE     = 30,  // 混合物
+    COMPOSITE   = 31,  // 复合材料
+};
+
+// ============================================================================
+// 追踪动作（追踪器应该执行的操作）
+// ============================================================================
+enum class TrackingAction : std::uint8_t
+{
+    CONTINUE        = 0,   // 继续追踪
+    STOP            = 1,   // 停止追踪此粒子
+    SUSPEND         = 2,   // 暂停，稍后恢复
+    POSTPONE        = 3,   // 延迟处理
+    KILL            = 4,   // 杀死粒子
+    
+    // --- 分支 ---
+    SPLIT           = 10,  // 分裂（方差缩减）
+    ROULETTE        = 11,  // 俄罗斯轮盘赌
+    WEIGHT_WINDOW   = 12,  // 权重窗口调整
+    
+    // --- 二次粒子 ---
+    CREATE_SECONDARY = 20, // 创建二次粒子
+    STACK_SECONDARY  = 21, // 将二次粒子入栈
+    
+    // --- 记录 ---
+    RECORD_STEP     = 30,  // 记录此步
+    RECORD_TRACK    = 31,  // 记录整条轨迹
+    SCORE           = 32,  // 计入得分
+    
+    // --- 调试 ---
+    DEBUG           = 250, // 调试模式
+    BREAKPOINT      = 251, // 断点
+};
+
+// ============================================================================
+// 能量损失机制
+// ============================================================================
+enum class EnergyLossType : std::uint8_t
+{
+    NONE                = 0,
+    
+    // --- 电子能损 ---
+    ELECTRONIC          = 1,   // 电子能损（电离+激发）
+    NUCLEAR             = 2,   // 核能损（弹性碰撞）
+    RADIATIVE           = 3,   // 辐射能损（韧致辐射）
+    
+    // --- 具体机制 ---
+    BETHE_BLOCH         = 10,  // Bethe-Bloch 公式
+    LINDHARD_SCHARFF    = 11,  // Lindhard-Scharff
+    RESTRICTED          = 12,  // 受限能损
+    UNRESTRICTED        = 13,  // 非受限能损
+    
+    // --- 波动 ---
+    LANDAU              = 20,  // Landau 分布
+    VAVILOV             = 21,  // Vavilov 分布
+    GAUSSIAN            = 22,  // 高斯分布
+    URBAN               = 23,  // Urban 模型
+};
+
+// ============================================================================
+// 散射角度分布类型
+// ============================================================================
+enum class AngularDistribution : std::uint8_t
+{
+    ISOTROPIC           = 0,   // 各向同性
+    FORWARD             = 1,   // 前向峰
+    BACKWARD            = 2,   // 后向峰
+    
+    SCREENED_RUTHERFORD = 10,  // 屏蔽卢瑟福
+    MOTT                = 11,  // Mott 截面
+    KLEIN_NISHINA       = 12,  // Klein-Nishina（康普顿）
+    
+    TABULATED           = 20,  // 表格化数据
+    USER_DEFINED        = 21,  // 用户定义
+};
+
+// ============================================================================
+// 模拟标志（位掩码，可组合）
+// ============================================================================
+enum class SimulationFlags : std::uint32_t
+{
+    NONE                = 0,
+    
+    // --- 物理过程开关 ---
+    ENABLE_IONIZATION       = 1 << 0,
+    ENABLE_EXCITATION       = 1 << 1,
+    ENABLE_BREMSSTRAHLUNG   = 1 << 2,
+    ENABLE_PAIR_PRODUCTION  = 1 << 3,
+    ENABLE_PHOTOELECTRIC    = 1 << 4,
+    ENABLE_COMPTON          = 1 << 5,
+    ENABLE_RAYLEIGH         = 1 << 6,
+    ENABLE_NUCLEAR          = 1 << 7,
+    ENABLE_ELASTIC          = 1 << 8,
+    ENABLE_FLUORESCENCE     = 1 << 9,
+    ENABLE_AUGER            = 1 << 10,
+    
+    // --- 追踪选项 ---
+    TRACK_SECONDARIES       = 1 << 16,
+    TRACK_OPTICAL_PHOTONS   = 1 << 17,
+    TRACK_LOW_ENERGY        = 1 << 18,
+    
+    // --- 方差缩减 ---
+    USE_SPLITTING           = 1 << 20,
+    USE_ROULETTE            = 1 << 21,
+    USE_WEIGHT_WINDOW       = 1 << 22,
+    USE_IMPORTANCE_SAMPLING = 1 << 23,
+    
+    // --- 记录选项 ---
+    RECORD_TRAJECTORY       = 1 << 24,
+    RECORD_ENERGY_DEPOSIT   = 1 << 25,
+    RECORD_INTERACTIONS     = 1 << 26,
+    RECORD_BOUNDARY_CROSS   = 1 << 27,
+    
+    // --- 常用组合 ---
+    ALL_EM_PHYSICS          = ENABLE_IONIZATION | ENABLE_EXCITATION | 
+                              ENABLE_BREMSSTRAHLUNG | ENABLE_PHOTOELECTRIC |
+                              ENABLE_COMPTON | ENABLE_RAYLEIGH,
+    
+    DEFAULT                 = ENABLE_IONIZATION | ENABLE_EXCITATION |
+                              ENABLE_ELASTIC | TRACK_SECONDARIES,
+};
+
+// 位运算支持
+inline SimulationFlags operator|(SimulationFlags a, SimulationFlags b) {
+    return static_cast<SimulationFlags>(
+        static_cast<std::uint32_t>(a) | static_cast<std::uint32_t>(b));
+}
+
+inline SimulationFlags operator&(SimulationFlags a, SimulationFlags b) {
+    return static_cast<SimulationFlags>(
+        static_cast<std::uint32_t>(a) & static_cast<std::uint32_t>(b));
+}
+
+inline bool hasFlag(SimulationFlags flags, SimulationFlags flag) {
+    return (flags & flag) == flag;
+}
+
+// ============================================================================
+// 辅助函数：状态判断
+// ============================================================================
+inline bool isAlive(ParticleStatus status) {
+    return status == ParticleStatus::ACTIVE || 
+           status == ParticleStatus::SUSPENDED ||
+           status == ParticleStatus::WAITING;
+}
+
+inline bool isTerminated(ParticleStatus status) {
+    auto s = static_cast<std::uint8_t>(status);
+    return s >= 20 && s < 200;
+}
+
+inline bool isError(ParticleStatus status) {
+    return status == ParticleStatus::ERROR || 
+           status == ParticleStatus::INVALID ||
+           status == ParticleStatus::STUCK;
+}
+
+// ============================================================================
+// 辅助函数：转为字符串（用于调试/日志）
+// ============================================================================
+inline const char* toString(ParticleStatus status) {
+    switch (status) {
+        case ParticleStatus::UNINITIALIZED: return "UNINITIALIZED";
+        case ParticleStatus::CREATED:       return "CREATED";
+        case ParticleStatus::ACTIVE:        return "ACTIVE";
+        case ParticleStatus::SUSPENDED:     return "SUSPENDED";
+        case ParticleStatus::WAITING:       return "WAITING";
+        case ParticleStatus::ABSORBED:      return "ABSORBED";
+        case ParticleStatus::ESCAPED:       return "ESCAPED";
+        case ParticleStatus::DEAD:          return "DEAD";
+        case ParticleStatus::LOST:          return "LOST";
+        case ParticleStatus::DECAYED:       return "DECAYED";
+        case ParticleStatus::ANNIHILATED:   return "ANNIHILATED";
+        case ParticleStatus::CAPTURED:      return "CAPTURED";
+        case ParticleStatus::FUSED:         return "FUSED";
+        case ParticleStatus::FISSIONED:     return "FISSIONED";
+        case ParticleStatus::THERMALIZED:   return "THERMALIZED";
+        case ParticleStatus::STUCK:         return "STUCK";
+        case ParticleStatus::TIME_EXCEEDED: return "TIME_EXCEEDED";
+        case ParticleStatus::STEP_EXCEEDED: return "STEP_EXCEEDED";
+        case ParticleStatus::ERROR:         return "ERROR";
+        case ParticleStatus::INVALID:       return "INVALID";
+        default:                            return "UNKNOWN";
+    }
+}
+
+inline const char* toString(ParticleType type) {
+    switch (type) {
+        case ParticleType::ELECTRON:    return "electron";
+        case ParticleType::POSITRON:    return "positron";
+        case ParticleType::PHOTON:      return "photon";
+        case ParticleType::GAMMA:       return "gamma";
+        case ParticleType::PROTON:      return "proton";
+        case ParticleType::NEUTRON:     return "neutron";
+        case ParticleType::ALPHA:       return "alpha";
+        case ParticleType::HEAVY_ION:   return "heavy_ion";
+        case ParticleType::PHONON:      return "phonon";
+        case ParticleType::HOLE:        return "hole";
+        default:                        return "unknown";
+    }
+}
+
+} // namespace ParticleSimulation

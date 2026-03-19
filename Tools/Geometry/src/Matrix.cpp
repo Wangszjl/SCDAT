@@ -259,7 +259,8 @@ std::vector<Vector3D> Matrix::multiplyBlocks3(const std::vector<Vector3D>& vecBl
 {
     if (rows_ % 3 != 0 || cols_ % 3 != 0)
     {
-        throw std::invalid_argument("matrix dimensions must be multiples of 3 for block-vector multiplication");
+        throw std::invalid_argument(
+            "matrix dimensions must be multiples of 3 for block-vector multiplication");
     }
 
     const std::size_t expectedBlocks = cols_ / 3;

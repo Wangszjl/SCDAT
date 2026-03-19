@@ -48,4 +48,5 @@ add_subdirectory(Main)
 
 if(BUILD_TESTING)
     add_subdirectory(Tools/Geometry/test)
+    add_subdirectory(Tools/Particle/test)
 endif()

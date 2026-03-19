@@ -517,8 +517,8 @@ std::array<double, 3> Matrix3x3::eigenvalues() const
     // lambda^3 - c1*lambda^2 + c2*lambda - c3 = 0
     // 变换 lambda = t + c1/3 -> t^3 + pt + q = 0
     const double p = coeff.c2 - coeff.c1 * coeff.c1 / 3.0;
-    const double q = -2.0 * coeff.c1 * coeff.c1 * coeff.c1 / 27.0 +
-                     coeff.c1 * coeff.c2 / 3.0 - coeff.c3;
+    const double q =
+        -2.0 * coeff.c1 * coeff.c1 * coeff.c1 / 27.0 + coeff.c1 * coeff.c2 / 3.0 - coeff.c3;
 
     const double disc = (q * q) / 4.0 + (p * p * p) / 27.0;
     const double discScale = std::abs((q * q) / 4.0) + std::abs((p * p * p) / 27.0) + 1.0;
@@ -605,8 +605,8 @@ std::array<Vector3D, 3> Matrix3x3::eigenvectors() const
 
         // 复根场景中，eigenvalues()会返回复根实部；通过特征多项式残差做过滤。
         const double polyResidual = std::abs(evaluateCharacteristicPolynomial(coeff, lambda));
-        const double polyScale = 1.0 + std::abs(coeff.c1) + std::abs(coeff.c2) + std::abs(coeff.c3) +
-                                 std::abs(lambda * lambda * lambda);
+        const double polyScale = 1.0 + std::abs(coeff.c1) + std::abs(coeff.c2) +
+                                 std::abs(coeff.c3) + std::abs(lambda * lambda * lambda);
 
         if (polyResidual > 256.0 * kEigenEpsilon * polyScale)
         {
