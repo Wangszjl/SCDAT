@@ -21,11 +21,7 @@
 #include <cmath>
 #include <concepts>
 #include <cstdint>
-#include <execution>
-#include <immintrin.h> // SIMD支持
-#include <memory_resource>
 #include <ranges>
-#include <span>
 #include <string>
 #include <vector>
 
@@ -60,11 +56,9 @@ concept ParticleLike = requires(T particle) {
  * @brief 可推进粒子概念
  */
 template <typename T>
-concept PushableParticle =
-    ParticleLike<T> && requires(T particle, const SCDAT::Geometry::Vector3D& field, double dt) {
-        particle.push(field, field, dt);
-        { particle.getKineticEnergy() } -> std::convertible_to<double>;
-    };
+concept PushableParticle = ParticleLike<T> && requires(T particle) {
+    { particle.getKineticEnergy() } -> std::convertible_to<double>;
+};
 
 // ============================================================================
 // 粒子类型枚举
@@ -142,17 +136,17 @@ enum class ParticleType : std::uint8_t
     TRACER = 82,         // 示踪粒子
 
     // --- 发射机理扩展---
-    PHOTOELECTRON = 90,            // 光电子
-    SECONDARY_ELECTRON = 91,       // 二次电子
-    BACKSCATTERED_ELECTRON = 92,   // 背散射电子
-    AUGER_ELECTRON = 93,           // 俄歇电子
-    THERMAL_ELECTRON = 94,         // 热电子
-    FIELD_EMISSION_ELECTRON = 95,  // 场发射电子
-    POSITIVE_ION = 96,             // 正离子
-    NEGATIVE_ION = 97,             // 负离子
-    MOLECULAR_ION = 98,            // 分子离子
-    CLUSTER_ION = 99,              // 团簇离子
-    BETA_PARTICLE = 100,           // β粒子
+    PHOTOELECTRON = 90,           // 光电子
+    SECONDARY_ELECTRON = 91,      // 二次电子
+    BACKSCATTERED_ELECTRON = 92,  // 背散射电子
+    AUGER_ELECTRON = 93,          // 俄歇电子
+    THERMAL_ELECTRON = 94,        // 热电子
+    FIELD_EMISSION_ELECTRON = 95, // 场发射电子
+    POSITIVE_ION = 96,            // 正离子
+    NEGATIVE_ION = 97,            // 负离子
+    MOLECULAR_ION = 98,           // 分子离子
+    CLUSTER_ION = 99,             // 团簇离子
+    BETA_PARTICLE = 100,          // β粒子
 
     // --- 用户扩展 ---
     USER_DEFINED_1 = 240,
@@ -229,31 +223,31 @@ struct alignas(64) ParticleData
     double age;              // 粒子年龄
 
     // 物理字段
-    double thermal_velocity;   // 热速度
-    int mass_number;           // 质量数
-    int charge_number;         // 电荷数
-    double photon_energy;      // 光子能量
-    double work_function;      // 功函数
-    double primary_energy;     // 初级粒子能量
-    double yield;              // 产额
-    double emission_angle;     // 发射角
-    double temperature;        // 温度
+    double thermal_velocity;    // 热速度
+    int mass_number;            // 质量数
+    int charge_number;          // 电荷数
+    double photon_energy;       // 光子能量
+    double work_function;       // 功函数
+    double primary_energy;      // 初级粒子能量
+    double yield;               // 产额
+    double emission_angle;      // 发射角
+    double temperature;         // 温度
     double richardson_constant; // 理查德森常数
 
     // 构造函数
     ParticleData() = default;
 
     ParticleData(std::size_t particle_id, ParticleType particle_type,
-                       const SCDAT::Geometry::Point3D& pos, const SCDAT::Geometry::Vector3D& vel,
-                       double particle_mass, double particle_charge, double particle_weight = 1.0)
+                 const SCDAT::Geometry::Point3D& pos, const SCDAT::Geometry::Vector3D& vel,
+                 double particle_mass, double particle_charge, double particle_weight = 1.0)
         : position{pos.x(), pos.y(), pos.z()}, velocity{vel.x(), vel.y(), vel.z()},
           mass(particle_mass), charge(particle_charge), weight(particle_weight),
           energy(0.5 * particle_mass * vel.magnitudeSquared()), id(particle_id),
-                    type(particle_type), status(ParticleStatus::ACTIVE), padding{}, birth_time(0.0),
-                    last_update_time(0.0), age(0.0), thermal_velocity(0.0), mass_number(0),
-                    charge_number(0), photon_energy(0.0), work_function(0.0), primary_energy(0.0),
-                    yield(0.0), emission_angle(0.0), temperature(0.0), richardson_constant(0.0)
-    {   
+          type(particle_type), status(ParticleStatus::ACTIVE), padding{}, birth_time(0.0),
+          last_update_time(0.0), age(0.0), thermal_velocity(0.0), mass_number(0), charge_number(0),
+          photon_energy(0.0), work_function(0.0), primary_energy(0.0), yield(0.0),
+          emission_angle(0.0), temperature(0.0), richardson_constant(0.0)
+    {
     }
 
     // 访问器
@@ -327,8 +321,8 @@ class Particle
     explicit Particle(Data data) : data_(std::move(data)) {}
 
     Particle(std::size_t id, ParticleType type, const SCDAT::Geometry::Point3D& position,
-                   const SCDAT::Geometry::Vector3D& velocity, double mass, double charge,
-                   double weight = 1.0)
+             const SCDAT::Geometry::Vector3D& velocity, double mass, double charge,
+             double weight = 1.0)
         : data_(id, type, position, velocity, mass, charge, weight)
     {
     }
@@ -543,18 +537,6 @@ class Particle
     [[nodiscard]] std::string getSpeciesName() const;
     [[nodiscard]] double getMaxKineticEnergy() const noexcept;
 
-    // 粒子推进
-    void push(const SCDAT::Geometry::Vector3D& E_field, const SCDAT::Geometry::Vector3D& B_field,
-              double dt);
-
-    // Boris算法推进
-    void borisPush(const SCDAT::Geometry::Vector3D& E_field,
-                   const SCDAT::Geometry::Vector3D& B_field, double dt);
-
-    // 相对论性推进
-    void relativisticPush(const SCDAT::Geometry::Vector3D& E_field,
-                          const SCDAT::Geometry::Vector3D& B_field, double dt);
-
     // 时间更新
     void updateTime(double current_time) noexcept
     {
@@ -610,204 +592,41 @@ using ThermalElectronParticlePtr = ParticlePtr;
 
 class ParticleFactory
 {
-    public:
-        static Particle createElectron(ParticleId id, const SCDAT::Geometry::Point3D& position,
-                                                                     const SCDAT::Geometry::Vector3D& velocity,
-                                                                     double weight = 1.0);
-
-        static Particle createIon(ParticleId id, const SCDAT::Geometry::Point3D& position,
-                                                            const SCDAT::Geometry::Vector3D& velocity, int mass_number,
-                                                            int charge_number, double weight = 1.0);
-
-        static Particle createPhotoelectron(ParticleId id, const SCDAT::Geometry::Point3D& position,
-                                                                                const SCDAT::Geometry::Vector3D& velocity,
-                                                                                double photon_energy, double work_function,
-                                                                                double weight = 1.0);
-
-        static Particle createSecondaryElectron(ParticleId id,
-                                                                                        const SCDAT::Geometry::Point3D& position,
-                                                                                        const SCDAT::Geometry::Vector3D& velocity,
-                                                                                        double primary_energy, double yield,
-                                                                                        double weight = 1.0);
-
-        static Particle createThermalElectron(ParticleId id,
-                                                                                    const SCDAT::Geometry::Point3D& position,
-                                                                                    const SCDAT::Geometry::Vector3D& velocity,
-                                                                                    double temperature, double work_function,
-                                                                                    double weight = 1.0);
-
-        static Particle createParticle(ParticleType type, ParticleId id,
-                                                                     const SCDAT::Geometry::Point3D& position,
-                                                                     const SCDAT::Geometry::Vector3D& velocity,
-                                                                     double weight = 1.0);
-
-    private:
-        static ParticleId next_id_;
-
-    public:
-        static ParticleId getNextId()
-        {
-                return ++next_id_;
-        }
-};
-
-// ============================================================================
-// 现代化粒子容器
-// ============================================================================
-
-/**
- * @brief 现代化粒子容器
- *
- * 使用SoA（Structure of Arrays）布局优化SIMD性能
- */
-class ParticleContainer
-{
   public:
-        using ParticleData = SCDAT::Particle::ParticleData;
-    using Container = std::pmr::vector<ParticleData>;
+    static Particle createElectron(ParticleId id, const SCDAT::Geometry::Point3D& position,
+                                   const SCDAT::Geometry::Vector3D& velocity, double weight = 1.0);
 
-    // 构造函数 / Constructor
-    explicit ParticleContainer(
-        std::pmr::memory_resource* memory_resource = std::pmr::get_default_resource())
-        : particles_(memory_resource), memory_resource_(memory_resource)
-    {
-    }
+    static Particle createIon(ParticleId id, const SCDAT::Geometry::Point3D& position,
+                              const SCDAT::Geometry::Vector3D& velocity, int mass_number,
+                              int charge_number, double weight = 1.0);
 
-    // 移动语义支持
-    ParticleContainer(const ParticleContainer&) = delete;
-    ParticleContainer& operator=(const ParticleContainer&) = delete;
-    ParticleContainer(ParticleContainer&&) noexcept = default;
-    ParticleContainer& operator=(ParticleContainer&&) noexcept = default;
+    static Particle createPhotoelectron(ParticleId id, const SCDAT::Geometry::Point3D& position,
+                                        const SCDAT::Geometry::Vector3D& velocity,
+                                        double photon_energy, double work_function,
+                                        double weight = 1.0);
 
-    ~ParticleContainer() = default;
+    static Particle createSecondaryElectron(ParticleId id, const SCDAT::Geometry::Point3D& position,
+                                            const SCDAT::Geometry::Vector3D& velocity,
+                                            double primary_energy, double yield,
+                                            double weight = 1.0);
 
-    // 容器操作 / Container operations
-    void reserve(size_t capacity)
-    {
-        particles_.reserve(capacity);
-    }
-    void resize(size_t size)
-    {
-        particles_.resize(size);
-    }
-    void clear()
-    {
-        particles_.clear();
-    }
+    static Particle createThermalElectron(ParticleId id, const SCDAT::Geometry::Point3D& position,
+                                          const SCDAT::Geometry::Vector3D& velocity,
+                                          double temperature, double work_function,
+                                          double weight = 1.0);
 
-    [[nodiscard]] size_t size() const noexcept
-    {
-        return particles_.size();
-    }
-    [[nodiscard]] size_t capacity() const noexcept
-    {
-        return particles_.capacity();
-    }
-    [[nodiscard]] bool empty() const noexcept
-    {
-        return particles_.empty();
-    }
-
-    // 粒子管理
-    // Core::Result<size_t> addParticle(const ModernParticle& particle);
-    // Core::Result<size_t> addParticle(ParticleData data);
-    // Core::VoidResult removeParticle(size_t index);
-    // Core::VoidResult removeParticleById(std::size_t id);
-
-    // 访问器
-    [[nodiscard]] ParticleData& operator[](size_t index)
-    {
-        return particles_[index];
-    }
-    [[nodiscard]] const ParticleData& operator[](size_t index) const
-    {
-        return particles_[index];
-    }
-
-    [[nodiscard]] ParticleData& at(size_t index)
-    {
-        return particles_.at(index);
-    }
-    [[nodiscard]] const ParticleData& at(size_t index) const
-    {
-        return particles_.at(index);
-    }
-
-    [[nodiscard]] std::span<ParticleData> getParticles()
-    {
-        return std::span(particles_);
-    }
-    [[nodiscard]] std::span<const ParticleData> getParticles() const
-    {
-        return std::span(particles_);
-    }
-
-    // 迭代器 / Iterators
-    auto begin()
-    {
-        return particles_.begin();
-    }
-    auto end()
-    {
-        return particles_.end();
-    }
-    auto begin() const
-    {
-        return particles_.begin();
-    }
-    auto end() const
-    {
-        return particles_.end();
-    }
-
-    // 并行操作 / Parallel operations
-    template <typename Func>
-    void forEachParticle(Func&& func, std::execution::parallel_policy policy = std::execution::par)
-    {
-        std::for_each(policy, particles_.begin(), particles_.end(), std::forward<Func>(func));
-    }
-
-    template <typename Func>
-    void forEachParticle(Func&& func,
-                         std::execution::parallel_policy policy = std::execution::par) const
-    {
-        std::for_each(policy, particles_.begin(), particles_.end(), std::forward<Func>(func));
-    }
-
-    // SIMD优化的批量操作 / SIMD-optimized batch operations
-    void borisPushAll(const SCDAT::Geometry::Vector3D& E_field,
-                      const SCDAT::Geometry::Vector3D& B_field, double dt);
-    void updatePositionsAll(double dt);
-    void updateEnergiesAll();
-
-    // 筛选操作 / Filtering operations
-    [[nodiscard]] std::vector<size_t> findActiveParticles() const;
-    [[nodiscard]] std::vector<size_t> findParticlesByType(ParticleType type) const;
-    [[nodiscard]] std::vector<size_t>
-    findParticlesInRegion(const SCDAT::Geometry::Point3D& min_corner,
-                          const SCDAT::Geometry::Point3D& max_corner) const;
-
-    // 统计信息 / Statistics
-    [[nodiscard]] size_t getActiveParticleCount() const;
-    [[nodiscard]] double getTotalKineticEnergy() const;
-    [[nodiscard]] SCDAT::Geometry::Vector3D getTotalMomentum() const;
-    [[nodiscard]] SCDAT::Geometry::Point3D getCenterOfMass() const;
-
-    // 内存管理 / Memory management
-    [[nodiscard]] size_t getMemoryUsage() const;
-    void compactMemory(); // 移除非活跃粒子，压缩内存
-
-    // 验证 / Validation
-    // [[nodiscard]] Core::VoidResult validate() const;
+    static Particle createParticle(ParticleType type, ParticleId id,
+                                   const SCDAT::Geometry::Point3D& position,
+                                   const SCDAT::Geometry::Vector3D& velocity, double weight = 1.0);
 
   private:
-    Container particles_;
-    std::pmr::memory_resource* memory_resource_;
-    std::size_t next_particle_id_ = 1;
+    static ParticleId next_id_;
 
-    // SIMD辅助函数 / SIMD helper functions
-    void simdBorisPush(std::span<ParticleData> particles, const SCDAT::Geometry::Vector3D& E_field,
-                       const SCDAT::Geometry::Vector3D& B_field, double dt);
+  public:
+    static ParticleId getNextId()
+    {
+        return ++next_id_;
+    }
 };
 
 } // namespace Particle

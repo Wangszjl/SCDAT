@@ -1,4 +1,5 @@
 #include "../include/ParticleDefinitions.h"
+#include "../include/ParticlePusher.h"
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -63,7 +64,10 @@ TEST(ParticleDefinitionsTest, BorisPushPureElectricField)
     const SCDAT::Geometry::Vector3D b(0.0, 0.0, 0.0);
     const double dt = 0.5;
 
-    p.borisPush(e, b, dt);
+    BorisAlgorithm pusher(dt);
+    const FieldFunction ef = [&e](const SCDAT::Geometry::Point3D&) { return e; };
+    const FieldFunction bf = [&b](const SCDAT::Geometry::Point3D&) { return b; };
+    pusher.pushParticle(&p, ef, bf);
 
     EXPECT_NEAR(p.getVelocity().x(), 1.0, 1e-12);
     EXPECT_NEAR(p.getVelocity().y(), 0.0, 1e-12);
@@ -81,7 +85,11 @@ TEST(ParticleDefinitionsTest, RelativisticPathWithZeroFieldKeepsVelocity)
                SCDAT::Geometry::Vector3D(vx, 0.0, 0.0), 1.0, 1.0, 1.0);
 
     const SCDAT::Geometry::Vector3D zero_field(0.0, 0.0, 0.0);
-    p.push(zero_field, zero_field, dt);
+    BorisAlgorithm pusher(dt);
+    pusher.setRelativistic(true);
+    const FieldFunction ef = [&zero_field](const SCDAT::Geometry::Point3D&) { return zero_field; };
+    const FieldFunction bf = [&zero_field](const SCDAT::Geometry::Point3D&) { return zero_field; };
+    pusher.pushParticle(&p, ef, bf);
 
     EXPECT_GT(p.getVelocity().x(), 0.0);
     EXPECT_LT(std::abs(p.getVelocity().x()), c);
@@ -93,9 +101,9 @@ TEST(ParticleDefinitionsTest, RelativisticPathWithZeroFieldKeepsVelocity)
 
 TEST(ParticleDefinitionsTest, ToStringContainsExtendedPhotoelectronFields)
 {
-    Particle p = ParticleFactory::createPhotoelectron(
-        6, SCDAT::Geometry::Point3D(1.0, 2.0, 3.0), SCDAT::Geometry::Vector3D(4.0, 5.0, 6.0),
-        7.5, 4.5, 1.0);
+    Particle p = ParticleFactory::createPhotoelectron(6, SCDAT::Geometry::Point3D(1.0, 2.0, 3.0),
+                                                      SCDAT::Geometry::Vector3D(4.0, 5.0, 6.0), 7.5,
+                                                      4.5, 1.0);
 
     const std::string text = p.toString();
 

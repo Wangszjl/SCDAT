@@ -17,3 +17,8 @@ include(GoogleTest)
 add_executable(ParticleDefinitions_test ParticleDefinitions_test.cpp)
 target_link_libraries(ParticleDefinitions_test PRIVATE SCDAT::Tools::Particle SCDAT::Tools::Geometry GTest::gtest_main)
 gtest_discover_tests(ParticleDefinitions_test)
+
+add_executable(ParticleSource_test ParticleSource_test.cpp)
+target_link_libraries(ParticleSource_test PRIVATE SCDAT::Tools::Particle SCDAT::Tools::Geometry GTest::gtest_main)
+gtest_discover_tests(ParticleSource_test)
+
