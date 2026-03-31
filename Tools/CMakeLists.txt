@@ -10,13 +10,20 @@
 # 所有 Tools 模块目录（名称 = CMake target 后缀 = 子目录名）
 set(TOOLS_MODULES
     Basic
+    Boundary
+    Coupling
+    Diagnostics
+    FieldSolver
     Geometry
     Interactions
+    Material
     Mesh
+    Output
     Particle
     Parallel
     PICcore
     Scripts
+    Solver
     UI
     Vector
     Visualization
@@ -47,12 +54,18 @@ foreach(module IN LISTS TOOLS_MODULES)
     list(FILTER _sources EXCLUDE REGEX ".*/test/.*")
     list(FILTER _headers EXCLUDE REGEX ".*/test/.*")
 
+    # Mesh模块系统性重构：仅保留三类聚合编译入口文件
+    if(module STREQUAL "Mesh")
+        list(FILTER _sources INCLUDE REGEX ".*[\\/](MeshAlgorithms|MeshPartitioning|MeshParsing)\\.cpp$")
+    endif()
+
     # ── 注册库目标 ────────────────────────────────────────────────────────────
     if(_sources)
         # 目录非空：创建真实静态库
         add_library(Tools_${module} STATIC ${_sources} ${_headers})
         target_include_directories(Tools_${module}
             PUBLIC
+                $<BUILD_INTERFACE:${_dir}/include>
                 $<BUILD_INTERFACE:${_dir}>
                 $<INSTALL_INTERFACE:include/SCDAT/Tools/${module}>
         )
@@ -62,6 +75,7 @@ foreach(module IN LISTS TOOLS_MODULES)
         add_library(Tools_${module} INTERFACE)
         target_include_directories(Tools_${module}
             INTERFACE
+                $<BUILD_INTERFACE:${_dir}/include>
                 $<BUILD_INTERFACE:${_dir}>
                 $<INSTALL_INTERFACE:include/SCDAT/Tools/${module}>
         )
@@ -83,4 +97,93 @@ endif()
 
 if(TARGET Tools_Particle AND TARGET Tools_Geometry)
     target_link_libraries(Tools_Particle PUBLIC Tools_Geometry)
+endif()
+
+if(TARGET Tools_Solver)
+    target_link_libraries(Tools_Solver
+        PUBLIC
+            Tools_Basic
+            Tools_Geometry
+            Tools_Mesh
+    )
+endif()
+
+if(TARGET Tools_Material)
+    target_link_libraries(Tools_Material
+        PUBLIC
+            Tools_Basic
+            Tools_Geometry
+            Tools_Mesh
+    )
+endif()
+
+if(TARGET Tools_Diagnostics)
+    target_link_libraries(Tools_Diagnostics
+        PUBLIC
+            Tools_Basic
+            Tools_Geometry
+            Tools_Particle
+    )
+endif()
+
+if(TARGET Tools_Output)
+    target_link_libraries(Tools_Output
+        PUBLIC
+            Tools_Basic
+    )
+endif()
+
+if(TARGET Tools_Coupling)
+    target_link_libraries(Tools_Coupling
+        PUBLIC
+            Tools_Basic
+    )
+endif()
+
+if(TARGET Tools_FieldSolver)
+    target_link_libraries(Tools_FieldSolver
+        PUBLIC
+            Tools_Basic
+            Tools_Geometry
+            Tools_Material
+            Tools_Mesh
+            Tools_Solver
+    )
+endif()
+
+if(TARGET Tools_Particle)
+    target_link_libraries(Tools_Particle
+        PUBLIC
+            Tools_Basic
+            Tools_Geometry
+            Tools_Mesh
+    )
+endif()
+
+if(TARGET Tools_Boundary)
+    target_link_libraries(Tools_Boundary
+        PUBLIC
+            Tools_Geometry
+            Tools_Particle
+    )
+endif()
+
+if(TARGET Tools_Parallel)
+    target_link_libraries(Tools_Parallel
+        PUBLIC
+            Tools_Solver
+    )
+endif()
+
+if(TARGET Tools_PICcore)
+    target_link_libraries(Tools_PICcore
+        PUBLIC
+            Tools_Basic
+            Tools_Boundary
+            Tools_FieldSolver
+            Tools_Geometry
+            Tools_Mesh
+            Tools_Particle
+            Tools_Solver
+    )
 endif()

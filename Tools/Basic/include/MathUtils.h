@@ -70,7 +70,7 @@ enum class IntegrationMethod
  */
 template <typename T> inline T safeDivide(T numerator, T denominator, T default_value = T{0})
 {
-    return (std::abs(denominator) > PIC_SPIS::Utils::Constants::ZERO_TOLERANCE)
+    return (std::abs(denominator) > SCDAT::Basic::Constants::PhysicsConstants::ZeroTolerance)
                ? (numerator / denominator)
                : default_value;
 }
@@ -494,4 +494,4 @@ double besselJ1(double x);
 } // namespace Basic
 } // namespace SCDAT
 
-#endif // PIC_SPIS_UTILS_MATH_UTILS_H
+#endif // SCDAT_UTILS_MATH_UTILS_H

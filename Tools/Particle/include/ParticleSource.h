@@ -21,7 +21,7 @@ namespace Mesh
 {
 class Mesh;
 class VolMesh;
-using SurfaceMesh = Mesh;
+using SurfaceMesh = VolMesh;
 using VolumeMesh = VolMesh;
 } // namespace Mesh
 
@@ -40,13 +40,13 @@ using ParticleId = SCDAT::Particle::ParticleId;
  */
 enum class SpatialSamplingModel
 {
-    UNIFORM = 0,           ///< 均匀分布
-    DOUBLE_MAXWELL = 1,    ///< 双麦克斯韦分布
-    KAPPA = 2,             ///< Kappa分布
-    POWER_LAW = 3,         ///< 幂律分布
-    SINGLE_MAXWELL = 4,    ///< 单麦克斯韦分布
-    Q_DISTRIBUTION = 5,    ///< q-分布（Tsallis统计）
-    MAXWELL_BOLTZMANN = 6  ///< 麦克斯韦-玻尔兹曼分布
+    UNIFORM = 0,          ///< 均匀分布
+    DOUBLE_MAXWELL = 1,   ///< 双麦克斯韦分布
+    KAPPA = 2,            ///< Kappa分布
+    POWER_LAW = 3,        ///< 幂律分布
+    SINGLE_MAXWELL = 4,   ///< 单麦克斯韦分布
+    Q_DISTRIBUTION = 5,   ///< q-分布（Tsallis统计）
+    MAXWELL_BOLTZMANN = 6 ///< 麦克斯韦-玻尔兹曼分布
 };
 
 /**
@@ -54,22 +54,22 @@ enum class SpatialSamplingModel
  */
 struct SamplingParameters
 {
-    double density = 1.0e15;           ///< m^-3
-    double bulk_speed = 2.0e5;         ///< m/s
-    double thermal_speed = 5.0e4;      ///< m/s (cold)
-    double hot_thermal_speed = 2.0e5;  ///< m/s (hot)
-    double hot_fraction = 0.2;         ///< [0, 1]
-    double kappa = 3.5;                ///< > 1.5
-    double power_law_index = 2.6;      ///< > 1
-    double spatial_scale = 0.05;       ///< m
-    double min_spatial_scale = 1.0e-4; ///< m
-    double q_parameter = 1.5;          ///< q-分布参数 (Tsallis)
+    double density = 1.0e15;             ///< m^-3
+    double bulk_speed = 2.0e5;           ///< m/s
+    double thermal_speed = 5.0e4;        ///< m/s (cold)
+    double hot_thermal_speed = 2.0e5;    ///< m/s (hot)
+    double hot_fraction = 0.2;           ///< [0, 1]
+    double kappa = 3.5;                  ///< > 1.5
+    double power_law_index = 2.6;        ///< > 1
+    double spatial_scale = 0.05;         ///< m
+    double min_spatial_scale = 1.0e-4;   ///< m
+    double q_parameter = 1.5;            ///< q-分布参数 (Tsallis)
     double characteristic_energy = 10.0; ///< 特征能量 (eV)
 };
 
-
 /**
  * @brief 拟合摘要
+ * 用空间等离子体观测数据拟合粒子分布模型时，返回本次拟合的结果、选中的模型、各模型得分以及相关说明
  */
 struct FitSummary
 {
@@ -77,7 +77,7 @@ struct FitSummary
     SpatialSamplingModel selected_model = SpatialSamplingModel::UNIFORM;
     double score_double_maxwell = 0.0;
     double score_kappa = 0.0;
-    double score_power_law = 0.0;
+    double score_power_law = 0.0; ///< 记录本次拟合的得分（分数越高代表拟合效果越好）
     std::string message;
 };
 
@@ -90,7 +90,7 @@ class ParticleSource
     ParticleSource(const std::string& name, const ParticleType& particleType);
     virtual ~ParticleSource();
 
-    // 原有接口（保持不变）
+    // 原有接口
     void setEnabled(bool enabled);
     bool isEnabled() const;
 
@@ -107,7 +107,7 @@ class ParticleSource
 
     virtual size_t emitParticles(std::vector<ParticleClass>& particles, double dt) = 0;
 
-    // 新增：分布采样与拟合接口
+    // 分布采样与拟合接口
     void setSamplingModel(SpatialSamplingModel model);
     SpatialSamplingModel getSamplingModel() const;
 
@@ -158,7 +158,6 @@ class SurfaceParticleSource : public ParticleSource
     SurfaceParticleSource(const std::string& name, const ParticleType& particleType,
                           const std::shared_ptr<Mesh::SurfaceMesh>& mesh);
 
-    // 原有接口（保持不变）
     void setTemperature(double temperature);
     void setWorkFunction(double workFunction);
     void setEmissionArea(const std::vector<size_t>& elementIndices);
@@ -190,7 +189,6 @@ class VolumeParticleSource : public ParticleSource
     VolumeParticleSource(const std::string& name, const ParticleType& particleType,
                          const std::shared_ptr<Mesh::VolumeMesh>& mesh);
 
-    // 原有接口（保持不变）
     void setDensity(double density);
     void setTemperature(double temperature);
     void setEmissionRegion(const std::vector<size_t>& elementIndices);
@@ -220,8 +218,6 @@ class BeamParticleSource : public ParticleSource
   public:
     BeamParticleSource(const std::string& name, const ParticleType& particleType,
                        const Point3D& origin, const Vector3D& direction);
-
-    // 原有接口（保持不变）
     void setBeamEnergy(double energy);
     void setBeamRadius(double radius);
     void setDivergenceAngle(double angle);

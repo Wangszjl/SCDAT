@@ -79,7 +79,7 @@ SCDAT/
     ├── Internal Charging/
     ├── Plasma Analysis/
     ├── Surface Charging/
-    └── Vaccum Arc/
+    └── Vacuum Arc/
 ```
 
 ---

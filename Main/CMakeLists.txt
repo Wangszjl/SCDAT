@@ -17,9 +17,13 @@ set_property(
 # ── 公共链接依赖（所有入口共享）──────────────────────────────────────────────
 set(_SCDAT_LINK_LIBS
     SCDAT::Tools::Basic
+    SCDAT::Tools::Coupling
+    SCDAT::Tools::Diagnostics
     SCDAT::Tools::Interactions
+    SCDAT::Tools::Material
     SCDAT::Tools::Matrix
     SCDAT::Tools::Mesh
+    SCDAT::Tools::Output
     SCDAT::Tools::Parallel
     SCDAT::Tools::PICcore
     SCDAT::Tools::Scripts
@@ -29,7 +33,7 @@ set(_SCDAT_LINK_LIBS
     SCDAT::Toolkit::Internal_Charging
     SCDAT::Toolkit::Plasma_Analysis
     SCDAT::Toolkit::Surface_Charging
-    SCDAT::Toolkit::Vaccum_Arc
+    SCDAT::Toolkit::Vacuum_Arc
 )
 
 # ── 正式主程序：main.cpp → 可执行 SCDAT ─────────────────────────────────────
@@ -48,6 +52,10 @@ foreach(_src IN LISTS _extra_mains)
 
     add_executable(${_tgt} "${_src}")
     target_link_libraries(${_tgt} PRIVATE ${_SCDAT_LINK_LIBS})
+    if(_suffix STREQUAL "mesh_export")
+        # MinGW static link order is sensitive; append Geometry after Mesh consumers.
+        target_link_libraries(${_tgt} PRIVATE SCDAT::Tools::Geometry)
+    endif()
     target_include_directories(${_tgt} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
     message(STATUS "[SCDAT] Extra entry: ${_tgt} <- ${_src}")

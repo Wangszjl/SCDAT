@@ -14,8 +14,8 @@
 #include "../Basic/include/Constants.h"
 #include "../Geometry/include/Point3D.h"
 #include "../Geometry/include/Vector3D.h"
-// #include "PIC_SPIS/core/ErrorHandling.h"
-// #include "PIC_SPIS/core/Logger.h"
+// #include "SCDAT/core/ErrorHandling.h"
+// #include "SCDAT/core/Logger.h"
 #include <algorithm>
 #include <array>
 #include <cmath>

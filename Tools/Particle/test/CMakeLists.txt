@@ -22,3 +22,7 @@ add_executable(ParticleSource_test ParticleSource_test.cpp)
 target_link_libraries(ParticleSource_test PRIVATE SCDAT::Tools::Particle SCDAT::Tools::Geometry GTest::gtest_main)
 gtest_discover_tests(ParticleSource_test)
 
+add_executable(HighOrderParticlePusher_test HighOrderParticlePusher_test.cpp)
+target_link_libraries(HighOrderParticlePusher_test PRIVATE SCDAT::Tools::Particle SCDAT::Tools::Geometry GTest::gtest_main)
+gtest_discover_tests(HighOrderParticlePusher_test)
+

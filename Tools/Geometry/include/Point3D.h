@@ -550,6 +550,11 @@ inline std::istream& operator>>(std::istream& is, Point3D& point)
 } // namespace Geometry
 } // namespace SCDAT
 
+namespace SCDAT
+{
+namespace Utils = Geometry;
+}
+
 // 添加std::hash特化支持
 namespace std
 {

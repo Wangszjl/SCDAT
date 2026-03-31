@@ -4,6 +4,7 @@
  */
 
 #include "../include/ParticlePusher.h"
+#include "../include/HighOrderParticlePusher.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1034,6 +1035,11 @@ std::unique_ptr<LeapfrogAlgorithm> ParticlePusherFactory::createLeapfrog(double 
     return std::make_unique<LeapfrogAlgorithm>(dt);
 }
 
+std::unique_ptr<HighOrderParticlePusher> ParticlePusherFactory::createHighOrder(double dt)
+{
+    return std::make_unique<HighOrderParticlePusher>(dt);
+}
+
 std::unique_ptr<ParallelParticlePusher>
 ParticlePusherFactory::createParallel(double dt, ParallelParticlePusher::PushAlgorithm algorithm,
                                       int num_threads)
@@ -1056,6 +1062,10 @@ ParticlePusherPtr ParticlePusherFactory::createPusher(const std::string& algorit
     if (algorithm == "leapfrog")
     {
         return createLeapfrog(dt);
+    }
+    if (algorithm == "high_order")
+    {
+        return createHighOrder(dt);
     }
     if (algorithm == "parallel_boris")
     {

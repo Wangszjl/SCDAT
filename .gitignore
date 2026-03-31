@@ -1,4 +1,5 @@
 build/
+build_codex/
 documentation/
 ref/
 results/
@@ -45,3 +46,4 @@ DartConfiguration.tcl
 # Python 字节码
 __pycache__/
 *.py[cod]
+tmp_boundary_header_check.cpp

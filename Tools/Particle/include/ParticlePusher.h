@@ -8,6 +8,7 @@
 
 #include "../Geometry/include/Point3D.h"
 #include "../Geometry/include/Vector3D.h"
+#include "../../Boundary/include/BoundaryType.h"
 #include "ParticleManager.h"
 #include <cstddef>
 #include <functional>
@@ -35,6 +36,7 @@ class ParticlePusher;
 class BorisAlgorithm;
 class EnhancedBorisAlgorithm;
 class LeapfrogAlgorithm;
+class HighOrderParticlePusher;
 class ParallelParticlePusher;
 class BoundaryHandler;
 
@@ -42,22 +44,7 @@ using Point3D = SCDAT::Geometry::Point3D;
 using Vector3D = SCDAT::Geometry::Vector3D;
 using ParticlePusherPtr = std::shared_ptr<ParticlePusher>;
 using FieldFunction = std::function<Vector3D(const Point3D&)>;
-
-/**
- * @brief 边界条件类型枚举
- * @details 多种边界条件类型 
- */
-enum class BoundaryType
-{
-    REFLECTING = 0, ///< 反射边界 
-    ABSORBING = 1,  ///< 吸收边界
-    PERIODIC = 2,   ///< 周期边界
-    OPEN = 3,       ///< 开放边界
-    STANDARD = 4,   ///< 标准边界条件
-    MODIFIED =5,    ///< 修改的边界条件
-    RADIAL = 6,     ///< 径向边界条件
-    CYLINDRICAL_PERIODIC = 7 ///< 柱坐标周期边界
-};
+using BoundaryType = SCDAT::ParticleBoundaryType;
 
 /**
  * @brief 坐标系类型枚举
@@ -513,6 +500,7 @@ class ParticlePusherFactory
      * @brief 创建Leapfrog算法推进器 / Create Leapfrog algorithm pusher
      */
     static std::unique_ptr<LeapfrogAlgorithm> createLeapfrog(double dt);
+    static std::unique_ptr<HighOrderParticlePusher> createHighOrder(double dt);
     static std::unique_ptr<ParallelParticlePusher>
     createParallel(double dt,
                    ParallelParticlePusher::PushAlgorithm algorithm =

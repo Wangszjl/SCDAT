@@ -4,6 +4,8 @@
  */
 
 #include "../include/ParticleSource.h"
+#include "../../Basic/include/Constants.h"
+#include "../../Mesh/include/MeshParsing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,22 +20,33 @@ namespace Particle
 
 namespace
 {
+using SCDAT::Basic::Constants::MathConstants;
+using SCDAT::Basic::Constants::PhysicsConstants;
 
-constexpr double kBoltzmann = 1.380649e-23;
-constexpr double kElementaryCharge = 1.602176634e-19;
-constexpr double kPi = 3.14159265358979323846;
-
+/**
+ * @brief 获取线程局部随机数引擎。
+ * @details 每个线程独立维护一个 mt19937，避免多线程下共享 RNG 引起竞争与相关性问题。
+ */
 std::mt19937& globalRng()
 {
     thread_local std::mt19937 rng(std::random_device{}());
     return rng;
 }
 
+/**
+ * @brief 将数值约束为正值。
+ * @param value 待检查数值。
+ * @param fallback 当 value 非正时返回的回退值。
+ */
 double clampPositive(double value, double fallback)
 {
     return value > 0.0 ? value : fallback;
 }
 
+/**
+ * @brief 根据粒子类型返回质量（kg）。
+ * @details 电子类粒子使用电子质量，离子类粒子使用质子质量；未知类型按质子质量处理。
+ */
 double getParticleTypeMass(ParticleType type)
 {
     switch (type)
@@ -43,30 +56,40 @@ double getParticleTypeMass(ParticleType type)
     case ParticleType::SECONDARY_ELECTRON:
     case ParticleType::THERMAL_ELECTRON:
     case ParticleType::FIELD_EMISSION_ELECTRON:
-        return 9.10938356e-31;
+        return PhysicsConstants::ElectronMass;
     case ParticleType::ION:
     case ParticleType::POSITIVE_ION:
     case ParticleType::NEGATIVE_ION:
     case ParticleType::MOLECULAR_ION:
     case ParticleType::CLUSTER_ION:
-        return 1.6726219e-27;
+        return PhysicsConstants::ProtonMass;
     default:
-        return 1.6726219e-27;
+        return PhysicsConstants::ProtonMass;
     }
 }
 
+/**
+ * @brief 在单位球面上进行均匀方向采样。
+ * @return 长度为 1 的随机方向向量。
+ */
 Vector3D randomUnitVector()
 {
     auto& rng = globalRng();
     std::uniform_real_distribution<double> u(0.0, 1.0);
 
     const double mu = 2.0 * u(rng) - 1.0;
-    const double phi = 2.0 * kPi * u(rng);
+    const double phi = 2.0 * MathConstants::Pi * u(rng);
     const double r_xy = std::sqrt(std::max(0.0, 1.0 - mu * mu));
 
     return Vector3D(r_xy * std::cos(phi), r_xy * std::sin(phi), mu);
 }
 
+/**
+ * @brief 计算两组序列的均方根误差（RMSE）。
+ * @param y_true 真实值序列。
+ * @param y_pred 预测值序列。
+ * @return 当输入非法时返回 0，否则返回 RMSE。
+ */
 double rmse(const std::vector<double>& y_true, const std::vector<double>& y_pred)
 {
     if (y_true.empty() || y_true.size() != y_pred.size())
@@ -83,8 +106,80 @@ double rmse(const std::vector<double>& y_true, const std::vector<double>& y_pred
     return std::sqrt(e2 / static_cast<double>(y_true.size()));
 }
 
+bool isFinitePositive(double value)
+{
+    return std::isfinite(value) && value > 0.0;
+}
+
+size_t selectWeightedElementByArea(const std::vector<size_t>& element_indices,
+                                   const std::shared_ptr<SCDAT::Mesh::SurfaceMesh>& mesh,
+                                   double total_area)
+{
+    if (!mesh || element_indices.empty() || !isFinitePositive(total_area))
+    {
+        return 0;
+    }
+
+    auto& rng = globalRng();
+    std::uniform_real_distribution<double> u(0.0, total_area);
+    const double pick = u(rng);
+
+    double accum = 0.0;
+    for (size_t idx : element_indices)
+    {
+        const double area = mesh->getElementArea(idx);
+        if (!isFinitePositive(area))
+        {
+            continue;
+        }
+
+        accum += area;
+        if (pick <= accum)
+        {
+            return idx;
+        }
+    }
+
+    return element_indices.back();
+}
+
+size_t selectWeightedElementByVolume(const std::vector<size_t>& element_indices,
+                                     const std::shared_ptr<SCDAT::Mesh::VolumeMesh>& mesh,
+                                     double total_volume)
+{
+    if (!mesh || element_indices.empty() || !isFinitePositive(total_volume))
+    {
+        return 0;
+    }
+
+    auto& rng = globalRng();
+    std::uniform_real_distribution<double> u(0.0, total_volume);
+    const double pick = u(rng);
+
+    double accum = 0.0;
+    for (size_t idx : element_indices)
+    {
+        const double volume = mesh->getElementVolume(idx);
+        if (!isFinitePositive(volume))
+        {
+            continue;
+        }
+
+        accum += volume;
+        if (pick <= accum)
+        {
+            return idx;
+        }
+    }
+
+    return element_indices.back();
+}
+
 } // namespace
 
+/**
+ * @brief 构造粒子源基类并初始化默认运行参数。
+ */
 ParticleSource::ParticleSource(const std::string& name, const ParticleType& particleType)
     : name_(name), particleType_(particleType), enabled_(true), emissionRate_(0.0),
       totalEmitted_(0), currentTime_(0.0), startTime_(0.0), stopTime_(-1.0), timeAcceleration_(1.0),
@@ -92,18 +187,31 @@ ParticleSource::ParticleSource(const std::string& name, const ParticleType& part
 {
 }
 
+/**
+ * @brief 粒子源析构函数。
+ */
 ParticleSource::~ParticleSource() = default;
 
+/**
+ * @brief 启用或禁用粒子源。
+ */
 void ParticleSource::setEnabled(bool enabled)
 {
     enabled_ = enabled;
 }
 
+/**
+ * @brief 查询粒子源是否启用。
+ */
 bool ParticleSource::isEnabled() const
 {
     return enabled_;
 }
 
+/**
+ * @brief 设置发射率（粒子数/秒）。
+ * @throws std::invalid_argument 当 rate < 0。
+ */
 void ParticleSource::setEmissionRate(double rate)
 {
     if (rate < 0.0)
@@ -113,11 +221,18 @@ void ParticleSource::setEmissionRate(double rate)
     emissionRate_ = rate;
 }
 
+/**
+ * @brief 获取当前发射率。
+ */
 double ParticleSource::getEmissionRate() const
 {
     return emissionRate_;
 }
 
+/**
+ * @brief 设置时间窗 [startTime, stopTime)。
+ * @details 当 stopTime < 0 时表示无结束时刻。
+ */
 void ParticleSource::setTimeWindow(double startTime, double stopTime)
 {
     if (stopTime >= 0.0 && stopTime <= startTime)
@@ -128,6 +243,9 @@ void ParticleSource::setTimeWindow(double startTime, double stopTime)
     stopTime_ = stopTime;
 }
 
+/**
+ * @brief 判断给定时刻粒子源是否处于可发射状态。
+ */
 bool ParticleSource::isActiveAtTime(double time) const
 {
     if (!enabled_)
@@ -145,36 +263,58 @@ bool ParticleSource::isActiveAtTime(double time) const
     return true;
 }
 
+/**
+ * @brief 推进粒子源内部时钟。
+ */
 void ParticleSource::updateTime(double dt)
 {
     currentTime_ += dt;
 }
 
+/**
+ * @brief 获取该粒子源累计发射总数。
+ */
 size_t ParticleSource::getTotalEmitted() const
 {
     return totalEmitted_;
 }
 
+/**
+ * @brief 获取粒子源名称。
+ */
 const std::string& ParticleSource::getName() const
 {
     return name_;
 }
 
+/**
+ * @brief 获取粒子类型。
+ */
 const ParticleType& ParticleSource::getParticleType() const
 {
     return particleType_;
 }
 
+/**
+ * @brief 设置空间/速度采样模型。
+ */
 void ParticleSource::setSamplingModel(SpatialSamplingModel model)
 {
     sampling_model_ = model;
 }
 
+/**
+ * @brief 获取当前采样模型。
+ */
 SpatialSamplingModel ParticleSource::getSamplingModel() const
 {
     return sampling_model_;
 }
 
+/**
+ * @brief 设置采样参数并进行物理合理性约束。
+ * @details 对密度、热速度、尺度长度等参数做正值或区间裁剪，避免后续采样出现数值异常。
+ */
 void ParticleSource::setSamplingParameters(const SamplingParameters& params)
 {
     sampling_params_ = params;
@@ -189,14 +329,22 @@ void ParticleSource::setSamplingParameters(const SamplingParameters& params)
     sampling_params_.min_spatial_scale =
         std::clamp(sampling_params_.min_spatial_scale, 1.0e-7, sampling_params_.spatial_scale);
     sampling_params_.q_parameter = std::clamp(sampling_params_.q_parameter, 1.01, 3.0);
-    sampling_params_.characteristic_energy = clampPositive(sampling_params_.characteristic_energy, 10.0);
+    sampling_params_.characteristic_energy =
+        clampPositive(sampling_params_.characteristic_energy, 10.0);
 }
 
+/**
+ * @brief 获取当前采样参数。
+ */
 const SamplingParameters& ParticleSource::getSamplingParameters() const
 {
     return sampling_params_;
 }
 
+/**
+ * @brief 设置观测能谱数据。
+ * @throws std::invalid_argument 当 energy_ev 与 intensity 长度不一致。
+ */
 void ParticleSource::setObservedSpectrum(const std::vector<double>& energy_ev,
                                          const std::vector<double>& intensity)
 {
@@ -208,6 +356,10 @@ void ParticleSource::setObservedSpectrum(const std::vector<double>& energy_ev,
     observed_intensity_ = intensity;
 }
 
+/**
+ * @brief 设置探测器电荷剖面。
+ * @throws std::invalid_argument 当 radius 与 charge_density 长度不一致。
+ */
 void ParticleSource::setDetectorChargeProfile(const std::vector<double>& radius,
                                               const std::vector<double>& charge_density)
 {
@@ -219,6 +371,13 @@ void ParticleSource::setDetectorChargeProfile(const std::vector<double>& radius,
     detector_charge_density_ = charge_density;
 }
 
+/**
+ * @brief 基于观测能谱自动拟合采样模型。
+ * @details
+ * 1) 构造双麦克斯韦、Kappa、幂律三种候选模型；
+ * 2) 通过 RMSE 评分选择最优模型；
+ * 3) 反写热速度、kappa、幂律指数、空间尺度等参数。
+ */
 FitSummary ParticleSource::fitSamplingModelFromObservations()
 {
     FitSummary summary;
@@ -227,7 +386,7 @@ FitSummary ParticleSource::fitSamplingModelFromObservations()
     {
         summary.message = "观测能谱数据不足，保留当前分布";
         return summary;
-    }
+    } // 如果观测能谱数据点数不足5个，直接返回，提示数据不足
 
     const size_t n = observed_energy_ev_.size();
     std::vector<double> model_double(n, 0.0);
@@ -243,12 +402,14 @@ FitSummary ParticleSource::fitSamplingModelFromObservations()
         mean_e += observed_energy_ev_[i] * w;
     }
     mean_e = sum_w > 0.0 ? mean_e / sum_w : 10.0;
+    // 计算观测能谱的加权平均能量mean_e，权重为强度
 
     double e_split = mean_e;
     double cold_sum = 0.0;
     double hot_sum = 0.0;
     double cold_w = 0.0;
     double hot_w = 0.0;
+    // 用平均能量作为冷热能区分界点，对观测数据进行简单划分，统计冷热区的能量加权和与权重总和，为后续双麦克斯韦拟合提供初始参数估计依据。
 
     for (size_t i = 0; i < n; ++i)
     {
@@ -265,12 +426,14 @@ FitSummary ParticleSource::fitSamplingModelFromObservations()
             hot_w += w;
         }
     }
+    // 根据冷热区的能量加权和与权重总和，估计双麦克斯韦分布的冷、热组分温度（t1、t2）和热组分占比（hot_fraction）。同时对拟合得到的kappa分布参数和幂律指数进行合理性约束，避免数值异常。
 
     const double t1 =
         cold_w > 0.0 ? std::max(1e-6, cold_sum / cold_w) : std::max(1e-6, mean_e * 0.5);
     const double t2 = hot_w > 0.0 ? std::max(t1, hot_sum / hot_w) : std::max(t1, mean_e * 1.5);
     const double hot_fraction = sum_w > 0.0 ? std::clamp(hot_w / sum_w, 0.02, 0.98) : 0.2;
-
+    // 计算冷、热区的平均能量t1、t2，并做下限保护；计算热组分占比hot_fraction，并限制在[0.02,
+    // 0.98]范围内，避免极端分布。
     double sx = 0.0;
     double sy = 0.0;
     double sxx = 0.0;
@@ -286,6 +449,7 @@ FitSummary ParticleSource::fitSamplingModelFromObservations()
         sxy += x * y;
         m += 1.0;
     }
+    // 对后半段能谱做对数线性回归，拟合幂律斜率，并据此估计幂律指数。通过对拟合结果进行合理性约束，确保幂律指数在物理上有意义的范围内。
 
     double slope = -2.5;
     if (m > 2.0)
@@ -311,6 +475,7 @@ FitSummary ParticleSource::fitSamplingModelFromObservations()
 
         model_power[i] = std::pow(e + 1e-3, -fitted_power);
     }
+    // 计算三种模型在每个能量点的理论值，分别为双麦克斯韦、Kappa和幂律分布。通过对模型值进行归一化，使其总强度与观测数据一致，确保后续的RMSE评分具有可比性。
 
     double norm_obs = std::accumulate(observed_intensity_.begin(), observed_intensity_.end(), 0.0);
     norm_obs = norm_obs > 0.0 ? norm_obs : 1.0;
@@ -348,8 +513,8 @@ FitSummary ParticleSource::fitSamplingModelFromObservations()
     sampling_params_.kappa = fitted_kappa;
 
     const double mass = getParticleTypeMass(particleType_);
-    const double cold_j = t1 * kElementaryCharge;
-    const double hot_j = t2 * kElementaryCharge;
+    const double cold_j = t1 * PhysicsConstants::ElementaryCharge;
+    const double hot_j = t2 * PhysicsConstants::ElementaryCharge;
     sampling_params_.thermal_speed = std::sqrt(2.0 * cold_j / mass);
     sampling_params_.hot_thermal_speed = std::sqrt(2.0 * hot_j / mass);
 
@@ -378,6 +543,9 @@ FitSummary ParticleSource::fitSamplingModelFromObservations()
     return summary;
 }
 
+/**
+ * @brief 批量采样空间位置。
+ */
 std::vector<Point3D> ParticleSource::sampleSpatialPositions(size_t count) const
 {
     std::vector<Point3D> out;
@@ -389,6 +557,10 @@ std::vector<Point3D> ParticleSource::sampleSpatialPositions(size_t count) const
     return out;
 }
 
+/**
+ * @brief 批量采样速度向量。
+ * @details 默认首选方向为 +Z。
+ */
 std::vector<Vector3D> ParticleSource::sampleVelocityVectors(size_t count) const
 {
     std::vector<Vector3D> out;
@@ -400,6 +572,10 @@ std::vector<Vector3D> ParticleSource::sampleVelocityVectors(size_t count) const
     return out;
 }
 
+/**
+ * @brief 按当前空间模型采样单个空间点。
+ * @details 先按模型生成半径，再与均匀方向向量组合得到 3D 位置偏移。
+ */
 Point3D ParticleSource::sampleSpatialPointByModel() const
 {
     auto& rng = globalRng();
@@ -480,6 +656,11 @@ Point3D ParticleSource::sampleSpatialPointByModel() const
     return Point3D(dir.x() * r, dir.y() * r, dir.z() * r);
 }
 
+/**
+ * @brief 按当前模型采样单个速度向量。
+ * @param preferred_direction 首选漂移方向；若为零向量则自动随机方向。
+ * @details 返回值 = 体漂移速度 + 热运动随机项。
+ */
 Vector3D ParticleSource::sampleVelocityByModel(const Vector3D& preferred_direction) const
 {
     auto& rng = globalRng();
@@ -534,6 +715,10 @@ Vector3D ParticleSource::sampleVelocityByModel(const Vector3D& preferred_directi
     return bulk + random_part;
 }
 
+/**
+ * @brief 构造表面粒子源。
+ * @throws std::invalid_argument 当 mesh 为空。
+ */
 SurfaceParticleSource::SurfaceParticleSource(const std::string& name,
                                              const ParticleType& particleType,
                                              const std::shared_ptr<Mesh::SurfaceMesh>& mesh)
@@ -546,6 +731,9 @@ SurfaceParticleSource::SurfaceParticleSource(const std::string& name,
     }
 }
 
+/**
+ * @brief 设置表面温度（K）。
+ */
 void SurfaceParticleSource::setTemperature(double temperature)
 {
     if (temperature <= 0.0)
@@ -555,6 +743,9 @@ void SurfaceParticleSource::setTemperature(double temperature)
     temperature_ = temperature;
 }
 
+/**
+ * @brief 设置材料功函数（eV）。
+ */
 void SurfaceParticleSource::setWorkFunction(double workFunction)
 {
     if (workFunction < 0.0)
@@ -564,6 +755,9 @@ void SurfaceParticleSource::setWorkFunction(double workFunction)
     workFunction_ = workFunction;
 }
 
+/**
+ * @brief 设置发射面片集合并累计总面积。
+ */
 void SurfaceParticleSource::setEmissionArea(const std::vector<size_t>& elementIndices)
 {
     emissionElements_ = elementIndices;
@@ -575,6 +769,10 @@ void SurfaceParticleSource::setEmissionArea(const std::vector<size_t>& elementIn
     }
 }
 
+/**
+ * @brief 在时间步 dt 内发射表面粒子。
+ * @details 使用“期望值取整 + 小数概率补偿”的泊松近似策略决定整数粒子数。
+ */
 size_t SurfaceParticleSource::emitParticles(std::vector<ParticleClass>& particles, double dt)
 {
     if (!isActiveAtTime(currentTime_))
@@ -602,6 +800,10 @@ size_t SurfaceParticleSource::emitParticles(std::vector<ParticleClass>& particle
     return particlesToEmit;
 }
 
+/**
+ * @brief 生成一个表面发射粒子。
+ * @details 从发射面随机选单元，采样面内位置并沿法向构造麦克斯韦速度。
+ */
 ParticleClass SurfaceParticleSource::generateParticle()
 {
     auto& rng = globalRng();
@@ -609,8 +811,12 @@ ParticleClass SurfaceParticleSource::generateParticle()
     size_t elementIndex = 0;
     if (!emissionElements_.empty())
     {
-        std::uniform_int_distribution<size_t> elementDis(0, emissionElements_.size() - 1);
-        elementIndex = emissionElements_[elementDis(rng)];
+        elementIndex = selectWeightedElementByArea(emissionElements_, mesh_, totalArea_);
+    }
+    else if (mesh_ && mesh_->getElementCount() > 0)
+    {
+        std::uniform_int_distribution<size_t> elementDis(0, mesh_->getElementCount() - 1);
+        elementIndex = elementDis(rng);
     }
 
     const Point3D position = generateRandomPointInElement(elementIndex);
@@ -623,11 +829,16 @@ ParticleClass SurfaceParticleSource::generateParticle()
     return ParticleFactory::createParticle(particleType_, id, position, velocity, 1.0);
 }
 
+/**
+ * @brief 生成面外半空间麦克斯韦速度。
+ * @details 若速度指向表面内部，则对法向分量镜像反射，保证粒子向外发射。
+ */
 Vector3D SurfaceParticleSource::generateMaxwellianVelocity(const Vector3D& normal)
 {
     auto& rng = globalRng();
     const double mass = getParticleTypeMass(particleType_);
-    const double thermalVelocity = std::sqrt(kBoltzmann * temperature_ / mass);
+    const double thermalVelocity =
+        std::sqrt(PhysicsConstants::BoltzmannConstant * temperature_ / mass);
 
     std::normal_distribution<double> normalDis(0.0, thermalVelocity);
     Vector3D velocity(normalDis(rng), normalDis(rng), normalDis(rng));
@@ -640,35 +851,51 @@ Vector3D SurfaceParticleSource::generateMaxwellianVelocity(const Vector3D& norma
     return velocity;
 }
 
+/**
+ * @brief 计算面元面积。
+ */
 double SurfaceParticleSource::calculateElementArea(size_t elementIndex) const
 {
-    (void)elementIndex;
-    return 1.0e-6;
-}
-
-Point3D SurfaceParticleSource::generateRandomPointInElement(size_t elementIndex) const
-{
-    (void)elementIndex;
-    auto& rng = globalRng();
-    std::uniform_real_distribution<double> u(0.0, 1.0);
-
-    double a = u(rng);
-    double b = u(rng);
-    if (a + b > 1.0)
+    if (!mesh_)
     {
-        a = 1.0 - a;
-        b = 1.0 - b;
+        return 1.0e-6;
     }
 
-    return Point3D(a, b, 0.0);
+    const double area = mesh_->getElementArea(elementIndex);
+    return isFinitePositive(area) ? area : 1.0e-6;
 }
 
+/**
+ * @brief 在指定表面单元内生成随机点。
+ */
+Point3D SurfaceParticleSource::generateRandomPointInElement(size_t elementIndex) const
+{
+    if (!mesh_)
+    {
+        return Point3D(0.0, 0.0, 0.0);
+    }
+
+    return mesh_->getRandomPointInElement(elementIndex);
+}
+
+/**
+ * @brief 计算面元法向。
+ */
 Vector3D SurfaceParticleSource::calculateElementNormal(size_t elementIndex) const
 {
-    (void)elementIndex;
-    return Vector3D(0.0, 0.0, 1.0);
+    if (!mesh_)
+    {
+        return Vector3D(0.0, 0.0, 1.0);
+    }
+
+    const Vector3D n = mesh_->getElementNormal(elementIndex);
+    return n.magnitude() > 0.0 ? n.normalized() : Vector3D(0.0, 0.0, 1.0);
 }
 
+/**
+ * @brief 构造体积粒子源。
+ * @throws std::invalid_argument 当 mesh 为空。
+ */
 VolumeParticleSource::VolumeParticleSource(const std::string& name,
                                            const ParticleType& particleType,
                                            const std::shared_ptr<Mesh::VolumeMesh>& mesh)
@@ -681,6 +908,9 @@ VolumeParticleSource::VolumeParticleSource(const std::string& name,
     }
 }
 
+/**
+ * @brief 设置体源密度。
+ */
 void VolumeParticleSource::setDensity(double density)
 {
     if (density < 0.0)
@@ -690,6 +920,9 @@ void VolumeParticleSource::setDensity(double density)
     density_ = density;
 }
 
+/**
+ * @brief 设置体源温度（K）。
+ */
 void VolumeParticleSource::setTemperature(double temperature)
 {
     if (temperature <= 0.0)
@@ -699,6 +932,9 @@ void VolumeParticleSource::setTemperature(double temperature)
     temperature_ = temperature;
 }
 
+/**
+ * @brief 设置发射体元并累计总体积。
+ */
 void VolumeParticleSource::setEmissionRegion(const std::vector<size_t>& elementIndices)
 {
     emissionElements_ = elementIndices;
@@ -710,6 +946,9 @@ void VolumeParticleSource::setEmissionRegion(const std::vector<size_t>& elementI
     }
 }
 
+/**
+ * @brief 在时间步 dt 内发射体积粒子。
+ */
 size_t VolumeParticleSource::emitParticles(std::vector<ParticleClass>& particles, double dt)
 {
     if (!isActiveAtTime(currentTime_))
@@ -737,6 +976,10 @@ size_t VolumeParticleSource::emitParticles(std::vector<ParticleClass>& particles
     return particlesToEmit;
 }
 
+/**
+ * @brief 生成一个体发射粒子。
+ * @details 在体元内取基准点，再叠加模型空间偏移，速度由模型速度采样得到。
+ */
 ParticleClass VolumeParticleSource::generateParticle()
 {
     auto& rng = globalRng();
@@ -744,8 +987,12 @@ ParticleClass VolumeParticleSource::generateParticle()
     size_t elementIndex = 0;
     if (!emissionElements_.empty())
     {
-        std::uniform_int_distribution<size_t> elementDis(0, emissionElements_.size() - 1);
-        elementIndex = emissionElements_[elementDis(rng)];
+        elementIndex = selectWeightedElementByVolume(emissionElements_, mesh_, totalVolume_);
+    }
+    else if (mesh_ && mesh_->getElementCount() > 0)
+    {
+        std::uniform_int_distribution<size_t> elementDis(0, mesh_->getElementCount() - 1);
+        elementIndex = elementDis(rng);
     }
 
     const Point3D base_position = generateRandomPointInVolumeElement(elementIndex);
@@ -761,57 +1008,50 @@ ParticleClass VolumeParticleSource::generateParticle()
     return ParticleFactory::createParticle(particleType_, id, position, velocity, 1.0);
 }
 
+/**
+ * @brief 生成麦克斯韦热速度。
+ */
 Vector3D VolumeParticleSource::generateMaxwellianVelocity()
 {
     auto& rng = globalRng();
     const double mass = getParticleTypeMass(particleType_);
-    const double thermalVelocity = std::sqrt(kBoltzmann * temperature_ / mass);
+    const double thermalVelocity =
+        std::sqrt(PhysicsConstants::BoltzmannConstant * temperature_ / mass);
 
     std::normal_distribution<double> normalDis(0.0, thermalVelocity);
     return Vector3D(normalDis(rng), normalDis(rng), normalDis(rng));
 }
 
+/**
+ * @brief 计算体元体积。
+ */
 double VolumeParticleSource::calculateElementVolume(size_t elementIndex) const
 {
-    (void)elementIndex;
-    return 1.0e-9;
-}
-
-Point3D VolumeParticleSource::generateRandomPointInVolumeElement(size_t elementIndex) const
-{
-    (void)elementIndex;
-    auto& rng = globalRng();
-    std::uniform_real_distribution<double> u(0.0, 1.0);
-
-    double a = u(rng);
-    double b = u(rng);
-    double c = u(rng);
-
-    if (a + b + c > 1.0)
+    if (!mesh_)
     {
-        if (a + b > 1.0)
-        {
-            const double ta = a;
-            a = 1.0 - b - c;
-            b = 1.0 - ta - c;
-        }
-        else if (b + c > 1.0)
-        {
-            const double tc = c;
-            c = 1.0 - a - b;
-            b = 1.0 - a - tc;
-        }
-        else
-        {
-            const double ta = a;
-            a = 1.0 - b - c;
-            c = ta + b + c - 1.0;
-        }
+        return 1.0e-9;
     }
 
-    return Point3D(a, b, c);
+    const double volume = mesh_->getElementVolume(elementIndex);
+    return isFinitePositive(volume) ? volume : 1.0e-9;
 }
 
+/**
+ * @brief 在指定体单元内生成随机点。
+ */
+Point3D VolumeParticleSource::generateRandomPointInVolumeElement(size_t elementIndex) const
+{
+    if (!mesh_)
+    {
+        return Point3D(0.0, 0.0, 0.0);
+    }
+
+    return mesh_->getRandomPointInElement(elementIndex);
+}
+
+/**
+ * @brief 构造束流粒子源。
+ */
 BeamParticleSource::BeamParticleSource(const std::string& name, const ParticleType& particleType,
                                        const Point3D& origin, const Vector3D& direction)
     : ParticleSource(name, particleType), origin_(origin), direction_(direction.normalized()),
@@ -819,6 +1059,9 @@ BeamParticleSource::BeamParticleSource(const std::string& name, const ParticleTy
 {
 }
 
+/**
+ * @brief 设置束流能量（eV）。
+ */
 void BeamParticleSource::setBeamEnergy(double energy)
 {
     if (energy <= 0.0)
@@ -828,6 +1071,9 @@ void BeamParticleSource::setBeamEnergy(double energy)
     beamEnergy_ = energy;
 }
 
+/**
+ * @brief 设置束斑半径（m）。
+ */
 void BeamParticleSource::setBeamRadius(double radius)
 {
     if (radius <= 0.0)
@@ -837,6 +1083,9 @@ void BeamParticleSource::setBeamRadius(double radius)
     beamRadius_ = radius;
 }
 
+/**
+ * @brief 设置束流发散半角（rad）。
+ */
 void BeamParticleSource::setDivergenceAngle(double angle)
 {
     if (angle < 0.0)
@@ -846,6 +1095,9 @@ void BeamParticleSource::setDivergenceAngle(double angle)
     divergenceAngle_ = angle;
 }
 
+/**
+ * @brief 在时间步 dt 内发射束流粒子。
+ */
 size_t BeamParticleSource::emitParticles(std::vector<ParticleClass>& particles, double dt)
 {
     if (!isActiveAtTime(currentTime_))
@@ -873,13 +1125,17 @@ size_t BeamParticleSource::emitParticles(std::vector<ParticleClass>& particles, 
     return particlesToEmit;
 }
 
+/**
+ * @brief 生成一个束流粒子。
+ * @details 在束斑圆盘内均匀采样起点，方向按发散角扰动，再由能量换算速度模长。
+ */
 ParticleClass BeamParticleSource::generateParticle()
 {
     auto& rng = globalRng();
     std::uniform_real_distribution<double> u(0.0, 1.0);
 
     const double r = beamRadius_ * std::sqrt(u(rng));
-    const double theta = 2.0 * kPi * u(rng);
+    const double theta = 2.0 * MathConstants::Pi * u(rng);
 
     Vector3D perpendicular1;
     if (std::abs(direction_.x()) < 0.9)
@@ -899,7 +1155,7 @@ ParticleClass BeamParticleSource::generateParticle()
     if (divergenceAngle_ > 0.0)
     {
         const double divergence = divergenceAngle_ * u(rng);
-        const double azimuth = 2.0 * kPi * u(rng);
+        const double azimuth = 2.0 * MathConstants::Pi * u(rng);
 
         beam_direction = (perpendicular1 * (std::sin(divergence) * std::cos(azimuth)) +
                           perpendicular2 * (std::sin(divergence) * std::sin(azimuth)) +
@@ -908,7 +1164,7 @@ ParticleClass BeamParticleSource::generateParticle()
     }
 
     const double mass = getParticleTypeMass(particleType_);
-    const double speed = std::sqrt(2.0 * beamEnergy_ * kElementaryCharge / mass);
+    const double speed = std::sqrt(2.0 * beamEnergy_ * PhysicsConstants::ElementaryCharge / mass);
     const Vector3D velocity = beam_direction * speed;
 
     static ParticleId next_id = 2000;
@@ -917,9 +1173,19 @@ ParticleClass BeamParticleSource::generateParticle()
     return ParticleFactory::createParticle(particleType_, id, position, velocity, 1.0);
 }
 
+/**
+ * @brief 构造粒子源管理器。
+ */
 ParticleSourceManager::ParticleSourceManager() = default;
+
+/**
+ * @brief 析构粒子源管理器。
+ */
 ParticleSourceManager::~ParticleSourceManager() = default;
 
+/**
+ * @brief 添加粒子源并检查重名冲突。
+ */
 void ParticleSourceManager::addSource(std::shared_ptr<ParticleSource> source)
 {
     if (!source)
@@ -940,6 +1206,9 @@ void ParticleSourceManager::addSource(std::shared_ptr<ParticleSource> source)
     sources_.push_back(std::move(source));
 }
 
+/**
+ * @brief 按名称移除粒子源；不存在则忽略。
+ */
 void ParticleSourceManager::removeSource(const std::string& name)
 {
     auto it = std::find_if(sources_.begin(), sources_.end(),
@@ -951,6 +1220,10 @@ void ParticleSourceManager::removeSource(const std::string& name)
     }
 }
 
+/**
+ * @brief 按名称获取粒子源。
+ * @return 找到返回对象，否则返回 nullptr。
+ */
 std::shared_ptr<ParticleSource> ParticleSourceManager::getSource(const std::string& name)
 {
     auto it = std::find_if(sources_.begin(), sources_.end(),
@@ -959,6 +1232,9 @@ std::shared_ptr<ParticleSource> ParticleSourceManager::getSource(const std::stri
     return it != sources_.end() ? *it : nullptr;
 }
 
+/**
+ * @brief 触发所有已启用粒子源发射，并累计本步发射总数。
+ */
 size_t ParticleSourceManager::emitAllParticles(std::vector<ParticleClass>& particles, double dt)
 {
     size_t totalEmitted = 0;
@@ -972,6 +1248,9 @@ size_t ParticleSourceManager::emitAllParticles(std::vector<ParticleClass>& parti
     return totalEmitted;
 }
 
+/**
+ * @brief 推进所有粒子源内部时钟。
+ */
 void ParticleSourceManager::updateTime(double dt)
 {
     for (auto& source : sources_)
@@ -980,6 +1259,9 @@ void ParticleSourceManager::updateTime(double dt)
     }
 }
 
+/**
+ * @brief 按名称启用或禁用指定粒子源。
+ */
 void ParticleSourceManager::setSourceEnabled(const std::string& name, bool enabled)
 {
     auto source = getSource(name);
@@ -989,6 +1271,9 @@ void ParticleSourceManager::setSourceEnabled(const std::string& name, bool enabl
     }
 }
 
+/**
+ * @brief 获取所有粒子源名称列表。
+ */
 std::vector<std::string> ParticleSourceManager::getSourceNames() const
 {
     std::vector<std::string> names;
@@ -1000,16 +1285,25 @@ std::vector<std::string> ParticleSourceManager::getSourceNames() const
     return names;
 }
 
+/**
+ * @brief 获取管理器中粒子源数量。
+ */
 size_t ParticleSourceManager::getSourceCount() const
 {
     return sources_.size();
 }
 
+/**
+ * @brief 清空所有粒子源。
+ */
 void ParticleSourceManager::clearSources()
 {
     sources_.clear();
 }
 
+/**
+ * @brief 统计所有粒子源累计发射总数。
+ */
 size_t ParticleSourceManager::getTotalEmitted() const
 {
     size_t total = 0;

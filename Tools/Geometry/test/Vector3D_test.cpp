@@ -1,3 +1,11 @@
+/**
+ * @file Vector3D_test.cpp
+ * @brief Vector3D 单元测试
+ * @details
+ * 本文件验证向量代数与几何运算，包括：
+ * 点积/叉积、长度、夹角、投影、安全归一化、绕轴旋转。
+ */
+
 #include "../include/Vector3D.h"
 #include <cmath>
 #include <gtest/gtest.h>
@@ -9,6 +17,7 @@ namespace Geometry
 
 TEST(Vector3DTest, DotCrossAndLength)
 {
+    // 标准正交基测试：x × y = z。
     Vector3D x = Vector3D::unitX();
     Vector3D y = Vector3D::unitY();
 
@@ -23,6 +32,7 @@ TEST(Vector3DTest, DotCrossAndLength)
 
 TEST(Vector3DTest, AngleAndProjection)
 {
+    // 45° 夹角场景，便于检验反三角函数结果。
     Vector3D a(1.0, 1.0, 0.0);
     Vector3D b = Vector3D::unitX();
 
@@ -37,6 +47,7 @@ TEST(Vector3DTest, AngleAndProjection)
 
 TEST(Vector3DTest, SafeNormalizeZeroVector)
 {
+    // safeNormalized 对零向量应返回零向量而非抛异常。
     Vector3D zero = Vector3D::zero();
     Vector3D normalized = zero.safeNormalized();
 
@@ -47,6 +58,7 @@ TEST(Vector3DTest, SafeNormalizeZeroVector)
 
 TEST(Vector3DTest, RotateAroundAxis)
 {
+    // 绕 Z 轴旋转 90°：X 轴应旋到 Y 轴。
     Vector3D v = Vector3D::unitX();
     Vector3D axis = Vector3D::unitZ();
 

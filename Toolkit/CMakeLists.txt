@@ -11,7 +11,7 @@ set(TOOLKIT_MODULES
     "Internal_Charging|Internal Charging"
     "Plasma_Analysis|Plasma Analysis"
     "Surface_Charging|Surface Charging"
-    "Vaccum_Arc|Vaccum Arc"
+    "Vacuum_Arc|Vacuum Arc"
 )
 
 foreach(entry IN LISTS TOOLKIT_MODULES)
@@ -40,6 +40,9 @@ foreach(entry IN LISTS TOOLKIT_MODULES)
         "${_dir}/*.hxx"
     )
 
+    list(FILTER _sources EXCLUDE REGEX ".*/test/.*")
+    list(FILTER _headers EXCLUDE REGEX ".*/test/.*")
+
     # ── 注册库目标 ────────────────────────────────────────────────────────────
     if(_sources)
         # 目录非空：创建真实静态库
@@ -64,15 +67,28 @@ foreach(entry IN LISTS TOOLKIT_MODULES)
     # 链接到对应的 Tools 模块（示例通用依赖，可按需定制）
     if(_sources)
         target_link_libraries(Toolkit_${_target}
-            PRIVATE
+            PUBLIC
                 SCDAT::Tools::Basic
+                SCDAT::Tools::Coupling
+                SCDAT::Tools::Diagnostics
+                SCDAT::Tools::FieldSolver
+                SCDAT::Tools::Geometry
+                SCDAT::Tools::Material
                 SCDAT::Tools::Matrix
+                SCDAT::Tools::Mesh
+                SCDAT::Tools::Output
+                SCDAT::Tools::Particle
+                SCDAT::Tools::Solver
                 SCDAT::Tools::Vector
         )
     endif()
 
     # ── 命名空间别名：target_link_libraries(... SCDAT::Toolkit::Surface_Charging)
     add_library(SCDAT::Toolkit::${_target} ALIAS Toolkit_${_target})
+
+    if(_target STREQUAL "Vacuum_Arc" AND NOT TARGET SCDAT::Toolkit::Vaccum_Arc)
+        add_library(SCDAT::Toolkit::Vaccum_Arc ALIAS Toolkit_${_target})
+    endif()
 
     unset(_parts)
     unset(_target)

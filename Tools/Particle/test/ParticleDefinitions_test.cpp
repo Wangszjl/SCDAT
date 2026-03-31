@@ -1,3 +1,14 @@
+/**
+ * @file ParticleDefinitions_test.cpp
+ * @brief ParticleDefinitions / BorisAlgorithm 单元测试
+ * @details
+ * 覆盖粒子定义模块的关键路径：
+ * - 粒子工厂参数映射（电子/离子）；
+ * - 生命周期状态迁移；
+ * - Boris 推进器在纯电场和相对论开关下的行为；
+ * - toString 扩展字段输出。
+ */
+
 #include "../include/ParticleDefinitions.h"
 #include "../include/ParticlePusher.h"
 #include <gtest/gtest.h>
@@ -14,6 +25,7 @@ using SCDAT::Basic::Constants::PhysicsConstants;
 
 TEST(ParticleDefinitionsTest, FactoryCreateElectronUsesGlobalConstants)
 {
+    // 电子工厂应使用全局物理常量中的电子质量/电荷。
     Particle p = ParticleFactory::createElectron(1, SCDAT::Geometry::Point3D(0.0, 0.0, 0.0),
                                                  SCDAT::Geometry::Vector3D(1.0, 0.0, 0.0), 2.0);
 
@@ -25,6 +37,7 @@ TEST(ParticleDefinitionsTest, FactoryCreateElectronUsesGlobalConstants)
 
 TEST(ParticleDefinitionsTest, FactoryCreateIonAssignsSpecies)
 {
+    // 检查离子种类信息、质量数/电荷数与派生质量、电荷值一致性。
     Particle p = ParticleFactory::createIon(2, SCDAT::Geometry::Point3D(0.0, 0.0, 0.0),
                                             SCDAT::Geometry::Vector3D(0.0, 0.0, 0.0), 4, 2, 1.5);
 
@@ -38,6 +51,7 @@ TEST(ParticleDefinitionsTest, FactoryCreateIonAssignsSpecies)
 
 TEST(ParticleDefinitionsTest, LifecycleAndAgeManagement)
 {
+    // 验证年龄累加与多个终态标记 API 行为。
     Particle p(3, ParticleType::ELECTRON, SCDAT::Geometry::Point3D(0.0, 0.0, 0.0),
                SCDAT::Geometry::Vector3D(0.0, 0.0, 0.0), 1.0, -1.0, 1.0);
 
@@ -57,6 +71,7 @@ TEST(ParticleDefinitionsTest, LifecycleAndAgeManagement)
 
 TEST(ParticleDefinitionsTest, BorisPushPureElectricField)
 {
+    // 纯电场 + 无磁场场景：速度应沿电场方向线性增长。
     Particle p(4, ParticleType::ELECTRON, SCDAT::Geometry::Point3D(0.0, 0.0, 0.0),
                SCDAT::Geometry::Vector3D(0.0, 0.0, 0.0), 1.0, 1.0, 1.0);
 
@@ -77,6 +92,7 @@ TEST(ParticleDefinitionsTest, BorisPushPureElectricField)
 
 TEST(ParticleDefinitionsTest, RelativisticPathWithZeroFieldKeepsVelocity)
 {
+    // 相对论路径在零场中应保持方向，速度不超过光速。
     const double c = PhysicsConstants::SpeedOfLight;
     const double vx = 0.2 * c;
     const double dt = 1e-9;
@@ -101,6 +117,7 @@ TEST(ParticleDefinitionsTest, RelativisticPathWithZeroFieldKeepsVelocity)
 
 TEST(ParticleDefinitionsTest, ToStringContainsExtendedPhotoelectronFields)
 {
+    // 字符串输出中应包含光电子扩展字段，便于诊断与日志追踪。
     Particle p = ParticleFactory::createPhotoelectron(6, SCDAT::Geometry::Point3D(1.0, 2.0, 3.0),
                                                       SCDAT::Geometry::Vector3D(4.0, 5.0, 6.0), 7.5,
                                                       4.5, 1.0);

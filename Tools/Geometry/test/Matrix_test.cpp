@@ -1,3 +1,14 @@
+/**
+ * @file Matrix_test.cpp
+ * @brief Matrix/Matrix3x3 单元测试
+ * @details
+ * 覆盖内容：
+ * 1) 基本构造与元素访问；
+ * 2) 矩阵乘法数值正确性；
+ * 3) 由 3x3 块拼装块对角矩阵；
+ * 4) 块矩阵对 Vector3D 组的批量乘法。
+ */
+
 #include "../include/Matrix.h"
 #include "../include/Matrix3x3.h"
 #include <gtest/gtest.h>
@@ -9,6 +20,7 @@ namespace Geometry
 
 TEST(MatrixTest, ConstructAndAccess)
 {
+    // 验证行列规模、下标访问和写回逻辑。
     Matrix m(2, 3, 0.0);
     m(0, 1) = 2.5;
     m(1, 2) = -4.0;
@@ -21,6 +33,7 @@ TEST(MatrixTest, ConstructAndAccess)
 
 TEST(MatrixTest, MatrixMultiplication)
 {
+    // 使用手算可验证的样例检查矩阵乘法结果。
     Matrix a(2, 3, std::vector<double>{1.0, 2.0, 3.0, 4.0, 5.0, 6.0});
     Matrix b(3, 2, std::vector<double>{7.0, 8.0, 9.0, 10.0, 11.0, 12.0});
 
@@ -36,6 +49,7 @@ TEST(MatrixTest, MatrixMultiplication)
 
 TEST(MatrixTest, BuildFromMatrix3x3Blocks)
 {
+    // 检查块对角构造是否保持块内值并正确填充非对角零元。
     Matrix3x3 b0 = Matrix3x3::identity();
     Matrix3x3 b1 = Matrix3x3::diagonal(2.0, 3.0, 4.0);
 
@@ -56,6 +70,7 @@ TEST(MatrixTest, BuildFromMatrix3x3Blocks)
 
 TEST(MatrixTest, MultiplyBlockVectors)
 {
+    // 检查 blockDiagonalFrom3x3 与 multiplyBlocks3 的组合一致性。
     Matrix3x3 b0 = Matrix3x3::identity();
     Matrix3x3 b1 = Matrix3x3::diagonal(2.0, 3.0, 4.0);
 
