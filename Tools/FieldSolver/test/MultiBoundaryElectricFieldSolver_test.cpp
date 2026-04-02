@@ -277,3 +277,62 @@ TEST(MultiBoundaryElectricFieldSolverTest, AutoPeriodicPairInferenceSupportsRota
     EXPECT_NEAR(solver.getPotential(4) - solver.getPotential(1), 0.5, 1.0e-6);
     EXPECT_NEAR(solver.getPotential(5) - solver.getPotential(2), 0.5, 1.0e-6);
 }
+
+TEST(MultiBoundaryElectricFieldSolverTest, CoupledMultiBodyStressRemainsStable)
+{
+    auto mesh = makeUnitCubeTetraMesh();
+    ASSERT_TRUE(mesh);
+
+    MultiBoundaryElectricFieldSolver solver(mesh);
+    SolverConfiguration config;
+    config.solver_type = SolverType::DIRECT_LU;
+    solver.setSolverConfiguration(config);
+
+    SCDAT::FieldSolver::CouplingIterationConfiguration coupling;
+    coupling.max_outer_iterations = 12;
+    coupling.potential_tolerance_v = 5.0e-3;
+    coupling.relaxation = 0.65;
+    solver.setCouplingIterationConfiguration(coupling);
+
+    solver.addBoundaryCondition("coupled_drive", BoundaryConditionType::DIRICHLET, 3.0, {0, 2});
+    solver.addBoundaryCondition("coupled_sink", BoundaryConditionType::DIRICHLET, 0.0, {4, 6});
+    solver.addPeriodicBoundaryCondition("coupled_periodic", {1, 3}, {5, 7}, 0.25);
+
+    auto coupling_callback = [&solver](int, const std::vector<double>& previous_potentials) {
+        double floating_average = 0.0;
+        int count = 0;
+        for (const std::size_t node_id : {std::size_t{1}, std::size_t{3}})
+        {
+            if (node_id < previous_potentials.size())
+            {
+                floating_average += previous_potentials[node_id];
+                ++count;
+            }
+        }
+        if (count > 0)
+        {
+            floating_average /= static_cast<double>(count);
+        }
+
+        const double drive_potential = std::clamp(2.8 + 0.08 * floating_average, 1.0, 5.0);
+        solver.addBoundaryCondition("coupled_drive", BoundaryConditionType::DIRICHLET,
+                                    drive_potential, {0, 2});
+        solver.addBoundaryCondition("coupled_sink", BoundaryConditionType::DIRICHLET,
+                                    drive_potential - 2.0, {4, 6});
+    };
+
+    ASSERT_TRUE(solver.solveCoupled(coupling_callback));
+    EXPECT_GE(solver.getCouplingIterationCount(), 1);
+    ASSERT_FALSE(solver.getCouplingResidualHistory().empty());
+    EXPECT_LE(solver.getCouplingResidualHistory().back(), coupling.potential_tolerance_v * 1.5);
+
+    EXPECT_NEAR(solver.getPotential(5) - solver.getPotential(1), 0.25, 1.0e-5);
+    EXPECT_NEAR(solver.getPotential(7) - solver.getPotential(3), 0.25, 1.0e-5);
+    EXPECT_GT(solver.getPotential(0), solver.getPotential(4));
+    EXPECT_TRUE(std::isfinite(solver.validateSolution()));
+
+    const auto field = solver.getElectricField(Point3D(0.5, 0.5, 0.5));
+    EXPECT_TRUE(std::isfinite(field.x()));
+    EXPECT_TRUE(std::isfinite(field.y()));
+    EXPECT_TRUE(std::isfinite(field.z()));
+}

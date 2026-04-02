@@ -732,6 +732,53 @@ std::vector<Mesh::NodeId> inferPeriodicPairs(const Mesh::MeshPtr& mesh,
     return inferred_pairs;
 }
 
+bool inferPeriodicPairsNearestNeighbor(const std::vector<Mesh::NodePtr>& primary_nodes,
+                                       const std::vector<Mesh::NodePtr>& opposite_nodes,
+                                       std::vector<Mesh::NodeId>& inferred_pairs)
+{
+    if (primary_nodes.size() != opposite_nodes.size())
+    {
+        return false;
+    }
+
+    Utils::Point3D primary_centroid(0.0, 0.0, 0.0);
+    for (const auto& n : primary_nodes) primary_centroid += n->getPosition();
+    primary_centroid /= static_cast<double>(primary_nodes.size());
+
+    Utils::Point3D opposite_centroid(0.0, 0.0, 0.0);
+    for (const auto& n : opposite_nodes) opposite_centroid += n->getPosition();
+    opposite_centroid /= static_cast<double>(opposite_nodes.size());
+
+    Utils::Vector3D translation = opposite_centroid - primary_centroid;
+
+    inferred_pairs.clear();
+    inferred_pairs.reserve(primary_nodes.size());
+    std::vector<bool> opposite_used(opposite_nodes.size(), false);
+
+    for (const auto& p_node : primary_nodes)
+    {
+        Utils::Point3D target = p_node->getPosition() + translation;
+        double best_dist = std::numeric_limits<double>::max();
+        std::size_t best_index = opposite_nodes.size();
+
+        for (std::size_t j = 0; j < opposite_nodes.size(); ++j)
+        {
+            if (opposite_used[j]) continue;
+            double d = opposite_nodes[j]->getPosition().distanceTo(target);
+            if (d < best_dist)
+            {
+                best_dist = d;
+                best_index = j;
+            }
+        }
+
+        if (best_index >= opposite_nodes.size()) return false;
+        opposite_used[best_index] = true;
+        inferred_pairs.push_back(opposite_nodes[best_index]->getId());
+    }
+    return true;
+}
+
 std::vector<Mesh::NodeId> inferPeriodicPairsWithFallback(
     const Mesh::MeshPtr& mesh, const std::vector<Mesh::NodeId>& primary_nodes,
     const std::vector<Mesh::NodePtr>& primary_node_ptrs,
@@ -740,6 +787,11 @@ std::vector<Mesh::NodeId> inferPeriodicPairsWithFallback(
     std::vector<Mesh::NodeId> matched_pairs;
     if (inferPeriodicPairsByDistanceSignature(primary_node_ptrs, opposite_face_nodes,
                                               matching_tolerance, matched_pairs))
+    {
+        return matched_pairs;
+    }
+
+    if (inferPeriodicPairsNearestNeighbor(primary_node_ptrs, opposite_face_nodes, matched_pairs))
     {
         return matched_pairs;
     }
@@ -760,6 +812,7 @@ void MultiBoundaryElectricFieldSolver::initializeSolverConfig()
 {
     solver_config_ = SolverConfiguration{};
     multigrid_config_ = MultigridConfiguration{};
+    coupling_config_ = CouplingIterationConfiguration{};
     convergence_tolerance_ = solver_config_.tolerance;
     max_iterations_ = solver_config_.max_iterations;
 }
@@ -839,6 +892,15 @@ void MultiBoundaryElectricFieldSolver::setMultigridConfiguration(
     multigrid_config_ = config;
 }
 
+void MultiBoundaryElectricFieldSolver::setCouplingIterationConfiguration(
+    const CouplingIterationConfiguration& config)
+{
+    coupling_config_.max_outer_iterations = std::max(1, config.max_outer_iterations);
+    coupling_config_.potential_tolerance_v =
+        std::max(1.0e-12, config.potential_tolerance_v);
+    coupling_config_.relaxation = std::clamp(config.relaxation, 0.05, 1.0);
+}
+
 bool MultiBoundaryElectricFieldSolver::solve()
 {
     residual_history_.clear();
@@ -858,6 +920,102 @@ bool MultiBoundaryElectricFieldSolver::solve()
     }
 
     return ok;
+}
+
+bool MultiBoundaryElectricFieldSolver::solveCoupled(const CouplingCallback& callback)
+{
+    coupling_iteration_count_ = 0;
+    coupling_residual_history_.clear();
+
+    const int max_outer_iterations = std::max(1, coupling_config_.max_outer_iterations);
+    const double tolerance_v = std::max(1.0e-12, coupling_config_.potential_tolerance_v);
+    const double relaxation = std::clamp(coupling_config_.relaxation, 0.05, 1.0);
+
+    auto previous_potentials = snapshotNodePotentials();
+    for (int outer = 0; outer < max_outer_iterations; ++outer)
+    {
+        if (callback)
+        {
+            callback(outer, previous_potentials);
+        }
+
+        if (!solve())
+        {
+            return false;
+        }
+
+        auto current_potentials = snapshotNodePotentials();
+        if (current_potentials.size() != previous_potentials.size())
+        {
+            return false;
+        }
+
+        double max_delta = 0.0;
+        for (std::size_t i = 0; i < current_potentials.size(); ++i)
+        {
+            max_delta = std::max(max_delta, std::abs(current_potentials[i] - previous_potentials[i]));
+        }
+
+        coupling_iteration_count_ = outer + 1;
+        coupling_residual_history_.push_back(max_delta);
+
+        if (max_delta <= tolerance_v)
+        {
+            return true;
+        }
+
+        if (outer + 1 < max_outer_iterations && relaxation < 1.0)
+        {
+            applyRelaxedNodePotentials(previous_potentials, current_potentials, relaxation);
+            current_potentials = snapshotNodePotentials();
+        }
+        previous_potentials = std::move(current_potentials);
+    }
+
+    return !coupling_residual_history_.empty() &&
+           coupling_residual_history_.back() <= tolerance_v;
+}
+
+std::vector<double> MultiBoundaryElectricFieldSolver::snapshotNodePotentials() const
+{
+    std::vector<double> values;
+    if (!mesh_)
+    {
+        return values;
+    }
+
+    const auto& nodes = mesh_->getNodes();
+    values.reserve(nodes.size());
+    for (const auto& node : nodes)
+    {
+        if (node)
+        {
+            values.push_back(node->getPotential());
+        }
+    }
+    return values;
+}
+
+void MultiBoundaryElectricFieldSolver::applyRelaxedNodePotentials(
+    const std::vector<double>& previous, const std::vector<double>& current, double relaxation)
+{
+    if (!mesh_ || previous.size() != current.size())
+    {
+        return;
+    }
+
+    const auto& nodes = mesh_->getNodes();
+    std::size_t index = 0;
+    for (const auto& node : nodes)
+    {
+        if (!node)
+        {
+            continue;
+        }
+        const double relaxed = previous[index] + relaxation * (current[index] - previous[index]);
+        node->setPotential(relaxed);
+        ++index;
+    }
 }
 
 bool MultiBoundaryElectricFieldSolver::assembleSystem()
@@ -975,7 +1133,38 @@ void MultiBoundaryElectricFieldSolver::applyBoundaryCondition(const BoundaryCond
         const std::size_t pair_count = std::min(bc.nodes.size(), bc.paired_nodes.size());
         for (std::size_t i = 0; i < pair_count; ++i)
         {
-            applyPairConstraint(bc.nodes[i], bc.paired_nodes[i], bc.value);
+            const size_t p_idx = getGlobalIndex(bc.nodes[i]);
+            const size_t q_idx = getGlobalIndex(bc.paired_nodes[i]);
+            if (p_idx >= dense_system_matrix_.size() || q_idx >= dense_system_matrix_.size() || p_idx == q_idx)
+            {
+                continue;
+            }
+
+            const double offset = bc.value;
+
+            for (size_t row = 0; row < dense_system_matrix_.size(); ++row) {
+                rhs_storage_[row] -= dense_system_matrix_[row][q_idx] * offset;
+            }
+            
+            for (size_t col = 0; col < dense_system_matrix_.size(); ++col) {
+                dense_system_matrix_[p_idx][col] += dense_system_matrix_[q_idx][col];
+            }
+            rhs_storage_[p_idx] += rhs_storage_[q_idx]; 
+            
+            for (size_t row = 0; row < dense_system_matrix_.size(); ++row) {
+                if (row != q_idx) {
+                    dense_system_matrix_[row][p_idx] += dense_system_matrix_[row][q_idx];
+                }
+            }
+            
+            std::fill(dense_system_matrix_[q_idx].begin(), dense_system_matrix_[q_idx].end(), 0.0);
+            for (size_t row = 0; row < dense_system_matrix_.size(); ++row) {
+                dense_system_matrix_[row][q_idx] = 0.0;
+            }
+            
+            dense_system_matrix_[q_idx][q_idx] = 1.0;
+            rhs_storage_[q_idx] = 0.0;
+            solution_storage_[q_idx] = 0.0;
         }
         return;
     }
@@ -988,17 +1177,42 @@ void MultiBoundaryElectricFieldSolver::applyBoundaryCondition(const BoundaryCond
         }
 
         const NodeId anchor_node = bc.nodes.front();
-        const size_t anchor_index = getGlobalIndex(anchor_node);
-        if (anchor_index < dense_system_matrix_.size())
+        const size_t p_idx = getGlobalIndex(anchor_node);
+        if (p_idx >= dense_system_matrix_.size())
         {
-            dense_system_matrix_[anchor_index][anchor_index] += kGeometryTolerance;
-            rhs_storage_[anchor_index] += kGeometryTolerance * bc.value;
+            return;
         }
 
         for (std::size_t i = 1; i < bc.nodes.size(); ++i)
         {
-            applyPairConstraint(anchor_node, bc.nodes[i], 0.0);
+            const size_t q_idx = getGlobalIndex(bc.nodes[i]);
+            if (q_idx >= dense_system_matrix_.size() || p_idx == q_idx)
+            {
+                continue;
+            }
+
+            for (size_t col = 0; col < dense_system_matrix_.size(); ++col) {
+                dense_system_matrix_[p_idx][col] += dense_system_matrix_[q_idx][col];
+            }
+            rhs_storage_[p_idx] += rhs_storage_[q_idx];
+
+            for (size_t row = 0; row < dense_system_matrix_.size(); ++row) {
+                if (row != q_idx) {
+                    dense_system_matrix_[row][p_idx] += dense_system_matrix_[row][q_idx];
+                }
+            }
+
+            std::fill(dense_system_matrix_[q_idx].begin(), dense_system_matrix_[q_idx].end(), 0.0);
+            for (size_t row = 0; row < dense_system_matrix_.size(); ++row) {
+                dense_system_matrix_[row][q_idx] = 0.0;
+            }
+
+            dense_system_matrix_[q_idx][q_idx] = 1.0;
+            rhs_storage_[q_idx] = 0.0;
+            solution_storage_[q_idx] = 0.0;
         }
+
+        rhs_storage_[p_idx] += bc.value;
         return;
     }
 
@@ -1335,6 +1549,32 @@ void MultiBoundaryElectricFieldSolver::calculateElectricField()
         return;
     }
 
+    for (const auto& bc_pair : boundary_conditions_) {
+        const auto& bc = bc_pair.second;
+        if (bc.type == BoundaryConditionType::FLOATING && bc.nodes.size() > 1) {
+            const size_t p_idx = getGlobalIndex(bc.nodes.front());
+            if (p_idx < solution_storage_.size()) {
+                const double anchor_pot = solution_storage_[p_idx];
+                for (size_t i = 1; i < bc.nodes.size(); ++i) {
+                    const size_t q_idx = getGlobalIndex(bc.nodes[i]);
+                    if (q_idx < solution_storage_.size()) {
+                        solution_storage_[q_idx] = anchor_pot;
+                    }
+                }
+            }
+        }
+        else if (bc.type == BoundaryConditionType::PERIODIC) {
+            const size_t pair_count = std::min(bc.nodes.size(), bc.paired_nodes.size());
+            for (size_t i = 0; i < pair_count; ++i) {
+                const size_t p_idx = getGlobalIndex(bc.nodes[i]);
+                const size_t q_idx = getGlobalIndex(bc.paired_nodes[i]);
+                if (p_idx < solution_storage_.size() && q_idx < solution_storage_.size()) {
+                    solution_storage_[q_idx] = solution_storage_[p_idx] + bc.value;
+                }
+            }
+        }
+    }
+
     const auto& nodes = mesh_->getNodes();
     const auto neighbors = buildNodeNeighbors(mesh_->getElements());
     electric_field_cache_.clear();
@@ -1459,50 +1699,6 @@ void MultiBoundaryElectricFieldSolver::setupPreconditioner()
             preconditioner_diagonal_[i] = dense_system_matrix_[i][i];
         }
     }
-}
-
-double MultiBoundaryElectricFieldSolver::computeConstraintPenalty(NodeId primary_node,
-                                                                  NodeId paired_node) const
-{
-    const size_t primary_index = getGlobalIndex(primary_node);
-    const size_t paired_index = getGlobalIndex(paired_node);
-    double local_diagonal = kGeometryTolerance;
-
-    if (primary_index < dense_system_matrix_.size() &&
-        primary_index < dense_system_matrix_[primary_index].size())
-    {
-        local_diagonal =
-            std::max(local_diagonal, std::abs(dense_system_matrix_[primary_index][primary_index]));
-    }
-    if (paired_index < dense_system_matrix_.size() &&
-        paired_index < dense_system_matrix_[paired_index].size())
-    {
-        local_diagonal =
-            std::max(local_diagonal, std::abs(dense_system_matrix_[paired_index][paired_index]));
-    }
-
-    return std::clamp(local_diagonal * 1.0e7, 1.0e-5, 1.0e4);
-}
-
-void MultiBoundaryElectricFieldSolver::applyPairConstraint(NodeId primary_node, NodeId paired_node,
-                                                           double offset)
-{
-    const size_t primary_index = getGlobalIndex(primary_node);
-    const size_t paired_index = getGlobalIndex(paired_node);
-    if (primary_index >= dense_system_matrix_.size() || paired_index >= dense_system_matrix_.size())
-    {
-        return;
-    }
-
-    const double penalty = computeConstraintPenalty(primary_node, paired_node);
-
-    dense_system_matrix_[primary_index][primary_index] += penalty;
-    dense_system_matrix_[paired_index][paired_index] += penalty;
-    dense_system_matrix_[primary_index][paired_index] -= penalty;
-    dense_system_matrix_[paired_index][primary_index] -= penalty;
-
-    rhs_storage_[primary_index] -= penalty * offset;
-    rhs_storage_[paired_index] += penalty * offset;
 }
 
 void MultiBoundaryElectricFieldSolver::assembleTetrahedronElement(Mesh::ElementPtr element)

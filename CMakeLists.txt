@@ -47,6 +47,53 @@ add_subdirectory(Toolkit)
 add_subdirectory(Main)
 
 if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+    add_test(
+        NAME ToolsLayoutCheck
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_tools_layout.py
+            --tools-root ${CMAKE_SOURCE_DIR}/Tools
+            --strict
+    )
+
+    add_test(
+        NAME LegacyBenchmarkAcceptanceGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            "${CMAKE_SOURCE_DIR}/Toolkit/Surface Charging/scripts/benchmark_regression_gate.py"
+            --glob "${CMAKE_SOURCE_DIR}/results/*.benchmark.txt"
+            --allow-empty
+    )
+
+    add_test(
+        NAME LegacyReplayCsvConsistencyGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/validate_legacy_replay_csv.py
+            --csv
+                ${CMAKE_SOURCE_DIR}/results/tmp_geo_legacy.csv
+                ${CMAKE_SOURCE_DIR}/results/tmp_leo_ram_legacy.csv
+                ${CMAKE_SOURCE_DIR}/results/tmp_leo_wake_legacy.csv
+            --strict-schema
+            --max-abs-delta 1e-12
+    )
+
+    add_test(
+        NAME Kapton2000sRegressionGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_kapton_2000s_regression.py
+            --advanced-csv ${CMAKE_SOURCE_DIR}/results/surface_geo_ecss_kapton_pic_circuit.csv
+            --reference-csv ${CMAKE_SOURCE_DIR}/results/surface_geo_ecss_kapton_ref.csv
+            --target-time-s 2000
+            --max-time-offset-s 1e-6
+            --max-abs-surface-delta-v 3000
+            --max-equilibrium-gap-v 1e-6
+            --require-advanced-more-negative
+    )
+
     add_subdirectory(Tools/Geometry/test)
     add_subdirectory(Tools/Coupling/test)
     add_subdirectory(Tools/Diagnostics/test)

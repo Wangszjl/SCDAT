@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <set>
 #include <vector>
 
 namespace SCDAT
@@ -78,6 +79,27 @@ class ParticleSourceSamplingTest : public ::testing::Test
             sum_sq += x * x;
         }
         return std::sqrt(sum_sq / data.size());
+    }
+};
+
+class TestParticleSource : public ParticleSource
+{
+  public:
+    TestParticleSource(const ParticleType& particle_type)
+        : ParticleSource("test-source", particle_type)
+    {
+    }
+
+    size_t emitParticles(std::vector<ParticleClass>&, double) override
+    {
+        return 0;
+    }
+
+  protected:
+    ParticleClass generateParticle() override
+    {
+        return ParticleFactory::createParticle(particleType_, 0, Point3D(0.0, 0.0, 0.0),
+                                               Vector3D(0.0, 0.0, 0.0), 1.0);
     }
 };
 
@@ -231,6 +253,7 @@ TEST_F(ParticleSourceSamplingTest, SamplingModelEnumCompleteness)
     EXPECT_EQ(static_cast<int>(SpatialSamplingModel::SINGLE_MAXWELL), 4);
     EXPECT_EQ(static_cast<int>(SpatialSamplingModel::Q_DISTRIBUTION), 5);
     EXPECT_EQ(static_cast<int>(SpatialSamplingModel::MAXWELL_BOLTZMANN), 6);
+    EXPECT_EQ(static_cast<int>(SpatialSamplingModel::TABULATED), 7);
 }
 
 // ============================================================================
@@ -360,7 +383,8 @@ TEST_F(ParticleSourceSamplingTest, SamplingModelDefinitions)
         SpatialSamplingModel::MAXWELL_BOLTZMANN,
         SpatialSamplingModel::DOUBLE_MAXWELL,
         SpatialSamplingModel::KAPPA,
-        SpatialSamplingModel::POWER_LAW
+        SpatialSamplingModel::POWER_LAW,
+        SpatialSamplingModel::TABULATED
     };
     
     // 确保这些模型都是唯一的
@@ -414,6 +438,47 @@ TEST_F(ParticleSourceSamplingTest, SpatialScalesRealistic)
     // 最大尺度应该是宏观的
     EXPECT_GT(params_.spatial_scale, 1.0e-4);
     EXPECT_LT(params_.spatial_scale, 1.0);
+}
+
+TEST_F(ParticleSourceSamplingTest, ResolveSpectrumBuildsDoubleMaxwellPopulations)
+{
+    TestParticleSource source(ParticleType::ELECTRON);
+    source.setSamplingModel(SpatialSamplingModel::DOUBLE_MAXWELL);
+    source.setSamplingParameters(params_);
+
+    const auto spectrum = source.resolveSpectrum(SpectrumUsage::CurrentBalance);
+    ASSERT_EQ(spectrum.populations.size(), 2u);
+    EXPECT_NEAR(spectrum.populations[0].density_m3 + spectrum.populations[1].density_m3,
+                params_.density, params_.density * 1.0e-12);
+    EXPECT_GT(spectrum.populations[1].temperature_ev, spectrum.populations[0].temperature_ev);
+    EXPECT_NEAR(spectrum.populations[1].weight, params_.hot_fraction, 1.0e-12);
+}
+
+TEST_F(ParticleSourceSamplingTest, ResolveSpectrumBuildsDiscreteKappaFlux)
+{
+    TestParticleSource source(ParticleType::ELECTRON);
+    source.setSamplingModel(SpatialSamplingModel::KAPPA);
+    source.setSamplingParameters(params_);
+
+    const auto spectrum = source.resolveSpectrum(SpectrumUsage::CurrentBalance);
+    EXPECT_FALSE(spectrum.energy_grid_ev.empty());
+    ASSERT_EQ(spectrum.energy_grid_ev.size(), spectrum.differential_number_flux.size());
+    EXPECT_TRUE(std::all_of(spectrum.differential_number_flux.begin(),
+                            spectrum.differential_number_flux.end(),
+                            [](double value) { return std::isfinite(value) && value >= 0.0; }));
+}
+
+TEST_F(ParticleSourceSamplingTest, ResolveSpectrumRetainsObservedTabulatedShape)
+{
+    TestParticleSource source(ParticleType::ELECTRON);
+    source.setSamplingModel(SpatialSamplingModel::TABULATED);
+    source.setObservedSpectrum({1.0, 5.0, 20.0, 80.0}, {4.0, 3.0, 2.0, 1.0});
+
+    const auto spectrum = source.resolveSpectrum(SpectrumUsage::CurrentBalance);
+    EXPECT_EQ(spectrum.model, SpatialSamplingModel::TABULATED);
+    EXPECT_EQ(spectrum.energy_grid_ev.size(), 4u);
+    EXPECT_EQ(spectrum.differential_number_flux.size(), 4u);
+    EXPECT_DOUBLE_EQ(spectrum.energy_grid_ev[2], 20.0);
 }
 
 }  // namespace Particle

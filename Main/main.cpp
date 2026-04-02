@@ -185,27 +185,29 @@ int runSurface(const SurfaceChargingScenarioPreset& preset, const fs::path& outp
     {
         double elapsed_time_s = 0.0;
         std::size_t sample_count = 0;
-        while (elapsed_time_s < preset.total_duration_s && sample_count < preset.steps)
+        const double minimum_dt_s = std::max(1.0e-12, preset.minimum_time_step_s);
+        const double maximum_dt_s =
+            std::max(minimum_dt_s, preset.maximum_time_step_s);
+        while (elapsed_time_s + 1.0e-12 < preset.total_duration_s)
         {
             const double remaining_time_s = preset.total_duration_s - elapsed_time_s;
-            const double dt = charging.recommendTimeStep(
-                remaining_time_s, std::max(1.0e-12, preset.minimum_time_step_s),
-                std::max(preset.minimum_time_step_s, preset.maximum_time_step_s));
+            double dt = 0.0;
+            if (preset.steps > 0 && sample_count >= preset.steps)
+            {
+                // Avoid a final oversized tail step after the adaptive budget is
+                // exhausted; finish the horizon with bounded chunks instead.
+                dt = std::min(remaining_time_s, maximum_dt_s);
+            }
+            else
+            {
+                dt = charging.recommendTimeStep(remaining_time_s, minimum_dt_s, maximum_dt_s);
+            }
             if (!charging.advance(dt))
             {
                 throw std::runtime_error("Surface charging adaptive advance failed");
             }
             elapsed_time_s += dt;
             sample_count += 1;
-        }
-
-        if (elapsed_time_s + 1.0e-12 < preset.total_duration_s)
-        {
-            const double tail_dt = preset.total_duration_s - elapsed_time_s;
-            if (!charging.advance(tail_dt))
-            {
-                throw std::runtime_error("Surface charging final adaptive advance failed");
-            }
         }
     }
     else

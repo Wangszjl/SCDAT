@@ -55,3 +55,38 @@ TEST(ExtendedFieldSolverTest, NonlinearPoissonSolverRespectsDirichletBoundaries)
     EXPECT_LT(mid_potential, 10.0);
     EXPECT_FALSE(solver.getElectricField().empty());
 }
+
+TEST(ExtendedFieldSolverTest, NonlinearPoissonQuasiNewtonConvergesUnderStrongNonlinearity)
+{
+    NonlinearPoissonSolver solver;
+    SCDAT::FieldSolver::NonlinearPoissonParameters parameters;
+    parameters.max_iterations = 700;
+    parameters.tolerance = 2.0e-4;
+    parameters.relaxation = 0.9;
+    parameters.adaptive_relaxation_floor = 0.2;
+    parameters.derivative_step_v = 5.0e-3;
+    parameters.minimum_effective_diagonal = 1.0e-8;
+    parameters.solve_policy = SCDAT::FieldSolver::NonlinearSolvePolicy::QuasiNewton;
+
+    solver.setParameters(parameters);
+    ASSERT_TRUE(solver.initializeGrid(Vector3D(1.0, 1.0, 1.0), Vector3D(7.0, 7.0, 15.0)));
+    solver.setBoundaryPotential([](const Point3D& point) { return point.z() > 0.99 ? 25.0 : 0.0; });
+    solver.setChargeDensityFunction([](const Point3D& point, double phi) {
+        const double bounded_phi = std::clamp(phi / 8.0, -3.0, 3.0);
+        return 1.0e-6 * std::tanh(bounded_phi) + 5.0e-7 * (point.z() - 0.5);
+    });
+    solver.setPermittivityFunction([](const Point3D& point, double) {
+        return 2.8 + 0.4 * point.z();
+    });
+
+    ASSERT_TRUE(solver.solve());
+    EXPECT_TRUE(solver.hasConverged());
+    EXPECT_GT(solver.getIterationsUsed(), 0);
+    EXPECT_LE(solver.getLastMaxDelta(), parameters.tolerance * 1.5);
+    EXPECT_TRUE(std::isfinite(solver.getLastResidualNorm()));
+
+    const double mid_potential = solver.getPotential(Point3D(0.5, 0.5, 0.5));
+    EXPECT_GT(mid_potential, 0.0);
+    EXPECT_LT(mid_potential, 25.0);
+    EXPECT_FALSE(solver.getElectricField().empty());
+}

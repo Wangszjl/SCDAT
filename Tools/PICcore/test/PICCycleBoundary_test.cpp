@@ -158,6 +158,13 @@ TEST(PICCycleBoundaryTest, AbsorbingBoundaryMarksParticleInactiveAndAccumulatesC
     ASSERT_NE(particle, nullptr);
     EXPECT_FALSE(particle->isActive());
     EXPECT_LT(cycle.getStatistics().surface_deposited_charge, 0.0);
+    const auto& ledger = cycle.getSurfaceCurrentLedger();
+    EXPECT_LT(ledger[static_cast<std::size_t>(PICCycle::BoundaryFace::ZMax)]
+                  .absorbed_electron_charge_c,
+              0.0);
+    EXPECT_EQ(ledger[static_cast<std::size_t>(PICCycle::BoundaryFace::ZMax)]
+                  .absorbed_electron_particles,
+              1u);
 }
 
 TEST(PICCycleBoundaryTest, ManualPotentialProfileReconstructsElectricField)

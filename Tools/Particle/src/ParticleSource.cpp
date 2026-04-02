@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -66,6 +67,124 @@ double getParticleTypeMass(ParticleType type)
     default:
         return PhysicsConstants::ProtonMass;
     }
+}
+
+double getParticleTypeMassAmu(ParticleType type)
+{
+    return getParticleTypeMass(type) / PhysicsConstants::AtomicMassUnit;
+}
+
+double getParticleTypeChargeNumber(ParticleType type)
+{
+    switch (type)
+    {
+    case ParticleType::ELECTRON:
+    case ParticleType::PHOTOELECTRON:
+    case ParticleType::SECONDARY_ELECTRON:
+    case ParticleType::THERMAL_ELECTRON:
+    case ParticleType::FIELD_EMISSION_ELECTRON:
+    case ParticleType::NEGATIVE_ION:
+        return -1.0;
+    case ParticleType::ION:
+    case ParticleType::POSITIVE_ION:
+    case ParticleType::MOLECULAR_ION:
+    case ParticleType::CLUSTER_ION:
+        return 1.0;
+    default:
+        return 1.0;
+    }
+}
+
+double thermalSpeedToTemperatureEv(double thermal_speed, double mass_kg)
+{
+    const double speed = std::max(0.0, thermal_speed);
+    return 0.5 * mass_kg * speed * speed / PhysicsConstants::ElementaryCharge;
+}
+
+std::vector<double> buildLogEnergyGrid(double minimum_energy_ev, double maximum_energy_ev,
+                                       size_t count)
+{
+    const double e_min = std::max(1.0e-3, minimum_energy_ev);
+    const double e_max = std::max(e_min * 1.001, maximum_energy_ev);
+    const size_t points = std::max<size_t>(count, 8);
+    std::vector<double> grid(points, e_min);
+    const double log_min = std::log(e_min);
+    const double log_max = std::log(e_max);
+    const double denom = static_cast<double>(points - 1);
+    for (size_t i = 0; i < points; ++i)
+    {
+        const double alpha = static_cast<double>(i) / denom;
+        grid[i] = std::exp(log_min + alpha * (log_max - log_min));
+    }
+    return grid;
+}
+
+void normalizeFluxShape(std::vector<double>& flux, const std::vector<double>& energy_grid_ev,
+                        double target_number_flux_m2_s)
+{
+    if (flux.empty() || flux.size() != energy_grid_ev.size())
+    {
+        return;
+    }
+
+    double integral = 0.0;
+    for (size_t i = 1; i < energy_grid_ev.size(); ++i)
+    {
+        const double width = std::max(0.0, energy_grid_ev[i] - energy_grid_ev[i - 1]);
+        integral += 0.5 * (std::max(0.0, flux[i - 1]) + std::max(0.0, flux[i])) * width;
+    }
+
+    if (!(integral > 0.0) || !(target_number_flux_m2_s > 0.0))
+    {
+        return;
+    }
+
+    const double scale = target_number_flux_m2_s / integral;
+    for (double& value : flux)
+    {
+        value = std::max(0.0, value * scale);
+    }
+}
+
+double estimateNumberFluxFromMoments(const SamplingParameters& params, double mass_kg)
+{
+    const double density = std::max(0.0, params.density);
+    const double thermal_speed = std::max(1.0, params.thermal_speed);
+    const double temperature_j =
+        thermalSpeedToTemperatureEv(thermal_speed, mass_kg) * PhysicsConstants::ElementaryCharge;
+    const double thermal_flux =
+        density * std::sqrt(std::max(1.0e-18, temperature_j) / (2.0 * MathConstants::Pi * mass_kg));
+    const double advective_flux = density * std::max(0.0, params.bulk_speed);
+    return std::max(0.0, thermal_flux + 0.25 * advective_flux);
+}
+
+double sampleEnergyFromDiscreteSpectrum(const std::vector<double>& energy_ev,
+                                        const std::vector<double>& intensity)
+{
+    if (energy_ev.empty() || energy_ev.size() != intensity.size())
+    {
+        return 0.0;
+    }
+
+    std::vector<double> cumulative(intensity.size(), 0.0);
+    double total = 0.0;
+    for (size_t i = 0; i < intensity.size(); ++i)
+    {
+        total += std::max(0.0, intensity[i]);
+        cumulative[i] = total;
+    }
+    if (!(total > 0.0))
+    {
+        return energy_ev.front();
+    }
+
+    auto& rng = globalRng();
+    std::uniform_real_distribution<double> u(0.0, total);
+    const double pick = u(rng);
+    const auto it = std::lower_bound(cumulative.begin(), cumulative.end(), pick);
+    const size_t index =
+        static_cast<size_t>(std::distance(cumulative.begin(), it == cumulative.end() ? cumulative.end() - 1 : it));
+    return std::max(1.0e-3, energy_ev[index]);
 }
 
 /**
@@ -183,7 +302,7 @@ size_t selectWeightedElementByVolume(const std::vector<size_t>& element_indices,
 ParticleSource::ParticleSource(const std::string& name, const ParticleType& particleType)
     : name_(name), particleType_(particleType), enabled_(true), emissionRate_(0.0),
       totalEmitted_(0), currentTime_(0.0), startTime_(0.0), stopTime_(-1.0), timeAcceleration_(1.0),
-      sampling_model_(SpatialSamplingModel::UNIFORM), sampling_params_{}
+      sampling_model_(SpatialSamplingModel::UNIFORM), sampling_params_{}, last_fit_summary_{}
 {
 }
 
@@ -385,6 +504,7 @@ FitSummary ParticleSource::fitSamplingModelFromObservations()
     if (observed_energy_ev_.size() < 5 || observed_intensity_.size() < 5)
     {
         summary.message = "观测能谱数据不足，保留当前分布";
+        last_fit_summary_ = summary;
         return summary;
     } // 如果观测能谱数据点数不足5个，直接返回，提示数据不足
 
@@ -540,7 +660,135 @@ FitSummary ParticleSource::fitSamplingModelFromObservations()
 
     summary.success = true;
     summary.message = "已根据观测数据完成分布拟合与模型选择";
+    last_fit_summary_ = summary;
     return summary;
+}
+
+ResolvedSpectrum ParticleSource::resolveSpectrum(SpectrumUsage usage) const
+{
+    return buildResolvedSpectrum(particleType_, sampling_model_, sampling_params_, usage,
+                                 observed_energy_ev_, observed_intensity_, last_fit_summary_);
+}
+
+ResolvedSpectrum ParticleSource::buildResolvedSpectrum(
+    const ParticleType& particleType, SpatialSamplingModel model, const SamplingParameters& params,
+    SpectrumUsage usage, const std::vector<double>& observed_energy_ev,
+    const std::vector<double>& observed_intensity, const FitSummary& fit_summary)
+{
+    ResolvedSpectrum spectrum;
+    spectrum.model = model;
+    spectrum.fit_summary = fit_summary;
+
+    const double mass_kg = getParticleTypeMass(particleType);
+    const double mass_amu = getParticleTypeMassAmu(particleType);
+    const double charge_number = getParticleTypeChargeNumber(particleType);
+    const double density = std::max(0.0, params.density);
+    const double hot_fraction = std::clamp(params.hot_fraction, 0.0, 1.0);
+    const double cold_density = density * (1.0 - hot_fraction);
+    const double hot_density = density * hot_fraction;
+    const double cold_temperature_ev = std::max(1.0e-6, thermalSpeedToTemperatureEv(params.thermal_speed, mass_kg));
+    const double hot_temperature_ev =
+        std::max(cold_temperature_ev, thermalSpeedToTemperatureEv(params.hot_thermal_speed, mass_kg));
+
+    auto add_population = [&](double population_density, double temperature_ev, double drift_speed,
+                              double weight) {
+        if (population_density <= 0.0 || temperature_ev <= 0.0)
+        {
+            return;
+        }
+        SpectrumPopulation population;
+        population.density_m3 = population_density;
+        population.temperature_ev = temperature_ev;
+        population.drift_speed_m_per_s = drift_speed;
+        population.mass_amu = mass_amu;
+        population.charge_number = charge_number;
+        population.weight = weight;
+        spectrum.populations.push_back(population);
+    };
+
+    switch (model)
+    {
+    case SpatialSamplingModel::DOUBLE_MAXWELL:
+        add_population(cold_density, cold_temperature_ev, params.bulk_speed, 1.0 - hot_fraction);
+        add_population(hot_density, hot_temperature_ev, params.bulk_speed, hot_fraction);
+        break;
+    case SpatialSamplingModel::SINGLE_MAXWELL:
+    case SpatialSamplingModel::MAXWELL_BOLTZMANN:
+    case SpatialSamplingModel::Q_DISTRIBUTION:
+    case SpatialSamplingModel::UNIFORM:
+        add_population(density, cold_temperature_ev, params.bulk_speed, 1.0);
+        break;
+    case SpatialSamplingModel::KAPPA:
+    case SpatialSamplingModel::POWER_LAW:
+    case SpatialSamplingModel::TABULATED:
+        add_population(density, cold_temperature_ev, params.bulk_speed, 1.0);
+        break;
+    }
+
+    const bool need_discrete_spectrum =
+        usage != SpectrumUsage::SamplingOnly || model == SpatialSamplingModel::KAPPA ||
+        model == SpatialSamplingModel::POWER_LAW || model == SpatialSamplingModel::TABULATED ||
+        !observed_energy_ev.empty();
+    if (!need_discrete_spectrum)
+    {
+        return spectrum;
+    }
+
+    if (!observed_energy_ev.empty() && observed_energy_ev.size() == observed_intensity.size())
+    {
+        spectrum.energy_grid_ev = observed_energy_ev;
+        spectrum.differential_number_flux = observed_intensity;
+        if (model == SpatialSamplingModel::UNIFORM)
+        {
+            spectrum.model = SpatialSamplingModel::TABULATED;
+        }
+    }
+    else
+    {
+        const double minimum_energy_ev = std::max(1.0e-3, std::min(cold_temperature_ev, hot_temperature_ev) * 1.0e-2);
+        const double characteristic_ev =
+            std::max({1.0e-3, params.characteristic_energy, cold_temperature_ev, hot_temperature_ev});
+        const double maximum_energy_ev = std::max(10.0 * characteristic_ev, 200.0 * cold_temperature_ev);
+        spectrum.energy_grid_ev = buildLogEnergyGrid(minimum_energy_ev, maximum_energy_ev, 96);
+        spectrum.differential_number_flux.assign(spectrum.energy_grid_ev.size(), 0.0);
+
+        for (size_t i = 0; i < spectrum.energy_grid_ev.size(); ++i)
+        {
+            const double energy_ev = spectrum.energy_grid_ev[i];
+            double value = 0.0;
+            switch (model)
+            {
+            case SpatialSamplingModel::DOUBLE_MAXWELL:
+                value = (1.0 - hot_fraction) * std::exp(-energy_ev / cold_temperature_ev) +
+                        hot_fraction * std::exp(-energy_ev / hot_temperature_ev);
+                break;
+            case SpatialSamplingModel::KAPPA:
+            {
+                const double kappa = std::max(1.51, params.kappa);
+                const double theta =
+                    std::max(1.0e-3, params.characteristic_energy / std::max(1.0, kappa - 1.5));
+                value = std::pow(1.0 + energy_ev / (kappa * theta), -(kappa + 1.0));
+                break;
+            }
+            case SpatialSamplingModel::POWER_LAW:
+                value = std::pow(energy_ev + 1.0e-3, -std::max(1.01, params.power_law_index));
+                break;
+            case SpatialSamplingModel::TABULATED:
+            case SpatialSamplingModel::SINGLE_MAXWELL:
+            case SpatialSamplingModel::MAXWELL_BOLTZMANN:
+            case SpatialSamplingModel::Q_DISTRIBUTION:
+            case SpatialSamplingModel::UNIFORM:
+            default:
+                value = std::exp(-energy_ev / std::max(1.0e-3, characteristic_ev));
+                break;
+            }
+            spectrum.differential_number_flux[i] = std::max(0.0, value);
+        }
+    }
+
+    normalizeFluxShape(spectrum.differential_number_flux, spectrum.energy_grid_ev,
+                       estimateNumberFluxFromMoments(params, mass_kg));
+    return spectrum;
 }
 
 /**
@@ -704,6 +952,16 @@ Vector3D ParticleSource::sampleVelocityByModel(const Vector3D& preferred_directi
                   std::pow(std::max(1e-9, 1.0 - u(rng)),
                            -1.0 / std::max(1.01, sampling_params_.power_law_index));
         break;
+    case SpatialSamplingModel::TABULATED:
+    {
+        const double sampled_energy_ev =
+            sampleEnergyFromDiscreteSpectrum(observed_energy_ev_, observed_intensity_);
+        const double mass = getParticleTypeMass(particleType_);
+        thermal = std::sqrt(
+            2.0 * std::max(1.0e-6, sampled_energy_ev) * PhysicsConstants::ElementaryCharge /
+            std::max(1.0e-32, mass));
+        break;
+    }
     case SpatialSamplingModel::UNIFORM:
     default:
         break;

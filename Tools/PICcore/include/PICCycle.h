@@ -139,9 +139,38 @@ class PICCycle
         double surface_deposited_charge = 0.0;
     };
 
+    struct SurfaceBoundaryMetadata
+    {
+        int surface_id = -1;
+        int material_id = -1;
+        int circuit_node_id = -1;
+    };
+
+    struct SurfaceCurrentLedgerEntry
+    {
+        SurfaceBoundaryMetadata metadata;
+        double absorbed_electron_charge_c = 0.0;
+        double absorbed_ion_charge_c = 0.0;
+        double emitted_electron_charge_c = 0.0;
+        double incident_energy_j = 0.0;
+        std::size_t absorbed_electron_particles = 0;
+        std::size_t absorbed_ion_particles = 0;
+        std::size_t emitted_electron_particles = 0;
+    };
+
     const CycleStatistics& getStatistics() const
     {
         return cycle_stats_;
+    }
+
+    void setBoundaryMetadata(BoundaryFace face, const SurfaceBoundaryMetadata& metadata)
+    {
+        surface_boundary_metadata_[static_cast<std::size_t>(face)] = metadata;
+    }
+
+    const std::array<SurfaceCurrentLedgerEntry, 6>& getSurfaceCurrentLedger() const
+    {
+        return surface_current_ledger_;
     }
 
     double getAndResetSurfaceCharge()
@@ -180,6 +209,8 @@ class PICCycle
     std::vector<Utils::Vector3D> electric_field_;
     std::vector<Utils::Vector3D> magnetic_field_;
     std::array<BoundaryConditionPtr, 6> boundary_conditions_{};
+    std::array<SurfaceBoundaryMetadata, 6> surface_boundary_metadata_{};
+    std::array<SurfaceCurrentLedgerEntry, 6> surface_current_ledger_{};
     DomainBounds domain_bounds_{};
     bool field_solver_solution_valid_ = false;
 
@@ -204,12 +235,11 @@ class PICCycle
                                          double inward_offset = 0.0) const;
     void processRuntimeBoundaryEvents(const std::vector<RuntimeBoundaryEvent>& events,
                                       std::vector<ParticleTypeDef>& emitted_particles);
-    void processLegacyBoundaryEvents(const std::vector<RuntimeBoundaryEvent>& events);
     bool applyRuntimeBoundaryCondition(ParticlePtr particle, ElementId hint_element,
                                        std::vector<ParticleTypeDef>& emitted_particles,
                                        ElementId& resolved_element);
-    bool applyLegacyBoundaryFallback(ParticlePtr particle, ElementId hint_element,
-                                     ElementId& resolved_element);
+    void recordSurfaceBoundaryInteraction(BoundaryFace face, const ParticleTypeDef& particle,
+                                          const std::vector<ParticleTypeDef>& emitted_particles);
     ElementId locateParticleElement(const Utils::Point3D& position,
                                     ElementId hint_element = static_cast<ElementId>(-1)) const;
 };

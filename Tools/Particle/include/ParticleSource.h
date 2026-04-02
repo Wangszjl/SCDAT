@@ -1,7 +1,6 @@
 /**
  * @file ParticleSource.h
- * @brief 粒子源定义（SCDAT）
- * @ingroup ParticleModule
+ * @brief Particle source definitions for SCDAT.
  */
 
 #pragma once
@@ -35,62 +34,75 @@ using ParticleType = SCDAT::Particle::ParticleType;
 using ParticlePtr = SCDAT::Particle::ParticlePtr;
 using ParticleId = SCDAT::Particle::ParticleId;
 
-/**
- * @brief 空间分布采样模型
- */
 enum class SpatialSamplingModel
 {
-    UNIFORM = 0,          ///< 均匀分布
-    DOUBLE_MAXWELL = 1,   ///< 双麦克斯韦分布
-    KAPPA = 2,            ///< Kappa分布
-    POWER_LAW = 3,        ///< 幂律分布
-    SINGLE_MAXWELL = 4,   ///< 单麦克斯韦分布
-    Q_DISTRIBUTION = 5,   ///< q-分布（Tsallis统计）
-    MAXWELL_BOLTZMANN = 6 ///< 麦克斯韦-玻尔兹曼分布
+    UNIFORM = 0,
+    DOUBLE_MAXWELL = 1,
+    KAPPA = 2,
+    POWER_LAW = 3,
+    SINGLE_MAXWELL = 4,
+    Q_DISTRIBUTION = 5,
+    MAXWELL_BOLTZMANN = 6,
+    TABULATED = 7
 };
 
-/**
- * @brief 分布参数（默认值可直接用于演示）
- */
 struct SamplingParameters
 {
-    double density = 1.0e15;             ///< m^-3
-    double bulk_speed = 2.0e5;           ///< m/s
-    double thermal_speed = 5.0e4;        ///< m/s (cold)
-    double hot_thermal_speed = 2.0e5;    ///< m/s (hot)
-    double hot_fraction = 0.2;           ///< [0, 1]
-    double kappa = 3.5;                  ///< > 1.5
-    double power_law_index = 2.6;        ///< > 1
-    double spatial_scale = 0.05;         ///< m
-    double min_spatial_scale = 1.0e-4;   ///< m
-    double q_parameter = 1.5;            ///< q-分布参数 (Tsallis)
-    double characteristic_energy = 10.0; ///< 特征能量 (eV)
+    double density = 1.0e15;
+    double bulk_speed = 2.0e5;
+    double thermal_speed = 5.0e4;
+    double hot_thermal_speed = 2.0e5;
+    double hot_fraction = 0.2;
+    double kappa = 3.5;
+    double power_law_index = 2.6;
+    double spatial_scale = 0.05;
+    double min_spatial_scale = 1.0e-4;
+    double q_parameter = 1.5;
+    double characteristic_energy = 10.0;
 };
 
-/**
- * @brief 拟合摘要
- * 用空间等离子体观测数据拟合粒子分布模型时，返回本次拟合的结果、选中的模型、各模型得分以及相关说明
- */
 struct FitSummary
 {
     bool success = false;
     SpatialSamplingModel selected_model = SpatialSamplingModel::UNIFORM;
     double score_double_maxwell = 0.0;
     double score_kappa = 0.0;
-    double score_power_law = 0.0; ///< 记录本次拟合的得分（分数越高代表拟合效果越好）
+    double score_power_law = 0.0;
     std::string message;
 };
 
-/**
- * @brief 粒子源基类
- */
+enum class SpectrumUsage
+{
+    SamplingOnly,
+    CurrentBalance,
+    PicCalibration
+};
+
+struct SpectrumPopulation
+{
+    double density_m3 = 0.0;
+    double temperature_ev = 0.0;
+    double drift_speed_m_per_s = 0.0;
+    double mass_amu = 1.0;
+    double charge_number = 1.0;
+    double weight = 0.0;
+};
+
+struct ResolvedSpectrum
+{
+    SpatialSamplingModel model = SpatialSamplingModel::UNIFORM;
+    std::vector<SpectrumPopulation> populations;
+    std::vector<double> energy_grid_ev;
+    std::vector<double> differential_number_flux;
+    FitSummary fit_summary;
+};
+
 class ParticleSource
 {
   public:
     ParticleSource(const std::string& name, const ParticleType& particleType);
     virtual ~ParticleSource();
 
-    // 原有接口
     void setEnabled(bool enabled);
     bool isEnabled() const;
 
@@ -107,7 +119,6 @@ class ParticleSource
 
     virtual size_t emitParticles(std::vector<ParticleClass>& particles, double dt) = 0;
 
-    // 分布采样与拟合接口
     void setSamplingModel(SpatialSamplingModel model);
     SpatialSamplingModel getSamplingModel() const;
 
@@ -120,6 +131,13 @@ class ParticleSource
                                   const std::vector<double>& charge_density);
 
     FitSummary fitSamplingModelFromObservations();
+    ResolvedSpectrum resolveSpectrum(SpectrumUsage usage = SpectrumUsage::SamplingOnly) const;
+    static ResolvedSpectrum buildResolvedSpectrum(
+        const ParticleType& particleType, SpatialSamplingModel model,
+        const SamplingParameters& params, SpectrumUsage usage = SpectrumUsage::SamplingOnly,
+        const std::vector<double>& observed_energy_ev = {},
+        const std::vector<double>& observed_intensity = {},
+        const FitSummary& fit_summary = {});
 
     std::vector<Point3D> sampleSpatialPositions(size_t count) const;
     std::vector<Vector3D> sampleVelocityVectors(size_t count) const;
@@ -147,11 +165,9 @@ class ParticleSource
     std::vector<double> observed_intensity_;
     std::vector<double> detector_radius_;
     std::vector<double> detector_charge_density_;
+    FitSummary last_fit_summary_;
 };
 
-/**
- * @brief 表面粒子源
- */
 class SurfaceParticleSource : public ParticleSource
 {
   public:
@@ -180,9 +196,6 @@ class SurfaceParticleSource : public ParticleSource
     double workFunction_;
 };
 
-/**
- * @brief 体积粒子源
- */
 class VolumeParticleSource : public ParticleSource
 {
   public:
@@ -210,9 +223,6 @@ class VolumeParticleSource : public ParticleSource
     double temperature_;
 };
 
-/**
- * @brief 束流粒子源
- */
 class BeamParticleSource : public ParticleSource
 {
   public:
@@ -234,9 +244,6 @@ class BeamParticleSource : public ParticleSource
     double divergenceAngle_;
 };
 
-/**
- * @brief 粒子源管理器
- */
 class ParticleSourceManager
 {
   public:

@@ -59,6 +59,18 @@ bool NonlinearPoissonSolver::solve()
     const double denom = 2.0 / dx2 + 2.0 / dy2 + 2.0 / dz2;
 
     iterations_used_ = 0;
+    last_max_delta_ = 0.0;
+    last_residual_norm_ = 0.0;
+    converged_ = false;
+
+    const double derivative_step =
+        std::max(1.0e-9, std::abs(parameters_.derivative_step_v));
+    const double effective_diag_floor =
+        std::max(1.0e-18, std::abs(parameters_.minimum_effective_diagonal));
+    const double relaxation_floor =
+        std::clamp(parameters_.adaptive_relaxation_floor, 0.01, 1.0);
+    const bool use_quasi_newton = parameters_.solve_policy == NonlinearSolvePolicy::QuasiNewton;
+
     for (int iteration = 1; iteration <= parameters_.max_iterations; ++iteration)
     {
         for (std::size_t k = 0; k < nz_; ++k)
@@ -77,6 +89,8 @@ bool NonlinearPoissonSolver::solve()
         }
 
         double max_delta = 0.0;
+        double residual_sum = 0.0;
+        std::size_t interior_count = 0;
         for (std::size_t k = 0; k < nz_; ++k)
         {
             for (std::size_t j = 0; j < ny_; ++j)
@@ -96,6 +110,20 @@ bool NonlinearPoissonSolver::solve()
                     const double eps_r =
                         std::max(1.0, permittivity_ ? permittivity_(point, current_phi) : 1.0);
 
+                    double effective_denom = denom;
+                    if (use_quasi_newton && charge_density_)
+                    {
+                        const double rho_probe = charge_density_(point, current_phi + derivative_step);
+                        const double drho_dphi = (rho_probe - rho) / derivative_step;
+                        effective_denom -= drho_dphi / (kEpsilon0 * eps_r);
+                        if (std::abs(effective_denom) < effective_diag_floor)
+                        {
+                            effective_denom = effective_denom < 0.0
+                                                  ? -effective_diag_floor
+                                                  : effective_diag_floor;
+                        }
+                    }
+
                     const double rhs =
                         (potential_[flattenIndex(i + 1, j, k)] +
                          potential_[flattenIndex(i - 1, j, k)]) /
@@ -108,23 +136,45 @@ bool NonlinearPoissonSolver::solve()
                             dz2 +
                         rho / (kEpsilon0 * eps_r);
 
-                    const double updated = rhs / denom;
-                    const double relaxed =
-                        current_phi + parameters_.relaxation * (updated - current_phi);
-                    max_delta = std::max(max_delta, std::abs(relaxed - current_phi));
+                    const double updated = rhs / effective_denom;
+                    const double raw_delta = updated - current_phi;
+                    double local_relaxation = parameters_.relaxation;
+                    if (use_quasi_newton)
+                    {
+                        const double scale = 1.0 + std::abs(raw_delta) / std::max(1.0, std::abs(current_phi));
+                        local_relaxation = std::clamp(parameters_.relaxation / scale,
+                                                      relaxation_floor,
+                                                      parameters_.relaxation);
+                    }
+
+                    const double relaxed = current_phi + local_relaxation * raw_delta;
+                    const double step_delta = std::abs(relaxed - current_phi);
+                    max_delta = std::max(max_delta, step_delta);
+                    residual_sum += step_delta * step_delta;
+                    ++interior_count;
                     potential_[index] = relaxed;
                 }
             }
         }
 
         iterations_used_ = iteration;
-        if (max_delta <= parameters_.tolerance)
+        const double residual_norm =
+            interior_count > 0
+                ? std::sqrt(residual_sum / static_cast<double>(interior_count))
+                : 0.0;
+        last_max_delta_ = max_delta;
+        last_residual_norm_ = residual_norm;
+
+        if (max_delta <= parameters_.tolerance &&
+            residual_norm <= std::max(parameters_.tolerance, 1.0e-12))
         {
+            converged_ = true;
             updateElectricField();
             return true;
         }
     }
 
+    converged_ = false;
     updateElectricField();
     return false;
 }

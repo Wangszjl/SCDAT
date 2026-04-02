@@ -49,6 +49,41 @@ Utils::Vector3D inwardBoundaryNormal(PICCycle::BoundaryFace face)
     return Utils::Vector3D(0.0, 0.0, 0.0);
 }
 
+bool isElectronLike(const ParticleTypeDef& particle)
+{
+    switch (particle.getType())
+    {
+    case ::SCDAT::Particle::ParticleType::ELECTRON:
+    case ::SCDAT::Particle::ParticleType::PHOTOELECTRON:
+    case ::SCDAT::Particle::ParticleType::SECONDARY_ELECTRON:
+    case ::SCDAT::Particle::ParticleType::BACKSCATTERED_ELECTRON:
+    case ::SCDAT::Particle::ParticleType::AUGER_ELECTRON:
+    case ::SCDAT::Particle::ParticleType::THERMAL_ELECTRON:
+    case ::SCDAT::Particle::ParticleType::FIELD_EMISSION_ELECTRON:
+    case ::SCDAT::Particle::ParticleType::BETA_PARTICLE:
+        return true;
+    default:
+        return particle.getCharge() < 0.0;
+    }
+}
+
+bool isIonLike(const ParticleTypeDef& particle)
+{
+    switch (particle.getType())
+    {
+    case ::SCDAT::Particle::ParticleType::ION:
+    case ::SCDAT::Particle::ParticleType::POSITIVE_ION:
+    case ::SCDAT::Particle::ParticleType::MOLECULAR_ION:
+    case ::SCDAT::Particle::ParticleType::CLUSTER_ION:
+    case ::SCDAT::Particle::ParticleType::PROTON:
+    case ::SCDAT::Particle::ParticleType::ALPHA:
+    case ::SCDAT::Particle::ParticleType::HEAVY_ION:
+        return true;
+    default:
+        return particle.getCharge() > 0.0;
+    }
+}
+
 std::unordered_map<Mesh::NodeId, std::vector<Mesh::NodeId>>
 buildNodeNeighbors(const std::vector<Mesh::ElementPtr>& elements)
 {
@@ -247,6 +282,15 @@ bool PICCycle::initialize()
 
     // Reset runtime statistics.
     cycle_stats_ = CycleStatistics();
+    surface_current_ledger_.fill(SurfaceCurrentLedgerEntry{});
+    for (std::size_t face_index = 0; face_index < surface_boundary_metadata_.size(); ++face_index)
+    {
+        if (surface_boundary_metadata_[face_index].surface_id < 0)
+        {
+            surface_boundary_metadata_[face_index].surface_id = static_cast<int>(face_index);
+        }
+        surface_current_ledger_[face_index].metadata = surface_boundary_metadata_[face_index];
+    }
     field_solver_solution_valid_ = false;
     updateDomainBounds();
 
@@ -431,7 +475,6 @@ void PICCycle::pushParticles()
     size_t num_particles = container.size();
     auto it_begin = container.begin();
     size_t num_nodes = nodes_.size();
-    const bool runtime_boundary_enabled = hasRuntimeBoundaryConditions();
     const bool debug_push = (std::getenv("PIC_DEBUG_PUSH") != nullptr);
 
 #ifdef USE_OPENMP
@@ -533,20 +576,12 @@ void PICCycle::pushParticles()
                                thread_boundary_events[t].end());
     }
 
-    if (runtime_boundary_enabled)
+    std::vector<ParticleTypeDef> emitted_particles;
+    processRuntimeBoundaryEvents(boundary_events, emitted_particles);
+    if (!emitted_particles.empty())
     {
-        std::vector<ParticleTypeDef> emitted_particles;
-        processRuntimeBoundaryEvents(boundary_events, emitted_particles);
-        if (!emitted_particles.empty())
-        {
-            particle_manager_->getContainer().addParticles(emitted_particles);
-        }
+        particle_manager_->getContainer().addParticles(emitted_particles);
     }
-    else
-    {
-        processLegacyBoundaryEvents(boundary_events);
-    }
-
 #else
     std::vector<RuntimeBoundaryEvent> boundary_events;
     boundary_events.reserve(num_particles / 8 + 8);
@@ -581,18 +616,11 @@ void PICCycle::pushParticles()
         }
     }
 
-    if (runtime_boundary_enabled)
+    std::vector<ParticleTypeDef> emitted_particles;
+    processRuntimeBoundaryEvents(boundary_events, emitted_particles);
+    if (!emitted_particles.empty())
     {
-        std::vector<ParticleTypeDef> emitted_particles;
-        processRuntimeBoundaryEvents(boundary_events, emitted_particles);
-        if (!emitted_particles.empty())
-        {
-            particle_manager_->getContainer().addParticles(emitted_particles);
-        }
-    }
-    else
-    {
-        processLegacyBoundaryEvents(boundary_events);
+        particle_manager_->getContainer().addParticles(emitted_particles);
     }
 #endif
 }
@@ -1233,6 +1261,7 @@ bool PICCycle::applyRuntimeBoundaryCondition(ParticlePtr particle, ElementId hin
             inwardBoundaryNormal(*face), params_.time_step);
         emitted_particles.insert(emitted_particles.end(), generated_particles.begin(),
                                  generated_particles.end());
+        recordSurfaceBoundaryInteraction(*face, *particle, generated_particles);
 
         if (particle->getStatus() == ::SCDAT::Particle::ParticleStatus::ABSORBED)
         {
@@ -1260,69 +1289,40 @@ bool PICCycle::applyRuntimeBoundaryCondition(ParticlePtr particle, ElementId hin
     return true;
 }
 
-bool PICCycle::applyLegacyBoundaryFallback(ParticlePtr particle, ElementId hint_element,
-                                           ElementId& resolved_element)
+void PICCycle::recordSurfaceBoundaryInteraction(BoundaryFace face, const ParticleTypeDef& particle,
+                                                const std::vector<ParticleTypeDef>& emitted_particles)
 {
-    resolved_element = kInvalidElementId;
-    if (!particle || !domain_bounds_.valid || hint_element == kInvalidElementId ||
-        hint_element >= elements_.size() || !elements_[hint_element])
+    auto& ledger = surface_current_ledger_[toBoundaryIndex(face)];
+    ledger.metadata = surface_boundary_metadata_[toBoundaryIndex(face)];
+
+    const double particle_charge = particle.getCharge() * particle.getWeight();
+    const double particle_energy =
+        particle.getKineticEnergy() * std::max(1.0, particle.getWeight());
+
+    if (particle.getStatus() == ::SCDAT::Particle::ParticleStatus::ABSORBED)
     {
-        return false;
-    }
-
-    const double span_x =
-        std::max(domain_bounds_.max_corner.x() - domain_bounds_.min_corner.x(), 1.0e-12);
-    const double span_y =
-        std::max(domain_bounds_.max_corner.y() - domain_bounds_.min_corner.y(), 1.0e-12);
-    const double span_z =
-        std::max(domain_bounds_.max_corner.z() - domain_bounds_.min_corner.z(), 1.0e-12);
-    const double max_span = std::max({span_x, span_y, span_z});
-    const double outside_tol = std::max(1.0e-10, 1.0e-8 * max_span);
-    const double element_scale =
-        std::max(elements_[hint_element]->getCharacteristicLength(), 1.0e-12);
-    const double recover_tol = std::max(1.0e-8, std::min(1.0e-5 * max_span, 0.25 * element_scale));
-    const double inward_offset = std::max(1.0e-9, 1.0e-6 * max_span);
-
-    const auto face = detectBoundaryFace(particle->getPosition(), outside_tol, true, recover_tol);
-    if (!face)
-    {
-        return false;
-    }
-
-    const Utils::Point3D boundary_projection =
-        projectToBoundaryFace(*face, particle->getPosition(), 0.0);
-    const double overshoot_distance = particle->getPosition().distanceTo(boundary_projection);
-    if (overshoot_distance > recover_tol)
-    {
-        return false;
-    }
-
-    particle->setPosition(projectToBoundaryFace(*face, particle->getPosition(), inward_offset));
-
-    std::vector<double> barycentric(4, 0.0);
-    const auto canLocateLocally = [&](ElementId element_id) -> bool
-    {
-        return element_id != kInvalidElementId && element_id < elements_.size() &&
-               field_interpolator_->computeBarycentricCoordinates(particle->getPosition(),
-                                                                  element_id, barycentric);
-    };
-
-    if (canLocateLocally(hint_element))
-    {
-        resolved_element = hint_element;
-        return true;
-    }
-
-    for (const auto& neighbor : elements_[hint_element]->getNeighbors())
-    {
-        if (neighbor && canLocateLocally(neighbor->getId()))
+        ledger.incident_energy_j += particle_energy;
+        if (isElectronLike(particle))
         {
-            resolved_element = neighbor->getId();
-            return true;
+            ledger.absorbed_electron_charge_c += particle_charge;
+            ledger.absorbed_electron_particles += 1;
+        }
+        else if (isIonLike(particle))
+        {
+            ledger.absorbed_ion_charge_c += particle_charge;
+            ledger.absorbed_ion_particles += 1;
         }
     }
 
-    return resolved_element != kInvalidElementId;
+    for (const auto& emitted_particle : emitted_particles)
+    {
+        if (isElectronLike(emitted_particle))
+        {
+            ledger.emitted_electron_charge_c +=
+                emitted_particle.getCharge() * emitted_particle.getWeight();
+            ledger.emitted_electron_particles += 1;
+        }
+    }
 }
 
 void PICCycle::processRuntimeBoundaryEvents(const std::vector<RuntimeBoundaryEvent>& events,
@@ -1370,51 +1370,6 @@ void PICCycle::processRuntimeBoundaryEvents(const std::vector<RuntimeBoundaryEve
         }
         else
         {
-            particle_locations_.erase(particle.getId());
-        }
-    }
-}
-
-void PICCycle::processLegacyBoundaryEvents(const std::vector<RuntimeBoundaryEvent>& events)
-{
-    if (!particle_manager_ || events.empty())
-    {
-        return;
-    }
-
-    auto& container = particle_manager_->getContainer();
-    auto it_begin = container.begin();
-    for (const auto& event : events)
-    {
-        if (event.particle_index >= container.size())
-        {
-            continue;
-        }
-
-        auto& particle = *(it_begin + event.particle_index);
-        if (!particle.isActive())
-        {
-            particle_locations_.erase(particle.getId());
-            continue;
-        }
-
-        ElementId resolved_element = kInvalidElementId;
-        if (!applyLegacyBoundaryFallback(&particle, event.hint_element, resolved_element))
-        {
-            particle.markAsEscaped();
-        }
-
-        if (particle.isActive() && resolved_element != kInvalidElementId)
-        {
-            updateParticleLocation(&particle, resolved_element);
-        }
-        else if (!particle.isActive())
-        {
-            particle_locations_.erase(particle.getId());
-        }
-        else
-        {
-            particle.markAsEscaped();
             particle_locations_.erase(particle.getId());
         }
     }

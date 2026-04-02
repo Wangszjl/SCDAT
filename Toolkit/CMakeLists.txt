@@ -28,20 +28,35 @@ foreach(entry IN LISTS TOOLKIT_MODULES)
         APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_dir}"
     )
 
-    # ── 自动收集源文件与头文件 ────────────────────────────────────────────────
+    # ── 自动收集源文件与头文件（include/src 分层） ────────────────────────────
     file(GLOB_RECURSE _sources
+        "${_dir}/src/*.cpp"
+        "${_dir}/src/*.cc"
+        "${_dir}/src/*.cxx"
+        "${_dir}/src/*.c"
+    )
+    file(GLOB_RECURSE _headers
+        "${_dir}/include/*.h"
+        "${_dir}/include/*.hpp"
+        "${_dir}/include/*.hxx"
+        "${_dir}/include/*.hh"
+    )
+
+    # 兼容旧布局：若仍存在根目录头源文件，继续纳入构建
+    file(GLOB _legacy_sources
         "${_dir}/*.cpp"
         "${_dir}/*.cc"
         "${_dir}/*.cxx"
+        "${_dir}/*.c"
     )
-    file(GLOB_RECURSE _headers
+    file(GLOB _legacy_headers
         "${_dir}/*.h"
         "${_dir}/*.hpp"
         "${_dir}/*.hxx"
+        "${_dir}/*.hh"
     )
-
-    list(FILTER _sources EXCLUDE REGEX ".*/test/.*")
-    list(FILTER _headers EXCLUDE REGEX ".*/test/.*")
+    list(APPEND _sources ${_legacy_sources})
+    list(APPEND _headers ${_legacy_headers})
 
     # ── 注册库目标 ────────────────────────────────────────────────────────────
     if(_sources)
@@ -49,6 +64,7 @@ foreach(entry IN LISTS TOOLKIT_MODULES)
         add_library(Toolkit_${_target} STATIC ${_sources} ${_headers})
         target_include_directories(Toolkit_${_target}
             PUBLIC
+                $<BUILD_INTERFACE:${_dir}/include>
                 $<BUILD_INTERFACE:${_dir}>
                 $<INSTALL_INTERFACE:include/SCDAT/Toolkit/${_target}>
         )
@@ -58,6 +74,7 @@ foreach(entry IN LISTS TOOLKIT_MODULES)
         add_library(Toolkit_${_target} INTERFACE)
         target_include_directories(Toolkit_${_target}
             INTERFACE
+                $<BUILD_INTERFACE:${_dir}/include>
                 $<BUILD_INTERFACE:${_dir}>
                 $<INSTALL_INTERFACE:include/SCDAT/Toolkit/${_target}>
         )
@@ -69,15 +86,18 @@ foreach(entry IN LISTS TOOLKIT_MODULES)
         target_link_libraries(Toolkit_${_target}
             PUBLIC
                 SCDAT::Tools::Basic
+                SCDAT::Tools::Boundary
                 SCDAT::Tools::Coupling
                 SCDAT::Tools::Diagnostics
                 SCDAT::Tools::FieldSolver
                 SCDAT::Tools::Geometry
+                SCDAT::Tools::Interactions
                 SCDAT::Tools::Material
                 SCDAT::Tools::Matrix
                 SCDAT::Tools::Mesh
                 SCDAT::Tools::Output
                 SCDAT::Tools::Particle
+                SCDAT::Tools::PICcore
                 SCDAT::Tools::Solver
                 SCDAT::Tools::Vector
         )
@@ -96,4 +116,6 @@ foreach(entry IN LISTS TOOLKIT_MODULES)
     unset(_dir)
     unset(_sources)
     unset(_headers)
+    unset(_legacy_sources)
+    unset(_legacy_headers)
 endforeach()

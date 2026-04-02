@@ -8,6 +8,7 @@
 #include "../../Mesh/include/MeshPartitioning.h"
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -114,6 +115,13 @@ struct MultigridConfiguration
     MultigridCycleType cycle_type = MultigridCycleType::V_CYCLE;
 };
 
+struct CouplingIterationConfiguration
+{
+    int max_outer_iterations = 1;
+    double potential_tolerance_v = 1.0e-3;
+    double relaxation = 1.0;
+};
+
 struct ElementGeometry
 {
     double volume = 0.0;
@@ -129,6 +137,7 @@ class MultiBoundaryElectricFieldSolver
     using SparseMatrix = Eigen::SparseMatrix<double>;
     using DenseVector = Eigen::VectorXd;
     using NodeId = Mesh::NodeId;
+        using CouplingCallback = std::function<void(int, const std::vector<double>&)>;
 
     explicit MultiBoundaryElectricFieldSolver(Mesh::MeshPtr mesh);
     virtual ~MultiBoundaryElectricFieldSolver() = default;
@@ -143,8 +152,10 @@ class MultiBoundaryElectricFieldSolver
     void setMaterialPermittivity(Mesh::MaterialId material_id, double permittivity);
     void setSolverConfiguration(const SolverConfiguration& config);
     void setMultigridConfiguration(const MultigridConfiguration& config);
+    void setCouplingIterationConfiguration(const CouplingIterationConfiguration& config);
 
     bool solve();
+    bool solveCoupled(const CouplingCallback& callback = CouplingCallback{});
 
     double getPotential(NodeId node_id) const;
     Utils::Vector3D getElectricField(NodeId node_id) const;
@@ -158,6 +169,16 @@ class MultiBoundaryElectricFieldSolver
     int getIterationCount() const
     {
         return current_iteration_;
+    }
+
+    const std::vector<double>& getCouplingResidualHistory() const
+    {
+        return coupling_residual_history_;
+    }
+
+    int getCouplingIterationCount() const
+    {
+        return coupling_iteration_count_;
     }
 
     double validateSolution() const;
@@ -184,11 +205,14 @@ class MultiBoundaryElectricFieldSolver
 
     SolverConfiguration solver_config_;
     MultigridConfiguration multigrid_config_;
+    CouplingIterationConfiguration coupling_config_;
 
     double convergence_tolerance_ = 1e-12;
     int max_iterations_ = 10000;
     int current_iteration_ = 0;
     std::vector<double> residual_history_;
+    int coupling_iteration_count_ = 0;
+    std::vector<double> coupling_residual_history_;
 
     bool use_adaptive_refinement_ = false;
     bool use_multigrid_ = false;
@@ -203,12 +227,14 @@ class MultiBoundaryElectricFieldSolver
     bool solveWithMultigrid();
     bool solveWithDirectMethod();
     bool conjugateGradientSolve();
+    std::vector<double> snapshotNodePotentials() const;
+    void applyRelaxedNodePotentials(const std::vector<double>& previous,
+                                    const std::vector<double>& current,
+                                    double relaxation);
     void performVCycle();
     void calculateElectricField();
     double calculateResidualNorm() const;
     void setupPreconditioner();
-    double computeConstraintPenalty(NodeId primary_node, NodeId paired_node) const;
-    void applyPairConstraint(NodeId primary_node, NodeId paired_node, double offset);
 
     ElementGeometry calculateTetrahedronGeometry(Mesh::TetrahedronPtr tetrahedron) const;
     std::vector<Utils::Vector3D>
