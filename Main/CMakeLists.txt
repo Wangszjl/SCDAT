@@ -32,6 +32,7 @@ set(_SCDAT_LINK_LIBS
     SCDAT::Tools::Visualization
     SCDAT::Toolkit::Internal_Charging
     SCDAT::Toolkit::Plasma_Analysis
+    SCDAT::Toolkit::Radiation
     SCDAT::Toolkit::Surface_Charging
     SCDAT::Toolkit::Vacuum_Arc
 )

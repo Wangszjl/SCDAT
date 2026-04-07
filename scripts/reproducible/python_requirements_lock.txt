@@ -1,0 +1,7 @@
+# ENG-007 reproducible Python dependency lock
+# Install with: python -m pip install -r scripts/reproducible/python_requirements_lock.txt
+jsonschema==4.23.0
+numpy==2.2.4
+matplotlib==3.10.0
+imageio-ffmpeg==0.6.0
+h5py==3.13.0

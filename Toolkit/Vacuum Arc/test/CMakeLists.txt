@@ -22,3 +22,12 @@ target_link_libraries(VacuumArc_smoke_test
         GTest::gtest_main
 )
 gtest_discover_tests(VacuumArc_smoke_test)
+
+add_executable(VacuumArc_presets_smoke_test VacuumArc_presets_smoke_test.cpp)
+target_link_libraries(VacuumArc_presets_smoke_test
+    PRIVATE
+        SCDAT::Toolkit::Vacuum_Arc
+        SCDAT::Tools::Output
+        GTest::gtest_main
+)
+gtest_discover_tests(VacuumArc_presets_smoke_test)

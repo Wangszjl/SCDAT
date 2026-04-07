@@ -1,0 +1,28 @@
+{
+  "schema_version": "v1",
+  "lock_id": "eng-007-reproducible-build-v1",
+  "generated_utc": "2026-04-04T00:00:00Z",
+  "toolchain": {
+    "cmake": "3.20+",
+    "cpp_standard": "C++20",
+    "recommended_generator": "Ninja",
+    "compilers": [
+      "GCC 13.x",
+      "Clang 16.x",
+      "MSVC 19.38+"
+    ],
+    "python": "3.12.x"
+  },
+  "paths": {
+    "python_requirements_lock": "scripts/reproducible/python_requirements_lock.txt",
+    "dockerfile": "scripts/reproducible/Dockerfile.scdat.repro",
+    "run_script_ps1": "scripts/reproducible/run_repro_build_in_container.ps1",
+    "run_script_sh": "scripts/reproducible/run_repro_build_in_container.sh"
+  },
+  "sha256": {
+    "python_requirements_lock": "c3ebe76c96828f9faf323aaa45e9f7c0916681d9aa72b95a4730833f03dcdde3",
+    "dockerfile": "31cff9de4093567030a1506b3da475910767c8c3a186f21f2dc127c4d9823eeb",
+    "run_script_ps1": "34d5e81e6c00ee7702316f426666a25cac2a74e5eadc54393cf7e9d8b265a7f0",
+    "run_script_sh": "48d3938aced41aa0598e646a9f96310222e3e685c3f9ea2a852eda75e906355b"
+  }
+}

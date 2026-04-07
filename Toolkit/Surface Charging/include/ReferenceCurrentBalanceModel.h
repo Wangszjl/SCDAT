@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../Plasma Analysis/include/FluidAlgorithmConfig.h"
+#include "SurfaceElectronCollectionModel.h"
 
 #include "../../Tools/Material/include/MaterialProperty.h"
 #include "../../Tools/Particle/include/ParticleSource.h"
@@ -57,6 +58,8 @@ struct ReferenceCurrentBalanceConfig
     double patch_flow_angle_deg = 0.0;
     double patch_thickness_m = 1.0e-4;
     double patch_conductivity_s_per_m = 0.0;
+    ElectronCollectionModelKind electron_collection_model =
+        ElectronCollectionModelKind::OmlLike;
     double electron_collection_coefficient = 1.0;
     double ion_collection_coefficient = 1.0;
     double bulk_flow_velocity_m_per_s = 0.0;
@@ -68,6 +71,9 @@ struct ReferenceCurrentBalanceConfig
     double backscatter_atomic_number = 13.0;
     bool enable_ram_current = false;
     bool use_photoelectron_suppression = true;
+    bool enable_secondary_electron = true;
+    bool enable_backscatter = true;
+    bool enable_photoelectron = true;
 };
 
 class ReferenceCurrentBalanceModel
@@ -117,7 +123,7 @@ class ReferenceCurrentBalanceModel
                                         double flow_speed_m_per_s);
     static double ramPatchCurrentDensity(double surface_potential_v, double ion_density_m3,
                                          double ion_temperature_ev, double ion_mass_amu,
-                                         double flow_speed_m_per_s, double patch_flow_angle_deg);
+                                         double projected_flow_speed_m_per_s);
     static double safeExp(double exponent);
     static double erfApprox(double x);
 

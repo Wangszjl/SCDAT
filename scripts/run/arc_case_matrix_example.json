@@ -1,0 +1,49 @@
+{
+  "variants": [
+    {
+      "id": "arc_pic_aligned",
+      "alignment_mode": "arc_pic_aligned"
+    },
+    {
+      "id": "legacy_baseline",
+      "alignment_mode": "legacy_baseline"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "triple_junction",
+      "config_json": "scripts/run/arc_config_full_example.json",
+      "base_preset": "triple_junction_flashover",
+      "run": {
+        "steps": 20,
+        "time_step_s": 5.0e-10
+      }
+    },
+    {
+      "case_id": "microgap",
+      "config_json": "scripts/run/arc_config_full_example.json",
+      "base_preset": "microgap_flashover",
+      "run": {
+        "steps": 16,
+        "time_step_s": 1.0e-9
+      },
+      "config": {
+        "surface_potential_v": 150.0,
+        "applied_field_v_per_m": 4.0e7
+      }
+    },
+    {
+      "case_id": "restrike",
+      "config_json": "scripts/run/arc_config_full_example.json",
+      "base_preset": "restrike_recovery",
+      "run": {
+        "steps": 12,
+        "time_step_s": 1.0e-9
+      },
+      "config": {
+        "surface_potential_v": 80.0,
+        "applied_field_v_per_m": 3.5e7
+      }
+    }
+  ]
+}

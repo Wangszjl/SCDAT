@@ -10,6 +10,7 @@
 set(TOOLKIT_MODULES
     "Internal_Charging|Internal Charging"
     "Plasma_Analysis|Plasma Analysis"
+    "Radiation|Radiation"
     "Surface_Charging|Surface Charging"
     "Vacuum_Arc|Vacuum Arc"
 )

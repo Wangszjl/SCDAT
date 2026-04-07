@@ -43,6 +43,8 @@ class MaterialDatabase
 class UnifiedMaterialDatabase : public MaterialDatabase
 {
   public:
+    UnifiedMaterialDatabase();
+
     void addAlias(const std::string& alias, Mesh::MaterialId id);
     const MaterialProperty* findByAliasOrName(const std::string& name) const;
 

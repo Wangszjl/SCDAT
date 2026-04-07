@@ -1,4 +1,5 @@
 #include "ReferenceCurrentBalanceModel.h"
+#include "SurfaceFlowCouplingModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -403,16 +404,14 @@ double ReferenceCurrentBalanceModel::ramPatchCurrentDensity(double surface_poten
                                                             double ion_density_m3,
                                                             double ion_temperature_ev,
                                                             double ion_mass_amu,
-                                                            double flow_speed_m_per_s,
-                                                            double patch_flow_angle_deg)
+                                                            double projected_flow_speed_m_per_s)
 {
     const double ni_cm3 = clampPositive(ion_density_m3 * 1.0e-6, 0.0);
     const double ti_ev = clampPositive(ion_temperature_ev, 1.0e-6);
-    const double flow_speed_km_s = flow_speed_m_per_s * 1.0e-3;
-    const double alpha = patch_flow_angle_deg * kPi / 180.0;
+    const double flow_speed_km_s = projected_flow_speed_m_per_s * 1.0e-3;
     const double qv = std::sqrt(std::abs(surface_potential_v) / ti_ev);
     const double wt = 13.84 * std::sqrt(ti_ev / clampPositive(ion_mass_amu, 1.0));
-    const double qd = flow_speed_km_s * std::cos(alpha) / clampPositive(wt, 1.0e-12);
+    const double qd = flow_speed_km_s / clampPositive(wt, 1.0e-12);
     double current_na_per_m2 = 0.08011 * ni_cm3 * wt;
     if (surface_potential_v >= 0.0)
     {
@@ -428,30 +427,22 @@ double ReferenceCurrentBalanceModel::ramPatchCurrentDensity(double surface_poten
 
 double ReferenceCurrentBalanceModel::computeElectronCollection(double surface_potential_v) const
 {
+    const auto& collection_model =
+        selectSurfaceElectronCollectionModel(config_.electron_collection_model);
     const auto population_current = [&](const Particle::SpectrumPopulation& population) {
         const double base_flux = thermalCurrentDensity(
             population.density_m3, population.temperature_ev,
             clampPositive(population.mass_amu, 1.0e-6) * kAtomicMassUnit);
-        const double factor = surface_potential_v <= 0.0
-                                  ? safeExp(surface_potential_v /
-                                            clampPositive(population.temperature_ev, 1.0e-3))
-                                  : (1.0 + surface_potential_v /
-                                               clampPositive(population.temperature_ev, 1.0e-3));
+        const double factor =
+            collection_model.populationFactor(surface_potential_v, population.temperature_ev);
         return -base_flux * clampPositive(config_.electron_collection_coefficient, 0.0) *
                clampPositive(config_.electron_calibration_factor, 0.1) * factor;
     };
     const auto flux_current = [&](const Particle::ResolvedSpectrum& spectrum) {
         const double mean_energy_ev = averageDiscreteEnergy(spectrum);
         const double current = integrateDiscreteFlux(spectrum, [&](double energy_ev, double flux) {
-            if (surface_potential_v <= 0.0 && energy_ev + surface_potential_v <= 0.0)
-            {
-                return 0.0;
-            }
-            const double enhancement =
-                surface_potential_v > 0.0
-                    ? (1.0 + surface_potential_v / clampPositive(mean_energy_ev, 1.0e-3))
-                    : 1.0;
-            return flux * enhancement;
+            return flux * collection_model.fluxCollectionWeight(surface_potential_v, energy_ev,
+                                                                mean_energy_ev);
         });
         return -kElementaryCharge * clampPositive(config_.electron_collection_coefficient, 0.0) *
                clampPositive(config_.electron_calibration_factor, 0.1) * current;
@@ -462,11 +453,8 @@ double ReferenceCurrentBalanceModel::computeElectronCollection(double surface_po
     }
     const double base_flux = thermalCurrentDensity(
         config_.plasma.electron_density_m3, config_.plasma.electron_temperature_ev, kElectronMass);
-    const double factor = surface_potential_v <= 0.0
-                              ? safeExp(surface_potential_v /
-                                        clampPositive(config_.plasma.electron_temperature_ev, 1.0e-3))
-                              : (1.0 + surface_potential_v /
-                                           clampPositive(config_.plasma.electron_temperature_ev, 1.0e-3));
+    const double factor = collection_model.populationFactor(
+        surface_potential_v, config_.plasma.electron_temperature_ev);
     return -base_flux * clampPositive(config_.electron_collection_coefficient, 0.0) *
            clampPositive(config_.electron_calibration_factor, 0.1) * factor;
 }
@@ -530,6 +518,8 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
     const auto& material =
         role == ReferenceSurfaceRole::Body ? config_.body_material : config_.patch_material;
     const double potential = rolePotential(role, body_potential_v, patch_potential_v);
+    const auto& collection_model =
+        selectSurfaceElectronCollectionModel(config_.electron_collection_model);
     components.electron_collection_a_per_m2 = computeElectronCollection(potential);
     components.ion_collection_a_per_m2 = computeIonCollection(potential);
 
@@ -547,22 +537,18 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
         const double current = thermalCurrentDensity(
             population.density_m3, population.temperature_ev,
             clampPositive(population.mass_amu, 1.0e-6) * kAtomicMassUnit);
-        const double factor = potential <= 0.0
-                                  ? safeExp(potential /
-                                            clampPositive(population.temperature_ev, 1.0e-3))
-                                  : (1.0 + potential /
-                                               clampPositive(population.temperature_ev, 1.0e-3));
+        const double factor = collection_model.populationFactor(potential, population.temperature_ev);
         return current * clampPositive(config_.electron_collection_coefficient, 0.0) *
                clampPositive(config_.electron_calibration_factor, 0.1) * factor * average_yield *
                secondary_escape;
     };
     const auto electron_secondary_from_flux = [&](const Particle::ResolvedSpectrum& spectrum) {
+        const double mean_energy_ev = averageDiscreteEnergy(spectrum);
         const double flux = integrateDiscreteFlux(spectrum, [&](double energy_ev, double value) {
-            if (potential <= 0.0 && energy_ev + potential <= 0.0)
-            {
-                return 0.0;
-            }
-            return value * computeSeeYield(material, energy_ev + std::max(0.0, potential), 0.0);
+            const double weight =
+                collection_model.fluxEmissionWeight(potential, energy_ev, mean_energy_ev);
+            return value * weight *
+                   computeSeeYield(material, energy_ev + std::max(0.0, potential), 0.0);
         });
         return flux * kElementaryCharge *
                clampPositive(config_.electron_collection_coefficient, 0.0) *
@@ -613,22 +599,17 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
         const double current = thermalCurrentDensity(
             population.density_m3, population.temperature_ev,
             clampPositive(population.mass_amu, 1.0e-6) * kAtomicMassUnit);
-        const double factor = potential <= 0.0
-                                  ? safeExp(potential /
-                                            clampPositive(population.temperature_ev, 1.0e-3))
-                                  : (1.0 + potential /
-                                               clampPositive(population.temperature_ev, 1.0e-3));
+        const double factor = collection_model.populationFactor(potential, population.temperature_ev);
         return current * clampPositive(config_.electron_collection_coefficient, 0.0) *
                clampPositive(config_.electron_calibration_factor, 0.1) * factor * average_yield *
                secondary_escape;
     };
     const auto backscatter_from_flux = [&](const Particle::ResolvedSpectrum& spectrum) {
+        const double mean_energy_ev = averageDiscreteEnergy(spectrum);
         const double flux = integrateDiscreteFlux(spectrum, [&](double energy_ev, double value) {
-            if (potential <= 0.0 && energy_ev + potential <= 0.0)
-            {
-                return 0.0;
-            }
-            return value * backscatterYield(
+            const double weight =
+                collection_model.fluxEmissionWeight(potential, energy_ev, mean_energy_ev);
+            return value * weight * backscatterYield(
                                energy_ev + std::max(0.0, potential), 0.0,
                                material.getScalarProperty("atomic_number",
                                                           config_.backscatter_atomic_number));
@@ -699,6 +680,9 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
 
     if (config_.enable_ram_current)
     {
+        const auto flow_projection = resolveSurfaceFlowProjection(
+            config_.bulk_flow_velocity_m_per_s, config_.flow_alignment_cosine,
+            config_.patch_flow_angle_deg);
         const double ion_density = config_.has_ion_spectrum
                                        ? spectrumDensity(config_.ion_spectrum,
                                                          config_.plasma.ion_density_m3)
@@ -715,15 +699,28 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
         {
             components.ram_ion_a_per_m2 = ramBodyCurrentDensity(
                 potential, ion_density, ion_temperature, ion_mass_amu,
-                std::max(0.0, config_.bulk_flow_velocity_m_per_s *
-                                  std::clamp(config_.flow_alignment_cosine, -1.0, 1.0)));
+                std::max(0.0, flow_projection.body_projected_speed_m_per_s));
         }
         else
         {
             components.ram_ion_a_per_m2 = ramPatchCurrentDensity(
                 potential, ion_density, ion_temperature, ion_mass_amu,
-                std::max(0.0, config_.bulk_flow_velocity_m_per_s), config_.patch_flow_angle_deg);
+                flow_projection.patch_projected_speed_m_per_s);
         }
+    }
+
+    if (!config_.enable_secondary_electron)
+    {
+        components.secondary_electron_a_per_m2 = 0.0;
+        components.ion_secondary_electron_a_per_m2 = 0.0;
+    }
+    if (!config_.enable_backscatter)
+    {
+        components.backscatter_electron_a_per_m2 = 0.0;
+    }
+    if (!config_.enable_photoelectron)
+    {
+        components.photoelectron_a_per_m2 = 0.0;
     }
 
     components.net_a_per_m2 = components.electron_collection_a_per_m2 +

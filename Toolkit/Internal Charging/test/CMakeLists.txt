@@ -22,3 +22,16 @@ target_link_libraries(InternalCharging_smoke_test
         GTest::gtest_main
 )
 gtest_discover_tests(InternalCharging_smoke_test)
+
+add_executable(InternalCharging_radiation_coupling_smoke_test
+    InternalCharging_radiation_coupling_smoke_test.cpp
+)
+target_link_libraries(InternalCharging_radiation_coupling_smoke_test
+    PRIVATE
+        SCDAT::Toolkit::Internal_Charging
+        SCDAT::Toolkit::Radiation
+    SCDAT::Tools::Coupling
+        SCDAT::Tools::Output
+        GTest::gtest_main
+)
+gtest_discover_tests(InternalCharging_radiation_coupling_smoke_test)

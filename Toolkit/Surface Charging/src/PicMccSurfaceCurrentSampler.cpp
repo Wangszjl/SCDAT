@@ -1,4 +1,5 @@
 #include "PicMccSurfaceCurrentSampler.h"
+#include "SurfaceFlowCouplingModel.h"
 
 #include "../../Tools/Boundary/include/BoundaryConditions.h"
 #include "../../Tools/FieldSolver/include/PoissonSolver.h"
@@ -239,12 +240,14 @@ void initializeParticles(SCDAT::Particle::ParticleManager& particle_manager, con
     const double ion_weight =
         ion_density * volume / std::max(1.0, macro_particles_per_species);
 
-    const double aligned_flow_speed =
-        std::max(0.0, config.bulk_flow_velocity_m_per_s) *
-        std::max(0.0, std::clamp(config.flow_alignment_cosine, -1.0, 1.0)) *
-        std::max(0.0, std::cos(config.flow_angle_deg * kPi / 180.0));
-    const double ion_drift_z = -(aligned_flow_speed + std::max(0.0, config.ion_directed_velocity_m_per_s));
-    const double electron_drift_z = -aligned_flow_speed * std::clamp(config.electron_flow_coupling, 0.0, 1.0);
+    const auto flow_projection = resolveSurfaceFlowProjection(
+        config.bulk_flow_velocity_m_per_s, config.flow_alignment_cosine, config.flow_angle_deg);
+    const double toward_surface_flow_speed =
+        std::max(0.0, flow_projection.patch_projected_speed_m_per_s);
+    const double ion_drift_z =
+        -(toward_surface_flow_speed + std::max(0.0, config.ion_directed_velocity_m_per_s));
+    const double electron_drift_z =
+        -toward_surface_flow_speed * std::clamp(config.electron_flow_coupling, 0.0, 1.0);
 
     for (std::size_t element_index = 0; element_index < mesh.getElementCount(); ++element_index)
     {

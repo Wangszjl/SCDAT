@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <numeric>
+#include <string>
 
 namespace SCDAT
 {
@@ -15,6 +16,8 @@ bool FluidAlgorithmAdapter::initialize(const FluidAlgorithmConfig& config)
     config_ = config;
     plasma_state_ = config.initial_plasma;
     detector_ = DensePlasmaDetector(config.dense_plasma_threshold_m3);
+    reaction_collision_library_.configure(config.reaction_collision);
+    advanced_closure_model_.configure(config.advanced_closure);
 
     FieldSolver::BoltzmannParameters boltzmann_parameters;
     boltzmann_parameters.reduced_field_td =
@@ -43,10 +46,46 @@ bool FluidAlgorithmAdapter::initialize(const FluidAlgorithmConfig& config)
 
     assessment_ = detector_.assess(plasma_state_);
     boundary_state_ = boundary_layer_.analyze(plasma_state_, assessment_, config.initial_potential_v);
+    reaction_state_ = reaction_collision_library_.evaluate(plasma_state_, assessment_);
+    const double characteristic_length_m =
+        std::max(1.0e-9,
+                 config.domain_size.z() /
+                     std::max(1.0, config.resolution.z()));
+    closure_state_ = advanced_closure_model_.evaluate(plasma_state_, assessment_, reaction_state_,
+                                                      characteristic_length_m,
+                                                      config.time_step_s);
     status_.average_density_m3 = plasma_state_.electron_density_m3;
     status_.average_potential_v = 0.5 * config.initial_potential_v;
     status_.debye_length_m = assessment_.debye_length_m;
     status_.sheath_thickness_m = boundary_state_.sheath_thickness_m;
+    status_.presheath_thickness_m = boundary_state_.presheath_thickness_m;
+    status_.sheath_potential_drop_v = boundary_state_.sheath_potential_drop_v;
+    status_.presheath_potential_drop_v = boundary_state_.presheath_potential_drop_v;
+    status_.boundary_wall_field_v_per_m = boundary_state_.wall_field_v_per_m;
+    status_.ion_bohm_velocity_m_per_s = boundary_state_.bohm_velocity_m_per_s;
+    status_.ion_mach_at_sheath_edge = boundary_state_.ion_mach_at_sheath_edge;
+    status_.ionization_source_m3_per_s = reaction_state_.ionization_source_m3_per_s;
+    status_.recombination_sink_m3_per_s = reaction_state_.recombination_sink_m3_per_s;
+    status_.effective_collision_frequency_hz = reaction_state_.effective_collision_frequency_hz;
+    status_.charge_exchange_frequency_hz = reaction_state_.charge_exchange_frequency_hz;
+    status_.reaction_energy_loss_ev_per_s = reaction_state_.electron_energy_loss_ev_per_s;
+    status_.reaction_momentum_transfer_ratio = reaction_state_.momentum_transfer_ratio;
+    status_.reaction_active_processes = reaction_state_.active_processes;
+    status_.advanced_closure_enabled =
+        config.advanced_closure.enable_non_equilibrium_closure ||
+        config.advanced_closure.enable_turbulence_closure;
+    status_.non_equilibrium_ratio = closure_state_.non_equilibrium_ratio;
+    status_.non_equilibrium_relaxation_rate_hz =
+        closure_state_.non_equilibrium_relaxation_rate_hz;
+    status_.electron_temperature_closure_delta_ev =
+        closure_state_.electron_temperature_delta_ev;
+    status_.turbulence_intensity = closure_state_.turbulence_intensity;
+    status_.turbulence_eddy_diffusivity_m2_per_s =
+        closure_state_.turbulence_eddy_diffusivity_m2_per_s;
+    status_.turbulence_dissipation_rate_w_per_m3 =
+        closure_state_.turbulence_dissipation_rate_w_per_m3;
+    status_.closure_density_correction_m3 = closure_state_.density_correction_m3;
+    status_.closure_active_terms = closure_state_.active_terms;
     status_.dense_plasma_detected = assessment_.is_dense;
     initialized_ = true;
     return true;
@@ -60,6 +99,38 @@ bool FluidAlgorithmAdapter::advance(double dt)
     }
 
     assessment_ = detector_.assess(plasma_state_);
+    reaction_state_ = reaction_collision_library_.evaluate(plasma_state_, assessment_);
+
+    const double net_reaction_source_m3_per_s =
+        reaction_state_.ionization_source_m3_per_s - reaction_state_.recombination_sink_m3_per_s;
+    const double density_baseline = std::max(1.0e6, plasma_state_.electron_density_m3);
+    const double max_density_delta =
+        std::max(0.0, config_.reaction_collision.max_relative_density_change_per_step) *
+        density_baseline;
+    const double reaction_density_delta =
+        std::clamp(net_reaction_source_m3_per_s * dt, -max_density_delta, max_density_delta);
+
+    const double characteristic_length_m =
+        std::max(1.0e-9,
+                 config_.domain_size.z() /
+                     std::max(1.0, config_.resolution.z()));
+    closure_state_ = advanced_closure_model_.evaluate(plasma_state_, assessment_, reaction_state_,
+                                                      characteristic_length_m,
+                                                      dt);
+    const double closure_density_delta = std::clamp(
+        closure_state_.density_correction_m3,
+        -0.5 * max_density_delta,
+        0.5 * max_density_delta);
+
+    plasma_state_.electron_temperature_ev =
+        std::max(0.05,
+                 plasma_state_.electron_temperature_ev -
+                     reaction_state_.electron_energy_loss_ev_per_s * dt);
+    plasma_state_.electron_temperature_ev =
+        std::max(0.05,
+                 plasma_state_.electron_temperature_ev +
+                     closure_state_.electron_temperature_delta_ev);
+
     const auto& boltzmann_state = boltzmann_solver_.solve(plasma_state_.electron_temperature_ev);
     plasma_state_.electric_field_v_per_m = boltzmann_state.mean_energy_ev * 500.0;
 
@@ -78,7 +149,12 @@ bool FluidAlgorithmAdapter::advance(double dt)
         density.empty() ? 0.0
                         : std::accumulate(density.begin(), density.end(), 0.0) /
                               static_cast<double>(density.size());
-    plasma_state_.electron_density_m3 = average_density;
+    const double reaction_adjusted_density =
+        std::max(1.0e6, average_density + reaction_density_delta + closure_density_delta);
+    plasma_state_.electron_density_m3 = reaction_adjusted_density;
+    plasma_state_.ion_density_m3 =
+        std::max(1.0e6, plasma_state_.ion_density_m3 + reaction_density_delta +
+                           0.5 * closure_density_delta);
 
     poisson_solver_.setChargeDensityFunction([this](const Geometry::Point3D& point, double phi) {
         const double sheath_boost =
@@ -95,13 +171,41 @@ bool FluidAlgorithmAdapter::advance(double dt)
             ? 0.0
             : std::accumulate(potential.begin(), potential.end(), 0.0) /
                   static_cast<double>(potential.size());
-    status_.average_density_m3 = average_density;
+    status_.average_density_m3 = reaction_adjusted_density;
     status_.time_s += dt;
     status_.steps_completed += 1;
     status_.dense_plasma_detected = assessment_.is_dense;
     status_.debye_length_m = assessment_.debye_length_m;
     boundary_state_ = boundary_layer_.analyze(plasma_state_, assessment_, status_.average_potential_v);
     status_.sheath_thickness_m = boundary_state_.sheath_thickness_m;
+    status_.presheath_thickness_m = boundary_state_.presheath_thickness_m;
+    status_.sheath_potential_drop_v = boundary_state_.sheath_potential_drop_v;
+    status_.presheath_potential_drop_v = boundary_state_.presheath_potential_drop_v;
+    status_.boundary_wall_field_v_per_m = boundary_state_.wall_field_v_per_m;
+    status_.ion_bohm_velocity_m_per_s = boundary_state_.bohm_velocity_m_per_s;
+    status_.ion_mach_at_sheath_edge = boundary_state_.ion_mach_at_sheath_edge;
+    status_.ionization_source_m3_per_s = reaction_state_.ionization_source_m3_per_s;
+    status_.recombination_sink_m3_per_s = reaction_state_.recombination_sink_m3_per_s;
+    status_.effective_collision_frequency_hz = reaction_state_.effective_collision_frequency_hz;
+    status_.charge_exchange_frequency_hz = reaction_state_.charge_exchange_frequency_hz;
+    status_.reaction_energy_loss_ev_per_s = reaction_state_.electron_energy_loss_ev_per_s;
+    status_.reaction_momentum_transfer_ratio = reaction_state_.momentum_transfer_ratio;
+    status_.reaction_active_processes = reaction_state_.active_processes;
+    status_.advanced_closure_enabled =
+        config_.advanced_closure.enable_non_equilibrium_closure ||
+        config_.advanced_closure.enable_turbulence_closure;
+    status_.non_equilibrium_ratio = closure_state_.non_equilibrium_ratio;
+    status_.non_equilibrium_relaxation_rate_hz =
+        closure_state_.non_equilibrium_relaxation_rate_hz;
+    status_.electron_temperature_closure_delta_ev =
+        closure_state_.electron_temperature_delta_ev;
+    status_.turbulence_intensity = closure_state_.turbulence_intensity;
+    status_.turbulence_eddy_diffusivity_m2_per_s =
+        closure_state_.turbulence_eddy_diffusivity_m2_per_s;
+    status_.turbulence_dissipation_rate_w_per_m3 =
+        closure_state_.turbulence_dissipation_rate_w_per_m3;
+    status_.closure_density_correction_m3 = closure_state_.density_correction_m3;
+    status_.closure_active_terms = closure_state_.active_terms;
     return true;
 }
 
@@ -161,6 +265,43 @@ Output::ColumnarDataSet FluidAlgorithmAdapter::buildProfileDataSet() const
     }
 
     data_set.metadata["module"] = "Plasma Analysis";
+    data_set.metadata["sheath_thickness_m"] = std::to_string(status_.sheath_thickness_m);
+    data_set.metadata["presheath_thickness_m"] = std::to_string(status_.presheath_thickness_m);
+    data_set.metadata["sheath_potential_drop_v"] = std::to_string(status_.sheath_potential_drop_v);
+    data_set.metadata["presheath_potential_drop_v"] = std::to_string(status_.presheath_potential_drop_v);
+    data_set.metadata["boundary_wall_field_v_per_m"] = std::to_string(status_.boundary_wall_field_v_per_m);
+    data_set.metadata["ion_bohm_velocity_m_per_s"] = std::to_string(status_.ion_bohm_velocity_m_per_s);
+    data_set.metadata["ion_mach_at_sheath_edge"] = std::to_string(status_.ion_mach_at_sheath_edge);
+    data_set.metadata["ionization_source_m3_per_s"] = std::to_string(status_.ionization_source_m3_per_s);
+    data_set.metadata["recombination_sink_m3_per_s"] = std::to_string(status_.recombination_sink_m3_per_s);
+    data_set.metadata["effective_collision_frequency_hz"] =
+        std::to_string(status_.effective_collision_frequency_hz);
+    data_set.metadata["charge_exchange_frequency_hz"] =
+        std::to_string(status_.charge_exchange_frequency_hz);
+    data_set.metadata["reaction_energy_loss_ev_per_s"] =
+        std::to_string(status_.reaction_energy_loss_ev_per_s);
+    data_set.metadata["reaction_momentum_transfer_ratio"] =
+        std::to_string(status_.reaction_momentum_transfer_ratio);
+    data_set.metadata["reaction_active_processes"] =
+        std::to_string(status_.reaction_active_processes);
+    data_set.metadata["advanced_closure_enabled"] =
+        status_.advanced_closure_enabled ? "1" : "0";
+    data_set.metadata["non_equilibrium_ratio"] =
+        std::to_string(status_.non_equilibrium_ratio);
+    data_set.metadata["non_equilibrium_relaxation_rate_hz"] =
+        std::to_string(status_.non_equilibrium_relaxation_rate_hz);
+    data_set.metadata["electron_temperature_closure_delta_ev"] =
+        std::to_string(status_.electron_temperature_closure_delta_ev);
+    data_set.metadata["turbulence_intensity"] =
+        std::to_string(status_.turbulence_intensity);
+    data_set.metadata["turbulence_eddy_diffusivity_m2_per_s"] =
+        std::to_string(status_.turbulence_eddy_diffusivity_m2_per_s);
+    data_set.metadata["turbulence_dissipation_rate_w_per_m3"] =
+        std::to_string(status_.turbulence_dissipation_rate_w_per_m3);
+    data_set.metadata["closure_density_correction_m3"] =
+        std::to_string(status_.closure_density_correction_m3);
+    data_set.metadata["closure_active_terms"] =
+        std::to_string(status_.closure_active_terms);
     return data_set;
 }
 

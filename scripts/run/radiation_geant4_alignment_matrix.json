@@ -1,0 +1,80 @@
+{
+  "drift_thresholds": {
+    "det_peak_dose_rel": 0.05,
+    "det_integral_rel": 0.05,
+    "mc_peak_dose_rel": 0.08,
+    "mc_integral_rel": 0.08,
+    "profile_rmse_rel": 0.15
+  },
+  "cases": [
+    {
+      "case_id": "geo_electron_belt",
+      "base_preset": "geo_electron_belt_dose",
+      "deterministic": {
+        "config": {
+          "enable_monte_carlo_transport": false
+        }
+      },
+      "monte_carlo": {
+        "config": {
+          "enable_monte_carlo_transport": true,
+          "monte_carlo_histories_per_step": 256,
+          "monte_carlo_max_steps_per_track": 128,
+          "monte_carlo_max_recorded_points": 60000,
+          "monte_carlo_seed": 20260403
+        }
+      },
+      "thresholds": {
+        "max_profile_rmse": 0.25,
+        "integral_ratio_min": 0.50,
+        "integral_ratio_max": 1.30
+      }
+    },
+    {
+      "case_id": "meo_proton_harness",
+      "base_preset": "meo_proton_harness_dose",
+      "deterministic": {
+        "config": {
+          "enable_monte_carlo_transport": false
+        }
+      },
+      "monte_carlo": {
+        "config": {
+          "enable_monte_carlo_transport": true,
+          "monte_carlo_histories_per_step": 256,
+          "monte_carlo_max_steps_per_track": 128,
+          "monte_carlo_max_recorded_points": 60000,
+          "monte_carlo_seed": 20260403
+        }
+      },
+      "thresholds": {
+        "max_profile_rmse": 0.25,
+        "integral_ratio_min": 0.50,
+        "integral_ratio_max": 1.40
+      }
+    },
+    {
+      "case_id": "heavy_ion_storm",
+      "base_preset": "heavy_ion_storm_dose",
+      "deterministic": {
+        "config": {
+          "enable_monte_carlo_transport": false
+        }
+      },
+      "monte_carlo": {
+        "config": {
+          "enable_monte_carlo_transport": true,
+          "monte_carlo_histories_per_step": 320,
+          "monte_carlo_max_steps_per_track": 160,
+          "monte_carlo_max_recorded_points": 80000,
+          "monte_carlo_seed": 20260403
+        }
+      },
+      "thresholds": {
+        "max_profile_rmse": 0.30,
+        "integral_ratio_min": 0.45,
+        "integral_ratio_max": 1.45
+      }
+    }
+  ]
+}

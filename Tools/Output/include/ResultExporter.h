@@ -18,6 +18,9 @@ struct ExportArtifacts
     std::filesystem::path csv_path;
     std::filesystem::path vtk_path;
     std::filesystem::path hdf5_path;
+    std::filesystem::path csv_metadata_json_path;
+    std::filesystem::path vtk_metadata_json_path;
+    std::filesystem::path hdf5_metadata_json_path;
 };
 
 class ResultExporter
@@ -27,6 +30,14 @@ class ResultExporter
                              ExportArtifacts* artifacts = nullptr) const;
 
   private:
+    ColumnarDataSet buildContractedDataSet(const ColumnarDataSet& data_set,
+                                           const std::filesystem::path& csv_path,
+                                           const std::filesystem::path& vtk_path,
+                                           const std::filesystem::path& hdf5_path) const;
+    VoidResult writeMetadataSidecar(const std::filesystem::path& artifact_path,
+                                    const char* artifact_format,
+                                    const ColumnarDataSet& data_set) const;
+
     CSVExporter csv_exporter_;
     VTKExporter vtk_exporter_;
     HDF5Exporter hdf5_exporter_;

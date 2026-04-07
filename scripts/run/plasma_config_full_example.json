@@ -1,0 +1,59 @@
+{
+  "schema_version": "v1",
+  "module": "plasma",
+  "base_preset": "ccp_argon_10pa",
+  "name": "plasma_config_full_example",
+  "run": {
+    "time_step_s": 5.0e-10,
+    "steps": 20,
+    "output_csv": "results/plasma_config_full_example.csv"
+  },
+  "config": {
+    "domain_size": {
+      "x": 2.0e-3,
+      "y": 2.0e-3,
+      "z": 2.0e-2
+    },
+    "resolution": {
+      "x": 8.0,
+      "y": 8.0,
+      "z": 48.0
+    },
+    "time_step_s": 5.0e-10,
+    "dense_plasma_threshold_m3": 3.0e16,
+    "initial_potential_v": 180.0,
+    "initial_plasma": {
+      "electron_density_m3": 3.5e16,
+      "ion_density_m3": 3.5e16,
+      "electron_temperature_ev": 3.5,
+      "ion_temperature_ev": 0.15,
+      "ion_mass_amu": 40.0,
+      "neutral_density_m3": 2.4e21,
+      "electric_field_v_per_m": 1.5e4,
+      "pressure_pa": 10.0
+    },
+    "reaction_collision": {
+      "enable_electron_impact_ionization": true,
+      "enable_radiative_recombination": true,
+      "enable_charge_exchange": true,
+      "enable_elastic_momentum_transfer": true,
+      "ionization_threshold_ev": 15.8,
+      "ionization_cross_section_m2": 2.5e-20,
+      "charge_exchange_cross_section_m2": 2.0e-19,
+      "elastic_momentum_cross_section_m2": 1.5e-19,
+      "max_relative_density_change_per_step": 0.08
+    },
+    "advanced_closure": {
+      "enable_non_equilibrium_closure": false,
+      "enable_turbulence_closure": false,
+      "non_equilibrium_model": "two_temperature_relaxation",
+      "turbulence_model": "mixing_length_eddy_diffusivity",
+      "non_equilibrium_relaxation_gain": 0.35,
+      "non_equilibrium_ratio_cap": 3.5,
+      "turbulence_mixing_length_m": 2.0e-4,
+      "turbulence_gain": 0.6,
+      "max_temperature_correction_ev_per_step": 0.4,
+      "max_relative_density_correction_per_step": 0.05
+    }
+  }
+}

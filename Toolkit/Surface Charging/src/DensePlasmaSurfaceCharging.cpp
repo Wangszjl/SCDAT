@@ -1,5 +1,6 @@
 #include "DensePlasmaSurfaceCharging.h"
 #include "LegacyBenchmarkSupport.h"
+#include "SurfaceFlowCouplingModel.h"
 
 #include <algorithm>
 #include <array>
@@ -37,6 +38,86 @@ double clampSigned(double value, double limit)
 double safeExp(double exponent)
 {
     return std::exp(std::clamp(exponent, -200.0, 50.0));
+}
+
+std::size_t computeAdaptiveSubstepCount(std::size_t base_substeps,
+                                        double reference_potential_v, double dt,
+                                        double current_derivative_a_per_m2_per_v,
+                                        double capacitance_per_area_f_per_m2)
+{
+    const std::size_t base = std::max<std::size_t>(1, base_substeps);
+    const double dt_safe = std::max(1.0e-12, dt);
+    const double capacitance = std::max(1.0e-12, capacitance_per_area_f_per_m2);
+    const double stiffness =
+        std::abs(current_derivative_a_per_m2_per_v) * dt_safe / capacitance;
+
+    double sensitivity_scale = 1.0;
+    if (reference_potential_v < -25.0)
+    {
+        const double negative_magnitude = std::abs(reference_potential_v);
+        sensitivity_scale +=
+            0.25 * std::clamp(negative_magnitude / 250.0, 0.0, 8.0);
+    }
+
+    const double target_scale = std::max(1.0, stiffness * sensitivity_scale);
+    const double target_substeps = static_cast<double>(base) * target_scale;
+    const std::size_t max_substeps = std::max<std::size_t>(base, 256);
+    return std::clamp<std::size_t>(
+        static_cast<std::size_t>(std::ceil(target_substeps)), base,
+        max_substeps);
+}
+
+double sheathEquivalentCapacitancePerArea(const SurfaceChargingConfig& config,
+                                          const SurfaceModelRuntimeState& state,
+                                          double dielectric_capacitance_per_area_f_per_m2)
+{
+    const double min_sheath_length_m = std::max(1.0e-6, config.minimum_sheath_length_m);
+    const double max_sheath_length_m =
+        std::max(min_sheath_length_m, config.maximum_sheath_length_m);
+    const double sheath_length_m =
+        std::clamp(state.effective_sheath_length_m, min_sheath_length_m, max_sheath_length_m);
+    const double permittivity = std::max(1.0, config.material.getPermittivity());
+    const double sheath_capacitance_per_area_f_per_m2 =
+        kEpsilon0 * permittivity / std::max(1.0e-6, sheath_length_m);
+
+    const double dielectric_capacitance =
+        std::max(1.0e-12, dielectric_capacitance_per_area_f_per_m2);
+    return 1.0 / (1.0 / dielectric_capacitance +
+                  1.0 / std::max(1.0e-12, sheath_capacitance_per_area_f_per_m2));
+}
+
+double enforceSheathCapacitanceConsistency(const SurfaceChargingConfig& config,
+                                           const SurfaceModelRuntimeState& state,
+                                           double candidate_capacitance_per_area_f_per_m2)
+{
+    const double candidate_capacitance =
+        std::max(1.0e-12, candidate_capacitance_per_area_f_per_m2);
+    const double consistent_series_capacitance =
+        sheathEquivalentCapacitancePerArea(config, state, candidate_capacitance);
+    const double mismatch =
+        std::abs(candidate_capacitance - consistent_series_capacitance) /
+        std::max(1.0e-12,
+                 std::max(candidate_capacitance, consistent_series_capacitance));
+    const double base_weight = std::clamp(
+        config.material.getScalarProperty("sheath_capacitance_consistency_weight", 0.60),
+        0.0, 0.95);
+    const double coupling_boost =
+        0.15 * std::clamp(state.volume_mesh_coupling_gain, 0.0, 1.0);
+    const double effective_weight =
+        std::clamp(base_weight * (mismatch + coupling_boost), 0.0, 0.95);
+
+    double blended_capacitance =
+        (1.0 - effective_weight) * candidate_capacitance +
+        effective_weight * consistent_series_capacitance;
+
+    const double ratio_guard = std::clamp(
+        config.material.getScalarProperty("sheath_capacitance_ratio_guard", 1.5), 0.1,
+        8.0);
+    const double min_allowed = candidate_capacitance / (1.0 + ratio_guard);
+    const double max_allowed = candidate_capacitance * (1.0 + ratio_guard);
+    blended_capacitance = std::clamp(blended_capacitance, min_allowed, max_allowed);
+
+    return std::max(1.0e-12, blended_capacitance);
 }
 
 double emittedElectronEscapeProbability(double surface_potential_v, double characteristic_energy_ev)
@@ -2399,6 +2480,7 @@ bool DensePlasmaSurfaceCharging::initialize(const SurfaceChargingConfig& config)
     history_normal_electric_field_.clear();
     history_local_charge_density_.clear();
     history_adaptive_time_step_.clear();
+    history_internal_substeps_.clear();
     history_electron_calibration_factor_.clear();
     history_ion_calibration_factor_.clear();
     history_equilibrium_potential_.clear();
@@ -2562,6 +2644,7 @@ DensePlasmaSurfaceCharging::buildReferenceConfig(double conductivity_s_per_m) co
     reference_config.patch_flow_angle_deg = config_.patch_flow_angle_deg;
     reference_config.patch_thickness_m = config_.dielectric_thickness_m;
     reference_config.patch_conductivity_s_per_m = conductivity_s_per_m;
+    reference_config.electron_collection_model = config_.electron_collection_model;
     reference_config.electron_collection_coefficient = config_.electron_collection_coefficient;
     reference_config.ion_collection_coefficient = config_.ion_collection_coefficient;
     reference_config.bulk_flow_velocity_m_per_s = config_.bulk_flow_velocity_m_per_s;
@@ -2575,6 +2658,9 @@ DensePlasmaSurfaceCharging::buildReferenceConfig(double conductivity_s_per_m) co
         std::max(1.0e-3, config_.photoelectron_temperature_ev);
     reference_config.enable_ram_current =
         config_.regime == SurfaceChargingRegime::LeoFlowingPlasma;
+    reference_config.enable_secondary_electron = config_.enable_secondary_electron;
+    reference_config.enable_backscatter = config_.enable_backscatter;
+    reference_config.enable_photoelectron = config_.enable_photoelectron;
 
     const double derived_photo_current =
         kElementaryCharge * config_.emission.photon_flux_m2_s *
@@ -3583,6 +3669,17 @@ double DensePlasmaSurfaceCharging::computeCapacitancePerArea(const SurfaceModelR
         }
     }
 
+    const bool enable_sheath_capacitance_consistency =
+        config_.derive_capacitance_from_material ||
+        state.external_volume_feedback_applied > 0.0 ||
+        std::abs(state.field_solver_capacitance_scale - 1.0) > 1.0e-9;
+    if (enable_sheath_capacitance_consistency)
+    {
+        // Keep sheath length and equivalent capacitance mutually constrained to reduce dt-sensitive drift.
+        base_capacitance =
+            enforceSheathCapacitanceConsistency(config_, state, base_capacitance);
+    }
+
     double graph_multiplier = 1.0;
     if (state.graph_capacitance_diagonal_f > 0.0 && state.graph_capacitance_row_sum_f > 0.0)
     {
@@ -3640,9 +3737,11 @@ SurfaceCurrents DensePlasmaSurfaceCharging::computeLegacySurfaceCurrents(
     const double ion_mass = std::max(1.0, config_.plasma.ion_mass_amu) * kAtomicMassUnit;
     const double electron_thermal_velocity = std::sqrt(te_j / (2.0 * kPi * kElectronMass));
     const double bohm_velocity = std::sqrt(te_j / ion_mass);
-    const double flow_alignment = std::clamp(config_.flow_alignment_cosine, -1.0, 1.0);
+    const auto flow_projection = resolveSurfaceFlowProjection(
+        config_.bulk_flow_velocity_m_per_s, config_.flow_alignment_cosine,
+        config_.patch_flow_angle_deg);
     const double normal_flow_speed =
-        std::max(0.0, config_.bulk_flow_velocity_m_per_s * flow_alignment);
+        std::max(0.0, flow_projection.patch_projected_speed_m_per_s);
     const double directed_ion_velocity =
         std::max(0.0, config_.ion_directed_velocity_m_per_s + normal_flow_speed);
     const double effective_ion_velocity =
@@ -3975,10 +4074,12 @@ double DensePlasmaSurfaceCharging::estimateIonFluxPicLike(double surface_potenti
     const double ion_mass = std::max(1.0, config_.plasma.ion_mass_amu) * kAtomicMassUnit;
     const double ti_j = std::max(1.0e-3, config_.plasma.ion_temperature_ev) * kElementaryCharge;
     const double sigma = std::sqrt(ti_j / ion_mass);
+    const auto flow_projection = resolveSurfaceFlowProjection(
+        config_.bulk_flow_velocity_m_per_s, config_.flow_alignment_cosine,
+        config_.patch_flow_angle_deg);
     const double drift_velocity =
         std::max(0.0, config_.ion_directed_velocity_m_per_s +
-                          std::max(0.0, config_.bulk_flow_velocity_m_per_s *
-                                            std::clamp(config_.flow_alignment_cosine, -1.0, 1.0)));
+                          std::max(0.0, flow_projection.patch_projected_speed_m_per_s));
     std::mt19937_64 generator(0x71015aULL + static_cast<std::uint64_t>(sample_count));
 
     double collected_surface_velocity_sum = 0.0;
@@ -4206,62 +4307,186 @@ double DensePlasmaSurfaceCharging::recommendTimeStep(double remaining_time_s, do
         suggested_dt = std::min(max_dt, std::max(min_dt, 0.5 * relaxation_time));
     }
 
-      if (graph_capacitance_matrix_provider_ && circuit_model_)
-      {
-          const double graph_coupling_metric =
-              graph_capacitance_matrix_provider_->graphCouplingMetric(config_, circuit_model_.get());
-          const double coupling_penalty =
-              std::clamp(graph_coupling_metric * 1.0e12, 0.0, 4.0);
-          suggested_dt /= (1.0 + 0.5 * coupling_penalty);
-      }
+    if (graph_capacitance_matrix_provider_ && circuit_model_)
+    {
+        const double graph_coupling_metric =
+            graph_capacitance_matrix_provider_->graphCouplingMetric(config_,
+                                                                    circuit_model_.get());
+        const double coupling_penalty =
+            std::clamp(graph_coupling_metric * 1.0e12, 0.0, 4.0);
+        suggested_dt /= (1.0 + 0.5 * coupling_penalty);
+    }
 
-      const SurfaceModelRuntimeState runtime_state =
-          buildRuntimeState(status_.body_potential_v, status_.patch_potential_v, config_.surface_area_m2,
-                            0.0, computeEffectiveSheathLength());
-      const double volume_penalty =
-          1.0 + 0.35 * std::clamp(runtime_state.volume_mesh_coupling_gain, 0.0, 1.0) +
-          0.05 * std::max(0.0, runtime_state.volume_projection_weight_sum - 1.0);
-      suggested_dt /= volume_penalty;
+    const SurfaceModelRuntimeState runtime_state =
+        buildRuntimeState(status_.body_potential_v, status_.patch_potential_v,
+                          config_.surface_area_m2, 0.0,
+                          computeEffectiveSheathLength());
+    const double volume_penalty =
+        1.0 + 0.35 * std::clamp(runtime_state.volume_mesh_coupling_gain, 0.0, 1.0) +
+        0.05 * std::max(0.0, runtime_state.volume_projection_weight_sum - 1.0);
+    suggested_dt /= volume_penalty;
 
-      return std::clamp(std::min(remaining, suggested_dt), min_dt, max_dt);
-  }
+    if (current_potential < -25.0)
+    {
+        const double negative_sensitivity =
+            std::clamp(std::abs(current_potential) / 250.0, 0.0, 8.0);
+        const double stiffness =
+            derivative * std::max(min_dt, std::min(remaining, max_dt)) / capacitance;
+        const double negative_region_penalty =
+            1.0 + 0.35 * negative_sensitivity +
+            0.30 * std::clamp(stiffness, 0.0, 8.0);
+        suggested_dt /= negative_region_penalty;
+    }
+
+    return std::clamp(std::min(remaining, suggested_dt), min_dt, max_dt);
+}
 
 double DensePlasmaSurfaceCharging::advancePotentialImplicit(double surface_potential_v, double dt) const
 {
+    const double dt_safe = std::max(1.0e-12, dt);
     const double capacitance = std::max(1.0e-12, status_.state.capacitance_per_area_f_per_m2);
     const double search_limit =
         std::max(config_.max_abs_potential_v, 20.0 * std::max(1.0, config_.plasma.electron_temperature_ev));
+    const double max_delta = std::max(1.0e-3, config_.max_delta_potential_v_per_step);
 
-    double potential = surface_potential_v;
-    for (int iteration = 0; iteration < 20; ++iteration)
+    const auto residual = [&](double potential) {
+        return capacitance * (potential - surface_potential_v) / dt_safe -
+               computeNetCurrentDensity(potential);
+    };
+    const auto guarded_didv = [&](double potential) {
+        const double raw_didv = estimateCurrentDerivative(potential);
+        if (!std::isfinite(raw_didv))
+        {
+            return 0.0;
+        }
+
+        const double denominator_guard = 0.95 * capacitance / dt_safe;
+        const double slope_guard = std::max(1.0e-9, denominator_guard);
+        return std::clamp(raw_didv, -slope_guard, slope_guard);
+    };
+
+    double potential = clampSigned(surface_potential_v, search_limit);
+    double residual_value = residual(potential);
+    double previous_potential = potential;
+    double previous_residual = residual_value;
+
+    double bracket_span =
+        std::max(max_delta, 0.05 * std::max(1.0, std::abs(surface_potential_v)));
+    if (surface_potential_v < -25.0)
     {
-        const double residual =
-            capacitance * (potential - surface_potential_v) / dt - computeNetCurrentDensity(potential);
-        if (std::abs(residual) < 1.0e-9)
+        bracket_span *= 1.5;
+    }
+    bracket_span = std::min(bracket_span, search_limit);
+
+    double lower = clampSigned(surface_potential_v - bracket_span, search_limit);
+    double upper = clampSigned(surface_potential_v + bracket_span, search_limit);
+    if (lower > upper)
+    {
+        std::swap(lower, upper);
+    }
+    double f_lower = residual(lower);
+    double f_upper = residual(upper);
+    for (int expand = 0; expand < 10 && f_lower * f_upper > 0.0; ++expand)
+    {
+        bracket_span = std::min(search_limit, bracket_span * 1.8);
+        lower = clampSigned(surface_potential_v - bracket_span, search_limit);
+        upper = clampSigned(surface_potential_v + bracket_span, search_limit);
+        if (lower > upper)
+        {
+            std::swap(lower, upper);
+        }
+        f_lower = residual(lower);
+        f_upper = residual(upper);
+    }
+
+    const bool bracketed = (f_lower * f_upper <= 0.0);
+    for (int iteration = 0; iteration < 28; ++iteration)
+    {
+        if (std::abs(residual_value) < 1.0e-9)
         {
             return potential;
         }
 
-        const double derivative =
-            capacitance / dt - estimateCurrentDerivative(potential);
-        if (std::abs(derivative) < 1.0e-12)
+        double candidate = potential;
+        bool have_candidate = false;
+
+        const double derivative = capacitance / dt_safe - guarded_didv(potential);
+        if (std::isfinite(derivative) && std::abs(derivative) > 1.0e-12)
         {
-            break;
+            candidate = potential - residual_value / derivative;
+            have_candidate = std::isfinite(candidate);
         }
 
-        const double delta =
-            std::clamp(-residual / derivative, -0.2 * search_limit, 0.2 * search_limit);
-        potential += delta;
-        potential = clampSigned(potential, search_limit);
-        if (std::abs(delta) < 1.0e-6)
+        if (!have_candidate &&
+            std::abs(residual_value - previous_residual) > 1.0e-12)
+        {
+            candidate = potential -
+                residual_value * (potential - previous_potential) /
+                    (residual_value - previous_residual);
+            have_candidate = std::isfinite(candidate);
+        }
+
+        if (!have_candidate || (bracketed && !(candidate > lower && candidate < upper)))
+        {
+            if (bracketed)
+            {
+                candidate = 0.5 * (lower + upper);
+            }
+            else
+            {
+                const double explicit_delta =
+                    dt_safe * computeNetCurrentDensity(potential) / capacitance;
+                candidate = potential + explicit_delta;
+            }
+        }
+
+        candidate = clampSigned(candidate, search_limit);
+        candidate =
+            surface_potential_v +
+            std::clamp(candidate - surface_potential_v, -max_delta, max_delta);
+        candidate = clampSigned(candidate, search_limit);
+
+        const double candidate_residual = residual(candidate);
+        if (bracketed)
+        {
+            if (f_lower * candidate_residual <= 0.0)
+            {
+                upper = candidate;
+                f_upper = candidate_residual;
+            }
+            else
+            {
+                lower = candidate;
+                f_lower = candidate_residual;
+            }
+        }
+
+        previous_potential = potential;
+        previous_residual = residual_value;
+        potential = candidate;
+        residual_value = candidate_residual;
+        if (std::abs(potential - previous_potential) < 1.0e-6)
         {
             return potential;
         }
     }
 
+    if (bracketed)
+    {
+        const double bracket_mid = 0.5 * (lower + upper);
+        const double bounded =
+            surface_potential_v +
+            std::clamp(bracket_mid - surface_potential_v, -max_delta, max_delta);
+        return clampSigned(bounded, search_limit);
+    }
+
     const double explicit_candidate =
-        surface_potential_v + dt * computeNetCurrentDensity(surface_potential_v) / capacitance;
-    return clampSigned(explicit_candidate, search_limit);
+        surface_potential_v +
+        dt_safe * computeNetCurrentDensity(surface_potential_v) / capacitance;
+    const double bounded_candidate =
+        surface_potential_v +
+        std::clamp(explicit_candidate - surface_potential_v, -max_delta, max_delta);
+    return clampSigned(bounded_candidate, search_limit);
 }
 
 bool DensePlasmaSurfaceCharging::advance(double dt)
@@ -4294,7 +4519,15 @@ bool DensePlasmaSurfaceCharging::advance(double dt)
             recalibrated = true;
         }
 
-        const std::size_t substeps = std::max<std::size_t>(1, config_.internal_substeps);
+        const double reference_capacitance =
+            std::max(1.0e-12, status_.state.capacitance_per_area_f_per_m2);
+        const double reference_derivative =
+            estimateCurrentDerivative(status_.patch_potential_v);
+        const std::size_t substeps =
+            computeAdaptiveSubstepCount(config_.internal_substeps,
+                                        status_.patch_potential_v, dt,
+                                        reference_derivative,
+                                        reference_capacitance);
         const double sub_dt = dt / static_cast<double>(substeps);
         auto state = status_.state;
         SurfaceCurrents currents;
@@ -4586,6 +4819,7 @@ bool DensePlasmaSurfaceCharging::advance(double dt)
         history_normal_electric_field_.push_back(final_runtime_state.normal_electric_field_v_per_m);
         history_local_charge_density_.push_back(final_runtime_state.local_charge_density_c_per_m3);
         history_adaptive_time_step_.push_back(dt);
+        history_internal_substeps_.push_back(static_cast<double>(substeps));
         history_electron_calibration_factor_.push_back(
             current_model_ ? current_model_->electronCalibrationFactor() : 1.0);
         history_ion_calibration_factor_.push_back(
@@ -4596,7 +4830,15 @@ bool DensePlasmaSurfaceCharging::advance(double dt)
         return true;
     }
 
-    const std::size_t substeps = std::max<std::size_t>(1, config_.internal_substeps);
+    const double reference_capacitance =
+        std::max(1.0e-12, status_.state.capacitance_per_area_f_per_m2);
+    const double reference_derivative =
+        estimateCurrentDerivative(status_.state.surface_potential_v);
+    const std::size_t substeps =
+        computeAdaptiveSubstepCount(config_.internal_substeps,
+                                    status_.state.surface_potential_v, dt,
+                                    reference_derivative,
+                                    reference_capacitance);
     const double sub_dt = dt / static_cast<double>(substeps);
     auto state = status_.state;
     SurfaceCurrents currents;
@@ -4758,6 +5000,7 @@ bool DensePlasmaSurfaceCharging::advance(double dt)
     history_normal_electric_field_.push_back(final_runtime_state.normal_electric_field_v_per_m);
     history_local_charge_density_.push_back(final_runtime_state.local_charge_density_c_per_m3);
     history_adaptive_time_step_.push_back(dt);
+    history_internal_substeps_.push_back(static_cast<double>(substeps));
     history_electron_calibration_factor_.push_back(
         current_model_ ? current_model_->electronCalibrationFactor() : 1.0);
     history_ion_calibration_factor_.push_back(
@@ -4814,6 +5057,15 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
         }
         return history_time_.empty() ? 0.0 : history_time_.back() * 1.0e3;
     };
+    const auto resolved_internal_substeps_series = [this]() {
+        if (history_internal_substeps_.size() == history_time_.size())
+        {
+            return history_internal_substeps_;
+        }
+        return std::vector<double>(
+            history_time_.size(),
+            static_cast<double>(std::max<std::size_t>(1, config_.internal_substeps)));
+    };
     data_set.axis_name = "time_s";
     data_set.axis_values = history_time_;
     data_set.scalar_series["surface_potential_v"] = history_potential_;
@@ -4853,6 +5105,8 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
     data_set.scalar_series["normal_electric_field_v_per_m"] = history_normal_electric_field_;
     data_set.scalar_series["local_charge_density_c_per_m3"] = history_local_charge_density_;
     data_set.scalar_series["adaptive_time_step_s"] = history_adaptive_time_step_;
+    data_set.scalar_series["resolved_internal_substeps"] =
+        resolved_internal_substeps_series();
     data_set.scalar_series["electron_pic_calibration_factor"] = history_electron_calibration_factor_;
     data_set.scalar_series["ion_pic_calibration_factor"] = history_ion_calibration_factor_;
     data_set.scalar_series["floating_equilibrium_potential_v"] = history_equilibrium_potential_;

@@ -1,0 +1,166 @@
+{
+  "schema_version": "v1",
+  "module": "surface",
+  "base_preset": "leo_daylight_kapton",
+  "name": "surface_config_full_example",
+  "output_csv": "results/surface_config_full_example.csv",
+  "run": {
+    "time_step_s": 2.0e-8,
+    "steps": 20,
+    "adaptive_time_stepping": false,
+    "total_duration_s": 0.0,
+    "minimum_time_step_s": 2.0e-8,
+    "maximum_time_step_s": 5.0
+  },
+  "config": {
+    "runtime_route": "scdat_unified",
+    "current_algorithm_mode": "unified_spis_aligned",
+    "benchmark_mode": "unified_spis_aligned",
+    "volume_linear_solver_policy": "auto",
+    "reference_see_model": "sims",
+
+    "surface_area_m2": 0.04,
+    "derive_capacitance_from_material": true,
+    "enable_pic_calibration": true,
+    "enable_live_pic_window": true,
+    "enable_live_pic_mcc": true,
+    "enable_body_patch_circuit": true,
+
+    "plasma_model": {
+      "electron_density_m3": 8.0e11,
+      "ion_density_m3": 8.5e11,
+      "electron_temperature_ev": 0.28,
+      "ion_temperature_ev": 0.12,
+      "ion_mass_amu": 16.0,
+      "neutral_density_m3": 1.0e14,
+      "pressure_pa": 1.0e-5
+    },
+
+    "surface_emission": {
+      "surface_temperature_k": 320.0,
+      "enhancement_factor": 1.05,
+      "photon_flux_m2_s": 3.0e19
+    },
+
+    "surface_material": {
+      "id": 2,
+      "type": "dielectric",
+      "name": "kapton_custom",
+      "permittivity": 3.4,
+      "conductivity": 1.0e-15,
+      "work_function_ev": 4.7,
+      "secondary_electron_yield": 2.1,
+      "breakdown_field_v_per_m": 2.5e8,
+      "scalar_properties": {
+        "secondary_yield_peak_energy_ev": 150.0,
+        "photoelectron_yield": 0.016,
+        "poole_frenkel_beta": 0.0035
+      }
+    },
+
+    "electron_spectrum": {
+      "mode": "tabulated",
+      "mass_amu": 5.4857990907e-4,
+      "density_m3": 8.0e11,
+      "temperature_ev": 0.28,
+      "drift_speed_m_per_s": 0.0,
+      "energy_grid_ev": [0.5, 1.0, 2.0, 5.0, 10.0, 20.0],
+      "differential_number_flux": [2.3e15, 1.8e15, 1.2e15, 5.0e14, 1.5e14, 3.0e13]
+    },
+
+    "ion_spectrum": {
+      "mode": "double_maxwell",
+      "mass_amu": 16.0,
+      "density_m3": 8.5e11,
+      "cold_temperature_ev": 0.12,
+      "hot_temperature_ev": 0.45,
+      "hot_fraction": 0.10,
+      "drift_speed_m_per_s": 0.0
+    },
+
+    "bodies": [
+      {
+        "id": "bus",
+        "area_m2": 0.60,
+        "floating": true,
+        "initial_potential_v": 0.0,
+        "capacitance_f": 3.0e-10
+      }
+    ],
+
+    "patches": [
+      {
+        "id": "kapton_panel",
+        "body_id": "bus",
+        "area_m2": 0.04,
+        "initial_potential_v": 0.0,
+        "capacitance_f": 1.0e-10,
+        "patch_incidence_angle_deg": 20.0,
+        "patch_flow_angle_deg": 5.0,
+        "reference_see_model": "whipple",
+        "material": {
+          "type": "dielectric",
+          "name": "kapton_patch",
+          "permittivity": 3.3,
+          "conductivity": 1.2e-15,
+          "scalar_properties": {
+            "photoelectron_yield": 0.017
+          }
+        },
+        "plasma": {
+          "electron_density_m3": 7.6e11,
+          "ion_density_m3": 8.2e11,
+          "electron_temperature_ev": 0.25,
+          "ion_temperature_ev": 0.10,
+          "ion_mass_amu": 16.0
+        },
+        "emission": {
+          "surface_temperature_k": 325.0,
+          "enhancement_factor": 1.08,
+          "photon_flux_m2_s": 2.8e19
+        }
+      }
+    ],
+
+    "interfaces": [
+      {
+        "id": "panel_to_bus",
+        "from_id": "kapton_panel",
+        "to_id": "bus",
+        "conductance_s": 1.0e-9,
+        "dynamic_conductance": true
+      }
+    ],
+
+    "body_boundary_groups": [
+      {
+        "id": "bg_body",
+        "body_id": "bus",
+        "external_group_name": "BODY",
+        "boundary_face_ids": [1, 2]
+      }
+    ],
+
+    "patch_boundary_groups": [
+      {
+        "id": "bg_patch",
+        "patch_id": "kapton_panel",
+        "external_group_name": "PATCH",
+        "boundary_face_ids": [3, 4]
+      }
+    ],
+
+    "boundary_mappings": [
+      {
+        "node_id": "body:bus",
+        "boundary_group_id": "bg_body",
+        "required": true
+      },
+      {
+        "node_id": "patch:kapton_panel",
+        "boundary_group_id": "bg_patch",
+        "required": true
+      }
+    ]
+  }
+}

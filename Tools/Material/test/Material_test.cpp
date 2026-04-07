@@ -21,6 +21,23 @@ TEST(MaterialDatabaseTest, DefaultLibraryContainsKapton)
     EXPECT_GT(kapton->getBreakdownFieldVPerM(), 0.0);
 }
 
+TEST(MaterialDatabaseTest, UnifiedDatabaseResolvesCommonAliases)
+{
+    SCDAT::Material::UnifiedMaterialDatabase database;
+
+    const auto* kapton = database.findByAliasOrName("kapton_hn");
+    ASSERT_NE(kapton, nullptr);
+    EXPECT_EQ(kapton->getName(), "kapton");
+
+    const auto* aluminum = database.findByAliasOrName("al6061");
+    ASSERT_NE(aluminum, nullptr);
+    EXPECT_EQ(aluminum->getName(), "aluminum");
+
+    const auto* ptfe = database.findByAliasOrName("teflon");
+    ASSERT_NE(ptfe, nullptr);
+    EXPECT_EQ(ptfe->getName(), "ptfe");
+}
+
 TEST(MaterialDatabaseTest, LoaderImportsCsvMaterialRecords)
 {
     const auto path = std::filesystem::temp_directory_path() / "scdat_material_test.csv";

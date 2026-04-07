@@ -205,6 +205,9 @@ buildOneDimensionalReferenceConfig(
         std::max(1.0e-3, config.photoelectron_temperature_ev);
     reference_config.enable_ram_current =
         config.regime == SCDAT::Toolkit::SurfaceCharging::SurfaceChargingRegime::LeoFlowingPlasma;
+    reference_config.enable_secondary_electron = config.enable_secondary_electron;
+    reference_config.enable_backscatter = config.enable_backscatter;
+    reference_config.enable_photoelectron = config.enable_photoelectron;
 
     const double derived_photo_current =
         kElementaryCharge * config.emission.photon_flux_m2_s *
@@ -226,6 +229,16 @@ buildOneDimensionalReferenceConfig(
     reference_config.body_material.setConductivity(std::max(
         1.0e-6, config.material.getScalarProperty("body_conductivity_s_per_m", 1.0e4)));
     return reference_config;
+}
+
+double sumReferenceCurrentComponents(
+    const SCDAT::Toolkit::SurfaceCharging::ReferenceCurrentComponents& components)
+{
+    return components.electron_collection_a_per_m2 + components.ion_collection_a_per_m2 +
+           components.secondary_electron_a_per_m2 +
+           components.ion_secondary_electron_a_per_m2 +
+           components.backscatter_electron_a_per_m2 + components.photoelectron_a_per_m2 +
+           components.conduction_a_per_m2 + components.ram_ion_a_per_m2;
 }
 
 } // namespace
@@ -421,6 +434,128 @@ TEST(SurfaceChargingSmokeTest, GeoEclipseFloatingPotentialIsFiniteAndNegative)
     EXPECT_TRUE(std::isfinite(floating_potential));
     EXPECT_LT(floating_potential, -1.0e3);
     EXPECT_GT(floating_potential, -5.0e4);
+}
+
+TEST(SurfaceChargingSmokeTest, Sc008RecommendTimeStepShrinksInNegativeSensitiveRegion)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.floating = false;
+    config.body_floating = false;
+    config.use_reference_current_balance = false;
+    config.enable_body_patch_circuit = false;
+    config.enable_pic_calibration = false;
+    config.enable_live_pic_window = false;
+    config.enable_live_pic_mcc = false;
+    config.body_initial_potential_v = -2.0e3;
+    config.plasma.electron_density_m3 = 1.0e3;
+    config.plasma.ion_density_m3 = 1.0e3;
+    config.patch_photo_current_density_a_per_m2 = 20.0;
+    config.internal_substeps = 1;
+
+    ASSERT_TRUE(charging.initialize(config));
+    const double suggested_dt = charging.recommendTimeStep(1.0, 1.0e-6, 1.0);
+
+    EXPECT_GE(suggested_dt, 1.0e-6);
+    EXPECT_LT(suggested_dt, 0.5);
+}
+
+TEST(SurfaceChargingSmokeTest, Sc008NegativeRegionAdvanceSuppressesOvershoot)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.floating = false;
+    config.body_floating = false;
+    config.use_reference_current_balance = false;
+    config.enable_body_patch_circuit = false;
+    config.enable_pic_calibration = false;
+    config.enable_live_pic_window = false;
+    config.enable_live_pic_mcc = false;
+    config.body_initial_potential_v = -2.0e3;
+    config.plasma.electron_density_m3 = 1.0e3;
+    config.plasma.ion_density_m3 = 1.0e3;
+    config.patch_photo_current_density_a_per_m2 = 20.0;
+    config.internal_substeps = 1;
+    config.max_delta_potential_v_per_step = 10.0;
+
+    ASSERT_TRUE(charging.initialize(config));
+    const double before_v = charging.getStatus().state.surface_potential_v;
+    ASSERT_TRUE(charging.advance(5.0));
+    const double after_v = charging.getStatus().state.surface_potential_v;
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "surface_charging_sc008_overshoot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+    std::ifstream input(csv_path);
+    ASSERT_TRUE(input.is_open());
+    std::string header;
+    ASSERT_TRUE(static_cast<bool>(std::getline(input, header)));
+    const auto header_columns = splitCsvLine(header);
+    const auto substeps_index =
+        findColumnIndex(header_columns, "resolved_internal_substeps");
+    ASSERT_LT(substeps_index, header_columns.size());
+    std::string row;
+    ASSERT_TRUE(static_cast<bool>(std::getline(input, row)));
+    const auto values = splitCsvLine(row);
+    ASSERT_GT(values.size(), substeps_index);
+    const double resolved_substeps = std::stod(values[substeps_index]);
+
+    EXPECT_TRUE(std::isfinite(after_v));
+    EXPECT_LT(after_v, 0.0);
+    EXPECT_LE(std::abs(after_v - before_v),
+              resolved_substeps * config.max_delta_potential_v_per_step + 1.0e-6);
+}
+
+TEST(SurfaceChargingSmokeTest, Sc008ResolvedInternalSubstepsReported)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.floating = false;
+    config.body_floating = false;
+    config.use_reference_current_balance = false;
+    config.enable_body_patch_circuit = false;
+    config.enable_pic_calibration = false;
+    config.enable_live_pic_window = false;
+    config.enable_live_pic_mcc = false;
+    config.body_initial_potential_v = -2.0e3;
+    config.material.setConductivity(1.0e-6);
+    config.internal_substeps = 1;
+    config.max_delta_potential_v_per_step = 1.0e3;
+
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(1.0));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "surface_charging_sc008_substeps.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    std::ifstream input(csv_path);
+    ASSERT_TRUE(input.is_open());
+    std::string header;
+    ASSERT_TRUE(static_cast<bool>(std::getline(input, header)));
+    const auto header_columns = splitCsvLine(header);
+    const auto substeps_index =
+        findColumnIndex(header_columns, "resolved_internal_substeps");
+    ASSERT_LT(substeps_index, header_columns.size());
+
+    std::string row;
+    ASSERT_TRUE(static_cast<bool>(std::getline(input, row)));
+    const auto values = splitCsvLine(row);
+    ASSERT_GT(values.size(), substeps_index);
+    const double resolved_substeps = std::stod(values[substeps_index]);
+    EXPECT_GT(resolved_substeps, 1.0);
 }
 
 TEST(SurfaceChargingSmokeTest, LeoDaylightFloatingPotentialIsModeratelyPositive)
@@ -3265,6 +3400,168 @@ TEST(SurfaceChargingSmokeTest, ReferenceModelRamCurrentExceedsWakeCurrent)
     EXPECT_GT(ram_terms.ram_ion_a_per_m2, wake_terms.ram_ion_a_per_m2);
 }
 
+TEST(SurfaceChargingSmokeTest, ReferenceModelFlowCouplingSupportsAlignmentAndAngleWakeCases)
+{
+    SCDAT::Toolkit::SurfaceCharging::SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "leo_ref_ram_facing", preset));
+
+    SCDAT::Toolkit::SurfaceCharging::ReferenceCurrentBalanceModel model;
+    SCDAT::Toolkit::SurfaceCharging::ReferenceCurrentBalanceConfig config;
+    config.plasma = preset.config.plasma;
+    config.electron_spectrum = preset.config.electron_spectrum;
+    config.ion_spectrum = preset.config.ion_spectrum;
+    config.has_electron_spectrum = preset.config.has_electron_spectrum;
+    config.has_ion_spectrum = preset.config.has_ion_spectrum;
+    config.patch_material = preset.config.material;
+    config.body_material = preset.config.material;
+    config.body_material.setType(SCDAT::Mesh::MaterialType::CONDUCTOR);
+    config.body_photo_current_density_a_per_m2 = 0.0;
+    config.patch_photo_current_density_a_per_m2 = 0.0;
+    config.enable_ram_current = true;
+    config.bulk_flow_velocity_m_per_s = preset.config.bulk_flow_velocity_m_per_s;
+    config.patch_conductivity_s_per_m = preset.config.material.getConductivity();
+    config.patch_thickness_m = preset.config.dielectric_thickness_m;
+    config.electron_collection_coefficient = preset.config.electron_collection_coefficient;
+    config.ion_collection_coefficient = preset.config.ion_collection_coefficient;
+
+    config.flow_alignment_cosine = 1.0;
+    config.patch_flow_angle_deg = 0.0;
+    ASSERT_TRUE(model.configure(config));
+    const auto ram_patch_terms =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 0.0);
+    const auto ram_body_terms =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Body, 0.0, 0.0);
+
+    config.flow_alignment_cosine = -1.0;
+    config.patch_flow_angle_deg = 0.0;
+    ASSERT_TRUE(model.configure(config));
+    const auto wake_alignment_patch_terms =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 0.0);
+    const auto wake_alignment_body_terms =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Body, 0.0, 0.0);
+
+    config.flow_alignment_cosine = 1.0;
+    config.patch_flow_angle_deg = 180.0;
+    ASSERT_TRUE(model.configure(config));
+    const auto wake_angle_patch_terms =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 0.0);
+
+    EXPECT_GT(ram_patch_terms.ram_ion_a_per_m2, wake_alignment_patch_terms.ram_ion_a_per_m2);
+    EXPECT_GT(ram_patch_terms.ram_ion_a_per_m2, wake_angle_patch_terms.ram_ion_a_per_m2);
+    EXPECT_GT(ram_body_terms.ram_ion_a_per_m2, wake_alignment_body_terms.ram_ion_a_per_m2);
+    EXPECT_NEAR(wake_alignment_patch_terms.ram_ion_a_per_m2,
+                wake_angle_patch_terms.ram_ion_a_per_m2,
+                std::max(1.0e-12,
+                         std::abs(wake_alignment_patch_terms.ram_ion_a_per_m2) * 0.20));
+}
+
+TEST(SurfaceChargingSmokeTest, ReferenceModelContributionSwitchesGateTermsAndKeepClosure)
+{
+    SCDAT::Toolkit::SurfaceCharging::ReferenceCurrentBalanceConfig config;
+    config.plasma.electron_density_m3 = 8.0e11;
+    config.plasma.ion_density_m3 = 8.0e11;
+    config.plasma.electron_temperature_ev = 1200.0;
+    config.plasma.ion_temperature_ev = 25.0;
+    config.plasma.ion_mass_amu = 16.0;
+    config.patch_material = SCDAT::Material::MaterialProperty(
+        2, SCDAT::Mesh::MaterialType::DIELECTRIC, "kapton");
+    config.patch_material.setSecondaryElectronYield(2.1);
+    config.patch_material.setScalarProperty("secondary_yield_peak_energy_ev", 150.0);
+    config.patch_material.setScalarProperty("secondary_emission_escape_energy_ev", 2.0);
+    config.patch_material.setScalarProperty("photoelectron_yield", 0.016);
+    config.patch_material.setScalarProperty("ion_secondary_yield", 0.455);
+    config.patch_material.setScalarProperty("ion_secondary_peak_energy_kev", 140.0);
+    config.patch_material.setScalarProperty("atomic_number", 5.3);
+    config.patch_material.setConductivity(1.0e-15);
+    config.body_material = config.patch_material;
+    config.body_material.setType(SCDAT::Mesh::MaterialType::CONDUCTOR);
+    config.body_photo_current_density_a_per_m2 = 1.0e-6;
+    config.patch_photo_current_density_a_per_m2 = 1.0e-6;
+    config.patch_incidence_angle_deg = 0.0;
+    config.patch_conductivity_s_per_m = 1.0e-9;
+    config.patch_thickness_m = 1.0e-4;
+    config.enable_ram_current = false;
+
+    SCDAT::Toolkit::SurfaceCharging::ReferenceCurrentBalanceModel model;
+    ASSERT_TRUE(model.configure(config));
+    const auto baseline =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 0.0);
+
+    const double baseline_sum = sumReferenceCurrentComponents(baseline);
+    EXPECT_GT(std::abs(baseline.secondary_electron_a_per_m2) +
+                  std::abs(baseline.ion_secondary_electron_a_per_m2),
+              0.0);
+    EXPECT_GT(std::abs(baseline.backscatter_electron_a_per_m2), 0.0);
+    EXPECT_GT(std::abs(baseline.photoelectron_a_per_m2), 0.0);
+    EXPECT_NEAR(baseline.net_a_per_m2, baseline_sum,
+                std::max(1.0e-12, std::abs(baseline_sum) * 1.0e-12));
+
+    config.enable_secondary_electron = false;
+    ASSERT_TRUE(model.configure(config));
+    const auto no_secondary =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 0.0);
+    const double no_secondary_sum = sumReferenceCurrentComponents(no_secondary);
+    EXPECT_NEAR(no_secondary.secondary_electron_a_per_m2, 0.0, 1.0e-18);
+    EXPECT_NEAR(no_secondary.ion_secondary_electron_a_per_m2, 0.0, 1.0e-18);
+    EXPECT_NEAR(no_secondary.net_a_per_m2, no_secondary_sum,
+                std::max(1.0e-12, std::abs(no_secondary_sum) * 1.0e-12));
+
+    config.enable_secondary_electron = true;
+    config.enable_backscatter = false;
+    ASSERT_TRUE(model.configure(config));
+    const auto no_backscatter =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 0.0);
+    const double no_backscatter_sum = sumReferenceCurrentComponents(no_backscatter);
+    EXPECT_NEAR(no_backscatter.backscatter_electron_a_per_m2, 0.0, 1.0e-18);
+    EXPECT_NEAR(no_backscatter.net_a_per_m2, no_backscatter_sum,
+                std::max(1.0e-12, std::abs(no_backscatter_sum) * 1.0e-12));
+
+    config.enable_backscatter = true;
+    config.enable_photoelectron = false;
+    ASSERT_TRUE(model.configure(config));
+    const auto no_photo =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 0.0);
+    const double no_photo_sum = sumReferenceCurrentComponents(no_photo);
+    EXPECT_NEAR(no_photo.photoelectron_a_per_m2, 0.0, 1.0e-18);
+    EXPECT_NEAR(no_photo.net_a_per_m2, no_photo_sum,
+                std::max(1.0e-12, std::abs(no_photo_sum) * 1.0e-12));
+}
+
+TEST(SurfaceChargingSmokeTest, SurfaceConfigContributionSwitchesReachReferencePath)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "leo_ref_ram_facing", preset));
+
+    auto config = preset.config;
+    config.enable_pic_calibration = false;
+    config.enable_live_pic_window = false;
+    config.enable_live_pic_mcc = false;
+    config.enable_body_patch_circuit = false;
+    config.enable_secondary_electron = false;
+    config.enable_backscatter = false;
+    config.enable_photoelectron = false;
+
+    ASSERT_TRUE(charging.initialize(config));
+    const auto currents = charging.computeSurfaceCurrents(-5.0);
+
+    EXPECT_NEAR(currents.secondary_emission_a_per_m2, 0.0, 1.0e-18);
+    EXPECT_NEAR(currents.ion_secondary_emission_a_per_m2, 0.0, 1.0e-18);
+    EXPECT_NEAR(currents.backscatter_emission_a_per_m2, 0.0, 1.0e-18);
+    EXPECT_NEAR(currents.photo_emission_a_per_m2, 0.0, 1.0e-18);
+
+    const double recomposed_total =
+        currents.electron_current_a_per_m2 + currents.ion_current_a_per_m2 +
+        currents.secondary_emission_a_per_m2 + currents.ion_secondary_emission_a_per_m2 +
+        currents.backscatter_emission_a_per_m2 + currents.photo_emission_a_per_m2 +
+        currents.thermionic_emission_a_per_m2 + currents.field_emission_a_per_m2 +
+        currents.conduction_current_a_per_m2 + currents.ram_ion_current_a_per_m2;
+    EXPECT_NEAR(currents.total_current_a_per_m2, recomposed_total,
+                std::max(1.0e-12, std::abs(recomposed_total) * 1.0e-12));
+}
+
 TEST(SurfaceChargingSmokeTest, ReferenceModelSupportsMultipleSeeModels)
 {
     SCDAT::Toolkit::SurfaceCharging::ReferenceCurrentBalanceConfig config;
@@ -3309,6 +3606,55 @@ TEST(SurfaceChargingSmokeTest, ReferenceModelSupportsMultipleSeeModels)
     EXPECT_NE(whipple.secondary_electron_a_per_m2, sims.secondary_electron_a_per_m2);
 }
 
+TEST(SurfaceChargingSmokeTest, ReferenceModelSupportsMultipleElectronCollectionModels)
+{
+    SCDAT::Toolkit::SurfaceCharging::ReferenceCurrentBalanceConfig config;
+    config.plasma.electron_density_m3 = 1.0e7;
+    config.plasma.ion_density_m3 = 1.0e7;
+    config.plasma.electron_temperature_ev = 2.0;
+    config.plasma.ion_temperature_ev = 1.0;
+    config.plasma.ion_mass_amu = 1.0;
+    config.patch_material = SCDAT::Material::MaterialProperty(
+        2, SCDAT::Mesh::MaterialType::DIELECTRIC, "kapton");
+    config.patch_material.setSecondaryElectronYield(1.2);
+    config.patch_material.setConductivity(1.0e-17);
+    config.body_material = config.patch_material;
+    config.body_material.setType(SCDAT::Mesh::MaterialType::CONDUCTOR);
+    config.body_photo_current_density_a_per_m2 = 0.0;
+    config.patch_photo_current_density_a_per_m2 = 0.0;
+
+    SCDAT::Toolkit::SurfaceCharging::ReferenceCurrentBalanceModel model;
+
+    config.electron_collection_model =
+        SCDAT::Toolkit::SurfaceCharging::ElectronCollectionModelKind::OmlLike;
+    ASSERT_TRUE(model.configure(config));
+    const auto oml_terms =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 15.0);
+
+    config.electron_collection_model =
+        SCDAT::Toolkit::SurfaceCharging::ElectronCollectionModelKind::ShiftedEnergy;
+    ASSERT_TRUE(model.configure(config));
+    const auto shifted_terms =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 15.0);
+
+    config.electron_collection_model =
+        SCDAT::Toolkit::SurfaceCharging::ElectronCollectionModelKind::BarrierLimited;
+    ASSERT_TRUE(model.configure(config));
+    const auto barrier_terms =
+        model.evaluate(SCDAT::Toolkit::SurfaceCharging::ReferenceSurfaceRole::Patch, 0.0, 15.0);
+
+    EXPECT_TRUE(std::isfinite(oml_terms.electron_collection_a_per_m2));
+    EXPECT_TRUE(std::isfinite(shifted_terms.electron_collection_a_per_m2));
+    EXPECT_TRUE(std::isfinite(barrier_terms.electron_collection_a_per_m2));
+    EXPECT_GT(std::abs(oml_terms.electron_collection_a_per_m2),
+              std::abs(shifted_terms.electron_collection_a_per_m2));
+    EXPECT_GT(std::abs(oml_terms.electron_collection_a_per_m2),
+              std::abs(barrier_terms.electron_collection_a_per_m2));
+    EXPECT_GT(std::abs(shifted_terms.electron_collection_a_per_m2 -
+                       barrier_terms.electron_collection_a_per_m2),
+              1.0e-12);
+}
+
 TEST(SurfaceChargingSmokeTest, ThrusterPlumeFloatingPotentialIsModeratelyNegative)
 {
     DensePlasmaSurfaceCharging charging;
@@ -3339,4 +3685,62 @@ TEST(SurfaceChargingSmokeTest, GeoReferenceModeTracksEarlyWorkbookTransient)
     EXPECT_LT(charging.getStatus().state.surface_potential_v, -1.0e2);
     EXPECT_GT(charging.getStatus().state.surface_potential_v, -3.0e2);
     EXPECT_TRUE(std::isfinite(charging.getStatus().state.surface_potential_v));
+}
+
+TEST(SurfaceChargingSmokeTest, SheathCapacitanceConsistencyRemainsStableAcrossTimeSteps)
+{
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_pic_circuit", preset));
+
+    auto config = preset.config;
+    config.enable_pic_calibration = false;
+    config.enable_live_pic_window = false;
+    config.enable_live_pic_mcc = false;
+    config.internal_substeps = 2;
+    config.material.setScalarProperty("sheath_capacitance_consistency_weight", 0.65);
+    config.material.setScalarProperty("sheath_capacitance_ratio_guard", 1.5);
+
+    const auto run_with_time_step =
+        [&config](double dt_s,
+                  std::size_t steps) -> SCDAT::Toolkit::SurfaceCharging::SurfaceChargingStatus
+    {
+        DensePlasmaSurfaceCharging charging;
+        EXPECT_TRUE(charging.initialize(config));
+        for (std::size_t step = 0; step < steps; ++step)
+        {
+            EXPECT_TRUE(charging.advance(dt_s));
+        }
+        return charging.getStatus();
+    };
+
+    constexpr double kDurationS = 2.0;
+    constexpr double kFineDtS = 5.0e-2;
+    constexpr double kCoarseDtS = 2.0e-1;
+    const auto fine_steps = static_cast<std::size_t>(std::llround(kDurationS / kFineDtS));
+    const auto coarse_steps = static_cast<std::size_t>(std::llround(kDurationS / kCoarseDtS));
+
+    const auto fine_status = run_with_time_step(kFineDtS, fine_steps);
+    const auto coarse_status = run_with_time_step(kCoarseDtS, coarse_steps);
+
+    ASSERT_TRUE(std::isfinite(fine_status.state.surface_potential_v));
+    ASSERT_TRUE(std::isfinite(coarse_status.state.surface_potential_v));
+    ASSERT_TRUE(std::isfinite(fine_status.state.capacitance_per_area_f_per_m2));
+    ASSERT_TRUE(std::isfinite(coarse_status.state.capacitance_per_area_f_per_m2));
+
+    const double potential_delta_v =
+        std::abs(fine_status.state.surface_potential_v - coarse_status.state.surface_potential_v);
+    const double potential_scale_v =
+        std::max(1.0, std::max(std::abs(fine_status.state.surface_potential_v),
+                               std::abs(coarse_status.state.surface_potential_v)));
+    const double capacitance_delta =
+        std::abs(fine_status.state.capacitance_per_area_f_per_m2 -
+                 coarse_status.state.capacitance_per_area_f_per_m2);
+    const double capacitance_scale =
+        std::max(1.0e-12,
+                 std::max(fine_status.state.capacitance_per_area_f_per_m2,
+                          coarse_status.state.capacitance_per_area_f_per_m2));
+
+    EXPECT_LT(potential_delta_v / potential_scale_v, 0.20);
+    EXPECT_LT(capacitance_delta / capacitance_scale, 0.25);
 }

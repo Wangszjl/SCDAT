@@ -106,6 +106,61 @@ if(TARGET Tools_Solver)
             Tools_Geometry
             Tools_Mesh
     )
+
+    if(ENABLE_SUPERLU)
+        find_package(SuperLU QUIET)
+
+        set(_superlu_linked FALSE)
+
+        if(TARGET SuperLU::SuperLU)
+            target_link_libraries(Tools_Solver PUBLIC SuperLU::SuperLU)
+            set(_superlu_linked TRUE)
+        elseif(TARGET SuperLU::superlu)
+            target_link_libraries(Tools_Solver PUBLIC SuperLU::superlu)
+            set(_superlu_linked TRUE)
+        endif()
+
+        if(NOT _superlu_linked)
+            set(_superlu_libs "")
+            set(_superlu_includes "")
+
+            if(DEFINED SuperLU_LIBRARIES)
+                set(_superlu_libs ${SuperLU_LIBRARIES})
+            elseif(DEFINED SUPERLU_LIBRARIES)
+                set(_superlu_libs ${SUPERLU_LIBRARIES})
+            endif()
+
+            if(DEFINED SuperLU_INCLUDE_DIRS)
+                set(_superlu_includes ${SuperLU_INCLUDE_DIRS})
+            elseif(DEFINED SUPERLU_INCLUDE_DIRS)
+                set(_superlu_includes ${SUPERLU_INCLUDE_DIRS})
+            endif()
+
+            if(NOT _superlu_libs)
+                find_path(_superlu_header_dir slu_ddefs.h)
+                find_library(_superlu_library NAMES superlu)
+                if(_superlu_header_dir AND _superlu_library)
+                    set(_superlu_includes ${_superlu_header_dir})
+                    set(_superlu_libs ${_superlu_library})
+                endif()
+            endif()
+
+            if(NOT _superlu_libs)
+                message(FATAL_ERROR "ENABLE_SUPERLU=ON but SuperLU was not found. Provide CMAKE_PREFIX_PATH/SuperLU_DIR or install development headers/libs.")
+            endif()
+
+            if(_superlu_includes)
+                target_include_directories(Tools_Solver PUBLIC ${_superlu_includes})
+            endif()
+            target_link_libraries(Tools_Solver PUBLIC ${_superlu_libs})
+        endif()
+
+        target_compile_definitions(Tools_Solver PUBLIC HAVE_SUPERLU)
+
+        message(STATUS "[SCDAT] Tools::Solver - SuperLU ENABLED")
+    else()
+        message(STATUS "[SCDAT] Tools::Solver - SuperLU DISABLED")
+    endif()
 endif()
 
 if(TARGET Tools_Material)

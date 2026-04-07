@@ -25,6 +25,29 @@ void MaterialDatabase::addMaterial(const MaterialProperty& property)
     name_to_id_[normalizeName(property.getName())] = property.getId();
 }
 
+UnifiedMaterialDatabase::UnifiedMaterialDatabase() : MaterialDatabase()
+{
+    // Vacuum aliases.
+    addAlias("vac", 0);
+    addAlias("space", 0);
+
+    // Conductor aliases.
+    addAlias("al", 1);
+    addAlias("aluminium", 1);
+    addAlias("aluminum6061", 1);
+    addAlias("al6061", 1);
+
+    // Polyimide / Kapton aliases.
+    addAlias("polyimide", 2);
+    addAlias("kaptonhn", 2);
+    addAlias("kapton_hn", 2);
+    addAlias("kapton-hn", 2);
+
+    // PTFE aliases.
+    addAlias("teflon", 3);
+    addAlias("polytetrafluoroethylene", 3);
+}
+
 void MaterialDatabase::loadDefaultLibrary()
 {
     clear();

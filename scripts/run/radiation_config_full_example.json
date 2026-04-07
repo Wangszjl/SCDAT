@@ -1,0 +1,22 @@
+{
+  "schema_version": "v1",
+  "module": "radiation",
+  "base_preset": "geo_electron_belt_dose",
+  "name": "radiation_config_full_example",
+  "run": {
+    "time_step_s": 5.0e-4,
+    "steps": 20,
+    "output_csv": "results/radiation_config_full_example.csv"
+  },
+  "config": {
+    "layers": 24,
+    "thickness_m": 4.0e-3,
+    "area_m2": 4.0e-2,
+    "particle_flux_m2_s": 8.0e10,
+    "mean_energy_ev": 8.5e4,
+    "particle_species": "electron",
+    "physics_list": "geant4_em_livermore",
+    "material_name": "kapton",
+    "attenuation_length_fraction": 0.20
+  }
+}

@@ -1,4 +1,5 @@
 #include "DensePlasmaSurfaceCharging.h"
+#include "SurfaceFlowCouplingModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1981,6 +1982,11 @@ SurfaceChargingConfig normalizeTopologyConfig(const SurfaceChargingConfig& input
                 physics.override_see_model = true;
                 physics.reference_see_model = *patch.reference_see_model;
             }
+            if (patch.electron_collection_model.has_value())
+            {
+                physics.override_electron_collection_model = true;
+                physics.electron_collection_model = *patch.electron_collection_model;
+            }
             if (patch.patch_incidence_angle_deg.has_value())
             {
                 physics.override_patch_incidence_angle = true;
@@ -2079,6 +2085,8 @@ SurfaceChargingConfig normalizeTopologyConfig(const SurfaceChargingConfig& input
                                                                    : primary_patch.area_m2;
             normalized.default_surface_physics.material = normalized.material;
             normalized.default_surface_physics.reference_see_model = normalized.reference_see_model;
+            normalized.default_surface_physics.electron_collection_model =
+                normalized.electron_collection_model;
             normalized.default_surface_physics.patch_incidence_angle_deg =
                 normalized.patch_incidence_angle_deg;
             normalized.default_surface_physics.patch_flow_angle_deg =
@@ -2143,6 +2151,10 @@ SurfaceChargingConfig effectivePatchConfig(const SurfaceChargingConfig& base_con
     if (override_config->override_see_model)
     {
         effective.reference_see_model = override_config->reference_see_model;
+    }
+    if (override_config->override_electron_collection_model)
+    {
+        effective.electron_collection_model = override_config->electron_collection_model;
     }
     if (override_config->override_patch_incidence_angle)
     {
@@ -2401,13 +2413,12 @@ double legacyBackscatterYield(const Material::MaterialProperty& material, double
 
 double legacyRamPatchCurrentDensity(double surface_potential_v, double ion_density_m3,
                                     double ion_temperature_ev, double ion_mass_amu,
-                                    double flow_speed_m_per_s, double patch_flow_angle_deg)
+                                    double projected_flow_speed_m_per_s)
 {
     const double ni_cm3 = std::max(0.0, ion_density_m3 * 1.0e-6);
     const double ti_ev = std::max(1.0e-6, ion_temperature_ev);
     const double wt = 13.84 * std::sqrt(ti_ev / std::max(1.0, ion_mass_amu));
-    const double alpha = patch_flow_angle_deg * kPi / 180.0;
-    const double qd = std::max(0.0, flow_speed_m_per_s * 1.0e-3 * std::cos(alpha) / std::max(1.0e-12, wt));
+    const double qd = projected_flow_speed_m_per_s * 1.0e-3 / std::max(1.0e-12, wt);
     const double qv = std::sqrt(std::abs(surface_potential_v) / ti_ev);
     double current_na_per_m2 = 0.08011 * ni_cm3 * wt;
     if (surface_potential_v >= 0.0)
@@ -3178,6 +3189,7 @@ ReferenceCurrentBalanceConfig makeReferenceConfig(const SurfaceChargingConfig& c
     reference_config.patch_flow_angle_deg = config.patch_flow_angle_deg;
     reference_config.patch_thickness_m = config.dielectric_thickness_m;
     reference_config.patch_conductivity_s_per_m = state.effective_conductivity_s_per_m;
+    reference_config.electron_collection_model = config.electron_collection_model;
     reference_config.electron_collection_coefficient = config.electron_collection_coefficient;
     reference_config.ion_collection_coefficient = config.ion_collection_coefficient;
     reference_config.bulk_flow_velocity_m_per_s = config.bulk_flow_velocity_m_per_s;
@@ -3188,6 +3200,9 @@ ReferenceCurrentBalanceConfig makeReferenceConfig(const SurfaceChargingConfig& c
     reference_config.photoelectron_temperature_ev =
         std::max(1.0e-3, config.photoelectron_temperature_ev);
     reference_config.enable_ram_current = config.regime == SurfaceChargingRegime::LeoFlowingPlasma;
+    reference_config.enable_secondary_electron = config.enable_secondary_electron;
+    reference_config.enable_backscatter = config.enable_backscatter;
+    reference_config.enable_photoelectron = config.enable_photoelectron;
 
     const double derived_photo_current =
         kElementaryCharge * config.emission.photon_flux_m2_s *
@@ -3409,9 +3424,11 @@ class LegacyBenchmarkCurrentModelBase : public SurfaceCurrentModel
         {
             return 0.0;
         }
-        const double flow_speed_m_per_s =
-            std::max(0.0, effective_config.bulk_flow_velocity_m_per_s);
-        if (flow_speed_m_per_s <= 0.0)
+        const auto flow_projection = resolveSurfaceFlowProjection(
+            effective_config.bulk_flow_velocity_m_per_s, effective_config.flow_alignment_cosine,
+            effective_config.patch_flow_angle_deg);
+        if (std::max(std::abs(flow_projection.body_projected_speed_m_per_s),
+                     std::abs(flow_projection.patch_projected_speed_m_per_s)) <= 0.0)
         {
             return 0.0;
         }
@@ -3419,12 +3436,13 @@ class LegacyBenchmarkCurrentModelBase : public SurfaceCurrentModel
                    ? legacyRamPatchCurrentDensity(
                          potential_v, effective_config.plasma.ion_density_m3,
                          effective_config.plasma.ion_temperature_ev,
-                         effective_config.plasma.ion_mass_amu, flow_speed_m_per_s,
-                         effective_config.patch_flow_angle_deg)
+                         effective_config.plasma.ion_mass_amu,
+                         flow_projection.patch_projected_speed_m_per_s)
                    : legacyRamBodyCurrentDensity(
                          potential_v, effective_config.plasma.ion_density_m3,
                          effective_config.plasma.ion_temperature_ev,
-                         effective_config.plasma.ion_mass_amu, flow_speed_m_per_s);
+                         effective_config.plasma.ion_mass_amu,
+                         std::max(0.0, flow_projection.body_projected_speed_m_per_s));
     }
 
   private:

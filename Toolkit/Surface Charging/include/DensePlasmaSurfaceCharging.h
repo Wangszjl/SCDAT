@@ -137,6 +137,9 @@ struct SurfacePatchPhysicsConfig
     bool override_see_model = false;
     SecondaryElectronEmissionModel reference_see_model =
         SecondaryElectronEmissionModel::Whipple;
+    bool override_electron_collection_model = false;
+    ElectronCollectionModelKind electron_collection_model =
+        ElectronCollectionModelKind::OmlLike;
     bool override_patch_incidence_angle = false;
     double patch_incidence_angle_deg = 0.0;
     bool override_patch_flow_angle = false;
@@ -166,6 +169,8 @@ struct DefaultSurfacePhysicsConfig
     Material::MaterialProperty material{2, Mesh::MaterialType::DIELECTRIC, "kapton"};
     SecondaryElectronEmissionModel reference_see_model =
         SecondaryElectronEmissionModel::Whipple;
+    ElectronCollectionModelKind electron_collection_model =
+        ElectronCollectionModelKind::OmlLike;
     double patch_incidence_angle_deg = 0.0;
     double patch_flow_angle_deg = 0.0;
     double photoelectron_temperature_ev = 2.0;
@@ -201,6 +206,7 @@ struct SurfacePatchConfig
     double capacitance_f = 0.0;
     std::optional<Material::MaterialProperty> material;
     std::optional<SecondaryElectronEmissionModel> reference_see_model;
+    std::optional<ElectronCollectionModelKind> electron_collection_model;
     std::optional<double> patch_incidence_angle_deg;
     std::optional<double> patch_flow_angle_deg;
     std::optional<double> photoelectron_temperature_ev;
@@ -361,6 +367,8 @@ struct SurfaceChargingConfig
     double bulk_flow_velocity_m_per_s = 0.0;
     double flow_alignment_cosine = 1.0;
     double electron_flow_coupling = 0.0;
+    ElectronCollectionModelKind electron_collection_model =
+        ElectronCollectionModelKind::OmlLike;
     double electron_collection_coefficient = 1.0;
     double ion_collection_coefficient = 1.0;
     double ion_directed_velocity_m_per_s = 0.0;
@@ -398,6 +406,9 @@ struct SurfaceChargingConfig
     double photoelectron_temperature_ev = 2.0;
     double body_photo_current_density_a_per_m2 = 0.0;
     double patch_photo_current_density_a_per_m2 = 0.0;
+    bool enable_secondary_electron = true;
+    bool enable_backscatter = true;
+    bool enable_photoelectron = true;
     double max_delta_potential_v_per_step = 250.0;
     SecondaryElectronEmissionModel reference_see_model =
         SecondaryElectronEmissionModel::Whipple;
@@ -812,6 +823,7 @@ class DensePlasmaSurfaceCharging
     std::vector<double> history_normal_electric_field_;
     std::vector<double> history_local_charge_density_;
     std::vector<double> history_adaptive_time_step_;
+    std::vector<double> history_internal_substeps_;
     std::vector<double> history_electron_calibration_factor_;
     std::vector<double> history_ion_calibration_factor_;
     std::vector<double> history_equilibrium_potential_;
