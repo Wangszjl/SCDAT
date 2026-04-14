@@ -28,6 +28,7 @@ using ::SCDAT::Particle::ParticleLocation;
 using ::SCDAT::Particle::ParticleManager;
 using ::SCDAT::Particle::ParticlePtr;
 using ::SCDAT::Particle::ParticleTypeDef;
+using ::SCDAT::Particle::TrajectoryChargeDepositionKernel;
 
 class PICCycle
 {
@@ -51,6 +52,9 @@ class PICCycle
         bool charge_conservation = true;
         int statistics_frequency = 10;
         bool verbose = false;
+        std::size_t trajectory_charge_deposition_segments = 10;
+        TrajectoryChargeDepositionKernel trajectory_charge_deposition_kernel =
+            TrajectoryChargeDepositionKernel::LinearSegmentCloud;
     };
 
     PICCycle();

@@ -38,7 +38,10 @@ set(_SCDAT_LINK_LIBS
 )
 
 # ── 正式主程序：main.cpp → 可执行 SCDAT ─────────────────────────────────────
-add_executable(SCDAT "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
+add_executable(SCDAT
+    "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/SurfaceScenarioLoader.cpp"
+)
 
 target_link_libraries(SCDAT PRIVATE ${_SCDAT_LINK_LIBS})
 target_include_directories(SCDAT PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

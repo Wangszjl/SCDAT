@@ -35,39 +35,166 @@ std::string normalizeToken(std::string text)
     }
     return token;
 }
+
+std::filesystem::path radiationTransportBenchmarkPath(const std::filesystem::path& csv_path)
+{
+    std::filesystem::path stem_path = csv_path;
+    stem_path.replace_extension();
+    return stem_path.string() + ".radiation_transport_benchmark.json";
 }
 
-bool RadiationDoseAlgorithm::initialize(const RadiationConfiguration& config)
+bool exportRadiationTransportBenchmarkJson(
+    const std::filesystem::path& csv_path, const RadiationConfiguration& config,
+    const RadiationStatus& status, const std::string& resolved_material_name,
+    const RadiationStoppingResolution& stopping_data_resolution, double layer_thickness_m)
 {
-    if (config.layers == 0 || config.thickness_m <= 0.0 || config.area_m2 <= 0.0 ||
-        config.particle_flux_m2_s < 0.0 || config.mean_energy_ev < 0.0 ||
-        config.monte_carlo_histories_per_step == 0 ||
-        config.monte_carlo_max_steps_per_track == 0 ||
-        config.monte_carlo_max_recorded_points == 0 ||
-        config.monte_carlo_lateral_span_m <= 0.0 ||
-        config.electron_process.elastic_scattering_scale < 0.0 ||
-        config.electron_process.inelastic_energy_loss_scale <= 0.0 ||
-        config.electron_process.secondary_energy_fraction < 0.0 ||
-        config.electron_process.secondary_energy_fraction > 0.45 ||
-        config.electron_process.secondary_depth_attenuation_fraction <= 0.0 ||
-        config.proton_process.nuclear_reaction_energy_scale <= 0.0 ||
-        config.proton_process.elastic_scattering_scale < 0.0 ||
-        config.proton_process.secondary_energy_fraction < 0.0 ||
-        config.proton_process.secondary_energy_fraction > 0.40 ||
-        config.proton_process.secondary_depth_buildup_fraction <= 0.0 ||
-        config.heavy_ion_process.effective_charge_scale <= 0.0 ||
-        config.heavy_ion_process.stopping_power_scale <= 0.0 ||
-        config.heavy_ion_process.elastic_scattering_scale < 0.0 ||
-        config.heavy_ion_process.fragmentation_secondary_energy_fraction < 0.0 ||
-        config.heavy_ion_process.fragmentation_secondary_energy_fraction > 0.55 ||
-        config.heavy_ion_process.fragmentation_depth_buildup_fraction <= 0.0 ||
-        config.heavy_ion_process.fragmentation_event_rate_scale < 0.0)
+    const auto benchmark_path = radiationTransportBenchmarkPath(csv_path);
+    std::ofstream output(benchmark_path, std::ios::out | std::ios::trunc);
+    if (!output.is_open())
     {
         return false;
     }
 
-    config_ = config;
-    material_ = material_database_.findByAliasOrName(config.material_name);
+    double max_dose_gy = 0.0;
+    double peak_dose_depth_m = 0.0;
+    double integrated_deposited_energy_j_per_m2 = 0.0;
+    double integrated_dose_gy_m = 0.0;
+    for (const auto& layer : status.layers)
+    {
+        integrated_deposited_energy_j_per_m2 +=
+            std::max(0.0, layer.deposited_energy_j_per_m3) * std::max(layer_thickness_m, kNumericalFloor);
+        integrated_dose_gy_m += std::max(0.0, layer.dose_gy) * std::max(layer_thickness_m, kNumericalFloor);
+        if (layer.dose_gy >= max_dose_gy)
+        {
+            max_dose_gy = layer.dose_gy;
+            peak_dose_depth_m = layer.depth_m;
+        }
+    }
+
+    const double process_secondary_energy_j_per_m2 =
+        std::max(0.0, status.electron_process_secondary_energy_j_per_m2) +
+        std::max(0.0, status.proton_process_secondary_energy_j_per_m2) +
+        std::max(0.0, status.heavy_ion_process_secondary_energy_j_per_m2);
+    const double track_secondary_energy_j_per_m2 =
+        std::max(0.0, status.track_secondary_energy_j_per_m2);
+    const double total_secondary_energy_j_per_m2 =
+        std::max(process_secondary_energy_j_per_m2, track_secondary_energy_j_per_m2);
+    const double secondary_yield_per_primary =
+        config.enable_monte_carlo_transport
+            ? std::max(0.0, status.track_secondary_yield_per_primary)
+            : std::max(
+                  0.0, status.electron_process_secondary_event_count +
+                           status.proton_process_secondary_event_count +
+                           status.heavy_ion_process_fragmentation_event_count);
+
+    output << "{\n";
+    output << "  \"schema_version\": \"scdat.radiation_transport_benchmark.v1\",\n";
+    output << "  \"contract_id\": \"radiation-transport-benchmark-v1\",\n";
+    output << "  \"module\": \"Radiation\",\n";
+    output << "  \"particle_species\": \"" << toString(config.particle_species) << "\",\n";
+    output << "  \"physics_list\": \"" << toString(config.physics_list) << "\",\n";
+    output << "  \"material\": \"" << resolved_material_name << "\",\n";
+    output << "  \"transport_backend_mode\": \""
+           << (config.enable_monte_carlo_transport ? "backend_calibrated_monte_carlo"
+                                                   : "deterministic_surrogate")
+           << "\",\n";
+    output << "  \"backend_calibrated_transport\": "
+           << (stopping_data_resolution.valid ? "true" : "false") << ",\n";
+    output << "  \"layer_count\": " << status.layers.size() << ",\n";
+    output << "  \"time_s\": " << status.time_s << ",\n";
+    output << "  \"incident_energy_j_per_m2\": " << status.incident_energy_j_per_m2 << ",\n";
+    output << "  \"deposited_energy_j_per_m2\": " << status.deposited_energy_j_per_m2 << ",\n";
+    output << "  \"integrated_layer_deposited_energy_j_per_m2\": "
+           << integrated_deposited_energy_j_per_m2 << ",\n";
+    output << "  \"escaped_energy_j_per_m2\": " << status.escaped_energy_j_per_m2 << ",\n";
+    output << "  \"energy_conservation_error\": " << status.energy_conservation_error << ",\n";
+    output << "  \"max_dose_gy\": " << max_dose_gy << ",\n";
+    output << "  \"peak_dose_depth_m\": " << peak_dose_depth_m << ",\n";
+    output << "  \"integrated_dose_gy_m\": " << integrated_dose_gy_m << ",\n";
+    output << "  \"secondary_energy_j_per_m2\": " << total_secondary_energy_j_per_m2 << ",\n";
+    output << "  \"secondary_yield_per_primary\": " << secondary_yield_per_primary << ",\n";
+    output << "  \"stopping_data_resolved_version\": \""
+           << stopping_data_resolution.resolved_version << "\",\n";
+    output << "  \"stopping_data_dataset_id\": \""
+           << stopping_data_resolution.dataset_id << "\",\n";
+    output << "  \"stopping_data_cache_hit\": "
+           << (stopping_data_resolution.cache_hit ? "true" : "false") << ",\n";
+    output << "  \"stopping_data_rollback_applied\": "
+           << (stopping_data_resolution.rollback_applied ? "true" : "false") << ",\n";
+    output << "  \"process_coverage\": {\n";
+    output << "    \"electron_process_enabled\": "
+           << (config.electron_process.enable ? "true" : "false") << ",\n";
+    output << "    \"proton_process_enabled\": "
+           << (config.proton_process.enable ? "true" : "false") << ",\n";
+    output << "    \"heavy_ion_process_enabled\": "
+           << (config.heavy_ion_process.enable ? "true" : "false") << ",\n";
+    output << "    \"electron_secondary_event_count\": "
+           << status.electron_process_secondary_event_count << ",\n";
+    output << "    \"proton_secondary_event_count\": "
+           << status.proton_process_secondary_event_count << ",\n";
+    output << "    \"heavy_ion_fragmentation_event_count\": "
+           << status.heavy_ion_process_fragmentation_event_count << ",\n";
+    output << "    \"track_secondary_event_count\": "
+           << status.track_secondary_event_count << "\n";
+    output << "  }\n";
+    output << "}\n";
+    return static_cast<bool>(output);
+}
+}
+
+bool RadiationDoseAlgorithm::initialize(const RadiationConfiguration& config)
+{
+    RadiationConfiguration resolved_config = config;
+
+    const auto physics_process_set = normalizeToken(resolved_config.solver_config.physics_process_set);
+    if (physics_process_set == "livermore" || physics_process_set == "geant4emlivermore")
+    {
+        resolved_config.physics_list = RadiationPhysicsList::Geant4EmLivermore;
+    }
+    else if (physics_process_set == "penelope" || physics_process_set == "geant4empenelope")
+    {
+        resolved_config.physics_list = RadiationPhysicsList::Geant4EmPenelope;
+    }
+    else if (physics_process_set == "shielding" || physics_process_set == "geant4spaceshielding")
+    {
+        resolved_config.physics_list = RadiationPhysicsList::Geant4SpaceShielding;
+    }
+    else if (physics_process_set == "standard" || physics_process_set == "geant4emstandard")
+    {
+        resolved_config.physics_list = RadiationPhysicsList::Geant4EmStandard;
+    }
+    resolved_config.monte_carlo_seed = resolved_config.seed;
+
+    if (resolved_config.layers == 0 || resolved_config.thickness_m <= 0.0 ||
+        resolved_config.area_m2 <= 0.0 || resolved_config.particle_flux_m2_s < 0.0 ||
+        resolved_config.mean_energy_ev < 0.0 ||
+        resolved_config.monte_carlo_histories_per_step == 0 ||
+        resolved_config.monte_carlo_max_steps_per_track == 0 ||
+        resolved_config.monte_carlo_max_recorded_points == 0 ||
+        resolved_config.monte_carlo_lateral_span_m <= 0.0 ||
+        resolved_config.electron_process.elastic_scattering_scale < 0.0 ||
+        resolved_config.electron_process.inelastic_energy_loss_scale <= 0.0 ||
+        resolved_config.electron_process.secondary_energy_fraction < 0.0 ||
+        resolved_config.electron_process.secondary_energy_fraction > 0.45 ||
+        resolved_config.electron_process.secondary_depth_attenuation_fraction <= 0.0 ||
+        resolved_config.proton_process.nuclear_reaction_energy_scale <= 0.0 ||
+        resolved_config.proton_process.elastic_scattering_scale < 0.0 ||
+        resolved_config.proton_process.secondary_energy_fraction < 0.0 ||
+        resolved_config.proton_process.secondary_energy_fraction > 0.40 ||
+        resolved_config.proton_process.secondary_depth_buildup_fraction <= 0.0 ||
+        resolved_config.heavy_ion_process.effective_charge_scale <= 0.0 ||
+        resolved_config.heavy_ion_process.stopping_power_scale <= 0.0 ||
+        resolved_config.heavy_ion_process.elastic_scattering_scale < 0.0 ||
+        resolved_config.heavy_ion_process.fragmentation_secondary_energy_fraction < 0.0 ||
+        resolved_config.heavy_ion_process.fragmentation_secondary_energy_fraction > 0.55 ||
+        resolved_config.heavy_ion_process.fragmentation_depth_buildup_fraction <= 0.0 ||
+        resolved_config.heavy_ion_process.fragmentation_event_rate_scale < 0.0)
+    {
+        return false;
+    }
+
+    config_ = resolved_config;
+    material_ = material_database_.findByAliasOrName(config_.material_name);
     if (material_ == nullptr)
     {
         return false;
@@ -397,6 +524,35 @@ bool RadiationDoseAlgorithm::exportResults(const std::filesystem::path& csv_path
         stopping_data_resolution_.validation_error;
     data_set.metadata["enable_monte_carlo_transport"] =
         config_.enable_monte_carlo_transport ? "true" : "false";
+    data_set.metadata["deposition_record_contract_id"] =
+        "geant4-aligned-deposition-record-v1";
+    data_set.metadata["process_history_contract_id"] =
+        "geant4-aligned-process-history-v1";
+    data_set.metadata["deposition_record_source"] =
+        config_.enable_monte_carlo_transport ? "monte_carlo_track_points_v2"
+                                             : "deterministic_depth_dose_surrogate_v1";
+    data_set.metadata["process_dispatch_mode"] =
+        config_.enable_monte_carlo_transport ? "track_tagged_dispatch"
+                                             : "aggregate_tagged_dispatch";
+    data_set.metadata["deposition_record_supports_step_records"] =
+        config_.enable_monte_carlo_transport ? "true" : "false";
+    data_set.metadata["process_history_has_secondary_provenance"] =
+        ((status_.track_secondary_event_count > 0.0) ||
+         (status_.electron_process_secondary_event_count > 0.0) ||
+         (status_.proton_process_secondary_event_count > 0.0) ||
+         (status_.heavy_ion_process_fragmentation_event_count > 0.0))
+            ? "true"
+            : "false";
+    data_set.metadata["material_governance_contract_id"] = "radiation-material-governance-v1";
+    const auto stem_path = csv_path.parent_path() / csv_path.stem();
+    data_set.metadata["deposition_history_artifact_path"] =
+        (stem_path.string() + ".deposition_history.json");
+    data_set.metadata["process_history_artifact_path"] =
+        (stem_path.string() + ".process_history.json");
+    data_set.metadata["radiation_transport_benchmark_contract_id"] =
+        "radiation-transport-benchmark-v1";
+    data_set.metadata["radiation_transport_benchmark_artifact_path"] =
+        (stem_path.string() + ".radiation_transport_benchmark.json");
     data_set.metadata["electron_process_enabled"] =
         config_.electron_process.enable ? "true" : "false";
     data_set.metadata["electron_process_elastic_scattering_scale"] =
@@ -475,8 +631,60 @@ bool RadiationDoseAlgorithm::exportResults(const std::filesystem::path& csv_path
     data_set.metadata["track_max_depth_m"] = std::to_string(status_.track_max_depth_m);
     data_set.metadata["recorded_track_points"] = std::to_string(status_.track_points.size());
     data_set.metadata["dropped_track_points"] = std::to_string(status_.dropped_track_points);
+    Coupling::Contracts::appendSolverConfigMetadata(data_set.metadata, config_.solver_config, "solver_");
+    data_set.metadata["seed"] = std::to_string(config_.seed);
+    data_set.metadata["sampling_policy"] = config_.sampling_policy;
+    auto simulation_artifact_path = stem_path;
+    simulation_artifact_path += ".simulation_artifact.json";
+    data_set.metadata["simulation_artifact_contract_id"] = "simulation-artifact-v1";
+    data_set.metadata["simulation_artifact_path"] = simulation_artifact_path.filename().string();
 
     if (!static_cast<bool>(exporter_.exportDataSet(csv_path, data_set)))
+    {
+        return false;
+    }
+
+    if (!exportDepositionHistoryJson(csv_path))
+    {
+        return false;
+    }
+    if (!exportProcessHistoryJson(csv_path))
+    {
+        return false;
+    }
+    if (!exportRadiationTransportBenchmarkJson(
+            csv_path, config_, status_, resolved_material_name_, stopping_data_resolution_,
+            layer_thickness_m_))
+    {
+        return false;
+    }
+
+    double peak_dose_gy = 0.0;
+    for (const auto& layer : status_.layers)
+    {
+        peak_dose_gy = std::max(peak_dose_gy, layer.dose_gy);
+    }
+    Coupling::Contracts::SimulationArtifact artifact;
+    artifact.module = "Radiation";
+    artifact.case_id = resolved_material_name_ + "_" + toString(config_.physics_list);
+    artifact.reference_family = "geant4";
+    artifact.seed = config_.seed;
+    artifact.sampling_policy = config_.sampling_policy;
+    artifact.radiation_metrics["incident_energy_j_per_m2"] = status_.incident_energy_j_per_m2;
+    artifact.radiation_metrics["deposited_energy_j_per_m2"] = status_.deposited_energy_j_per_m2;
+    artifact.radiation_metrics["escaped_energy_j_per_m2"] = status_.escaped_energy_j_per_m2;
+    artifact.radiation_metrics["energy_conservation_error"] = status_.energy_conservation_error;
+    artifact.radiation_metrics["peak_dose_gy"] = peak_dose_gy;
+    artifact.particle_metrics["track_count"] = static_cast<double>(status_.track_count);
+    artifact.particle_metrics["track_step_count"] = static_cast<double>(status_.track_step_count);
+    artifact.particle_metrics["track_secondary_event_count"] = status_.track_secondary_event_count;
+    artifact.metadata["physics_list"] = toString(config_.physics_list);
+    artifact.metadata["material"] = resolved_material_name_;
+    artifact.metadata["deposition_record_contract_id"] = "geant4-aligned-deposition-record-v1";
+    artifact.metadata["process_history_contract_id"] = "geant4-aligned-process-history-v1";
+    std::string artifact_error;
+    if (!Coupling::Contracts::writeSimulationArtifactJson(
+            simulation_artifact_path, artifact, &artifact_error))
     {
         return false;
     }
@@ -795,6 +1003,97 @@ bool RadiationDoseAlgorithm::exportTrackCsv(const std::filesystem::path& csv_pat
                << ',' << point.step_length_m << ',' << point.particle_weight << '\n';
     }
 
+    return static_cast<bool>(output);
+}
+
+bool RadiationDoseAlgorithm::exportDepositionHistoryJson(
+    const std::filesystem::path& csv_path) const
+{
+    std::filesystem::path stem_path = csv_path;
+    stem_path.replace_extension();
+    const auto history_path = stem_path.string() + ".deposition_history.json";
+
+    std::ofstream output(history_path, std::ios::out | std::ios::trunc);
+    if (!output.is_open())
+    {
+        return false;
+    }
+
+    output << "{\n";
+    output << "  \"schema\": \"scdat.radiation.deposition_history.v1\",\n";
+    output << "  \"contract_id\": \"geant4-aligned-deposition-record-v1\",\n";
+    output << "  \"module\": \"Radiation\",\n";
+    output << "  \"particle_species\": \"" << toString(config_.particle_species) << "\",\n";
+    output << "  \"physics_list\": \"" << toString(config_.physics_list) << "\",\n";
+    output << "  \"material\": \"" << resolved_material_name_ << "\",\n";
+    output << "  \"time_s\": " << status_.time_s << ",\n";
+    output << "  \"layers\": [\n";
+    for (std::size_t i = 0; i < status_.layers.size(); ++i)
+    {
+        const auto& layer = status_.layers[i];
+        output << "    {\n";
+        output << "      \"index\": " << i << ",\n";
+        output << "      \"depth_m\": " << layer.depth_m << ",\n";
+        output << "      \"deposited_energy_j_per_m3\": " << layer.deposited_energy_j_per_m3 << ",\n";
+        output << "      \"dose_gy\": " << layer.dose_gy << "\n";
+        output << "    }";
+        output << (i + 1 < status_.layers.size() ? ",\n" : "\n");
+    }
+    output << "  ]\n";
+    output << "}\n";
+    return static_cast<bool>(output);
+}
+
+bool RadiationDoseAlgorithm::exportProcessHistoryJson(
+    const std::filesystem::path& csv_path) const
+{
+    std::filesystem::path stem_path = csv_path;
+    stem_path.replace_extension();
+    const auto process_path = stem_path.string() + ".process_history.json";
+
+    std::ofstream output(process_path, std::ios::out | std::ios::trunc);
+    if (!output.is_open())
+    {
+        return false;
+    }
+
+    output << "{\n";
+    output << "  \"schema\": \"scdat.radiation.process_history.v1\",\n";
+    output << "  \"contract_id\": \"geant4-aligned-process-history-v1\",\n";
+    output << "  \"module\": \"Radiation\",\n";
+    output << "  \"particle_species\": \"" << toString(config_.particle_species) << "\",\n";
+    output << "  \"physics_list\": \"" << toString(config_.physics_list) << "\",\n";
+    output << "  \"dispatch_mode\": \""
+           << (config_.enable_monte_carlo_transport ? "track_tagged_dispatch"
+                                                    : "aggregate_tagged_dispatch")
+           << "\",\n";
+    output << "  \"secondary_provenance_available\": "
+           << (((status_.track_secondary_event_count > 0.0) ||
+                (status_.electron_process_secondary_event_count > 0.0) ||
+                (status_.proton_process_secondary_event_count > 0.0) ||
+                (status_.heavy_ion_process_fragmentation_event_count > 0.0))
+                   ? "true"
+                   : "false")
+           << ",\n";
+    output << "  \"track_csv_path\": \"";
+    if (config_.enable_monte_carlo_transport)
+    {
+        output << stem_path.string() + ".tracks.csv";
+    }
+    output << "\",\n";
+    output << "  \"process_summary\": {\n";
+    output << "    \"electron_secondary_event_count\": "
+           << status_.electron_process_secondary_event_count << ",\n";
+    output << "    \"proton_secondary_event_count\": "
+           << status_.proton_process_secondary_event_count << ",\n";
+    output << "    \"heavy_ion_fragmentation_event_count\": "
+           << status_.heavy_ion_process_fragmentation_event_count << ",\n";
+    output << "    \"track_secondary_event_count\": " << status_.track_secondary_event_count
+           << ",\n";
+    output << "    \"track_secondary_energy_j_per_m2\": "
+           << status_.track_secondary_energy_j_per_m2 << "\n";
+    output << "  }\n";
+    output << "}\n";
     return static_cast<bool>(output);
 }
 

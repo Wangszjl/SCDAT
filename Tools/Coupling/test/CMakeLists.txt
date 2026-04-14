@@ -21,3 +21,11 @@ target_link_libraries(Coupling_test
         GTest::gtest_main
 )
 gtest_discover_tests(Coupling_test)
+
+add_executable(BenchmarkContracts_test BenchmarkContracts_test.cpp)
+target_link_libraries(BenchmarkContracts_test
+    PRIVATE
+        SCDAT::Tools::Coupling
+        GTest::gtest_main
+)
+gtest_discover_tests(BenchmarkContracts_test)

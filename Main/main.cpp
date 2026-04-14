@@ -1,5 +1,6 @@
 #include "DataAnalyzer.h"
 #include "DensePlasmaSurfaceCharging.h"
+#include "BenchmarkContracts.h"
 #include "CouplingBase.h"
 #include "InternalChargingCases.h"
 #include "MultiPhysicsManager.h"
@@ -10,6 +11,9 @@
 #include "ModelRegistry.h"
 #include "SpacecraftInternalChargingAlgorithm.h"
 #include "SurfaceChargingCases.h"
+#include "SurfaceScenarioLoader.h"
+#include "SurfaceScenarioCatalog.h"
+#include "SurfaceSimulationRunner.h"
 #include "SurfaceDischargeArcAlgorithm.h"
 #include "VacuumArcCases.h"
 
@@ -47,8 +51,11 @@ using SCDAT::Toolkit::Radiation::RadiationDoseAlgorithm;
 using SCDAT::Toolkit::Radiation::RadiationScenarioPreset;
 using SCDAT::Toolkit::SurfaceCharging::DensePlasmaSurfaceCharging;
 using SCDAT::Toolkit::SurfaceCharging::SurfaceChargingScenarioPreset;
+using SCDAT::Toolkit::SurfaceCharging::SurfaceScenarioCatalog;
+using SCDAT::Toolkit::SurfaceCharging::SurfaceSimulationRunner;
 using SCDAT::Toolkit::VacuumArc::VacuumArcScenarioPreset;
 using SCDAT::Toolkit::VacuumArc::SurfaceDischargeArcAlgorithm;
+using SCDAT::MainEntry::SurfaceScenarioLoader;
 
 struct RunSelection
 {
@@ -348,6 +355,61 @@ std::vector<int> parseIntegerArray(const std::string& array_text)
     return values;
 }
 
+void applyUnifiedSolverConfigFromJsonObject(
+    const std::string& text, SCDAT::Coupling::Contracts::SolverConfig& solver_config)
+{
+    if (const auto value = extractStringField(text, "coupling_mode"); value)
+    {
+        solver_config.coupling_mode = *value;
+    }
+    if (const auto value = extractStringField(text, "deposition_scheme"); value)
+    {
+        solver_config.deposition_scheme = *value;
+    }
+    if (const auto value = extractStringField(text, "collision_set"); value)
+    {
+        solver_config.collision_set = *value;
+    }
+    if (const auto value = extractStringField(text, "physics_process_set"); value)
+    {
+        solver_config.physics_process_set = *value;
+    }
+    if (const auto value = extractStringField(text, "convergence_policy"); value)
+    {
+        solver_config.convergence_policy = *value;
+    }
+    if (const auto value = extractNumberField(text, "solver_max_iterations"); value)
+    {
+        solver_config.max_iterations =
+            static_cast<std::size_t>(std::max(1.0, std::floor(*value + 0.5)));
+    }
+    if (const auto value = extractNumberField(text, "solver_residual_tolerance"); value)
+    {
+        solver_config.residual_tolerance = std::max(1.0e-16, *value);
+    }
+    if (const auto value = extractNumberField(text, "solver_relaxation"); value)
+    {
+        solver_config.relaxation_factor = std::clamp(*value, 1.0e-4, 2.0);
+    }
+}
+
+void applyReproducibilityConfigFromJsonObject(const std::string& text, unsigned int& seed,
+                                              std::string& sampling_policy)
+{
+    if (const auto value = extractNumberField(text, "seed"); value)
+    {
+        seed = static_cast<unsigned int>(std::max(0.0, std::floor(*value + 0.5)));
+    }
+    else if (const auto value = extractNumberField(text, "random_seed"); value)
+    {
+        seed = static_cast<unsigned int>(std::max(0.0, std::floor(*value + 0.5)));
+    }
+    if (const auto value = extractStringField(text, "sampling_policy"); value)
+    {
+        sampling_policy = *value;
+    }
+}
+
 std::vector<std::string> parseObjectArray(const std::string& array_text)
 {
     std::vector<std::string> objects;
@@ -488,8 +550,82 @@ parseSurfaceRuntimeRoute(const std::string& text)
         {"scdatunified", SurfaceRuntimeRoute::SCDATUnified},
         {"unified", SurfaceRuntimeRoute::SCDATUnified},
         {"scdat", SurfaceRuntimeRoute::SCDATUnified},
+        {"surfacepic", SurfaceRuntimeRoute::SurfacePic},
+        {"surface_pic", SurfaceRuntimeRoute::SurfacePic},
+        {"surfacepichybrid", SurfaceRuntimeRoute::SurfacePicHybrid},
+        {"surface_pic_hybrid", SurfaceRuntimeRoute::SurfacePicHybrid},
         {"legacybenchmark", SurfaceRuntimeRoute::LegacyBenchmark},
         {"legacy", SurfaceRuntimeRoute::LegacyBenchmark},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfacePicStrategy>
+parseSurfacePicStrategy(const std::string& text)
+{
+    using SCDAT::Toolkit::SurfaceCharging::SurfacePicStrategy;
+    using Registry = SCDAT::Basic::StringModelRegistry<SurfacePicStrategy>;
+    static const Registry kRegistry{
+        {"surfacepicdirect", SurfacePicStrategy::SurfacePicDirect},
+        {"surface_pic_direct", SurfacePicStrategy::SurfacePicDirect},
+        {"direct", SurfacePicStrategy::SurfacePicDirect},
+        {"surfacepiccalibrated", SurfacePicStrategy::SurfacePicCalibrated},
+        {"surface_pic_calibrated", SurfacePicStrategy::SurfacePicCalibrated},
+        {"calibrated", SurfacePicStrategy::SurfacePicCalibrated},
+        {"surfacepichybridreference", SurfacePicStrategy::SurfacePicHybridReference},
+        {"surface_pic_hybrid_reference", SurfacePicStrategy::SurfacePicHybridReference},
+        {"hybridreference", SurfacePicStrategy::SurfacePicHybridReference},
+        {"hybrid", SurfacePicStrategy::SurfacePicHybridReference},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfaceLegacyInputAdapterKind>
+parseSurfaceLegacyInputAdapterKind(const std::string& text)
+{
+    using SCDAT::Toolkit::SurfaceCharging::SurfaceLegacyInputAdapterKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<SurfaceLegacyInputAdapterKind>;
+    static const Registry kRegistry{
+        {"none", SurfaceLegacyInputAdapterKind::None},
+        {"ctextreferencedeck", SurfaceLegacyInputAdapterKind::CTextReferenceDeck},
+        {"c_text_reference_deck", SurfaceLegacyInputAdapterKind::CTextReferenceDeck},
+        {"ctext", SurfaceLegacyInputAdapterKind::CTextReferenceDeck},
+        {"matlabreferencedeck", SurfaceLegacyInputAdapterKind::MatlabReferenceDeck},
+        {"matlab_reference_deck", SurfaceLegacyInputAdapterKind::MatlabReferenceDeck},
+        {"matlab", SurfaceLegacyInputAdapterKind::MatlabReferenceDeck},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfacePicRuntimeKind>
+parseSurfacePicRuntimeKind(const std::string& text)
+{
+    using SCDAT::Toolkit::SurfaceCharging::SurfacePicRuntimeKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<SurfacePicRuntimeKind>;
+    static const Registry kRegistry{
+        {"localwindowsampler", SurfacePicRuntimeKind::LocalWindowSampler},
+        {"local_window_sampler", SurfacePicRuntimeKind::LocalWindowSampler},
+        {"local", SurfacePicRuntimeKind::LocalWindowSampler},
+        {"graphcoupledsharedsurface", SurfacePicRuntimeKind::GraphCoupledSharedSurface},
+        {"graph_coupled_shared_surface", SurfacePicRuntimeKind::GraphCoupledSharedSurface},
+        {"sharedsurface", SurfacePicRuntimeKind::GraphCoupledSharedSurface},
+        {"shared", SurfacePicRuntimeKind::GraphCoupledSharedSurface},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfaceInstrumentSetKind>
+parseSurfaceInstrumentSetKind(const std::string& text)
+{
+    using SCDAT::Toolkit::SurfaceCharging::SurfaceInstrumentSetKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<SurfaceInstrumentSetKind>;
+    static const Registry kRegistry{
+        {"metadataonly", SurfaceInstrumentSetKind::MetadataOnly},
+        {"metadata_only", SurfaceInstrumentSetKind::MetadataOnly},
+        {"metadata", SurfaceInstrumentSetKind::MetadataOnly},
+        {"surfacepicobserverset", SurfaceInstrumentSetKind::SurfacePicObserverSet},
+        {"surface_pic_observer_set", SurfaceInstrumentSetKind::SurfacePicObserverSet},
+        {"observer", SurfaceInstrumentSetKind::SurfacePicObserverSet},
     };
     return kRegistry.tryParse(text);
 }
@@ -500,8 +636,8 @@ parseSurfaceCurrentAlgorithmMode(const std::string& text)
     using SCDAT::Toolkit::SurfaceCharging::SurfaceCurrentAlgorithmMode;
     using Registry = SCDAT::Basic::StringModelRegistry<SurfaceCurrentAlgorithmMode>;
     static const Registry kRegistry{
-        {"unifiedspisaligned", SurfaceCurrentAlgorithmMode::UnifiedSpisAligned},
-        {"unified", SurfaceCurrentAlgorithmMode::UnifiedSpisAligned},
+        {"unifiedkernelaligned", SurfaceCurrentAlgorithmMode::UnifiedKernelAligned},
+        {"unified", SurfaceCurrentAlgorithmMode::UnifiedKernelAligned},
         {"legacyrefcompatible", SurfaceCurrentAlgorithmMode::LegacyRefCompatible},
         {"legacy", SurfaceCurrentAlgorithmMode::LegacyRefCompatible},
     };
@@ -514,8 +650,8 @@ parseSurfaceBenchmarkMode(const std::string& text)
     using SCDAT::Toolkit::SurfaceCharging::SurfaceBenchmarkMode;
     using Registry = SCDAT::Basic::StringModelRegistry<SurfaceBenchmarkMode>;
     static const Registry kRegistry{
-        {"unifiedspisaligned", SurfaceBenchmarkMode::UnifiedSpisAligned},
-        {"unified", SurfaceBenchmarkMode::UnifiedSpisAligned},
+        {"unifiedkernelaligned", SurfaceBenchmarkMode::UnifiedKernelAligned},
+        {"unified", SurfaceBenchmarkMode::UnifiedKernelAligned},
         {"legacyrefcompatible", SurfaceBenchmarkMode::LegacyRefCompatible},
         {"legacy", SurfaceBenchmarkMode::LegacyRefCompatible},
     };
@@ -533,6 +669,193 @@ parseVolumeLinearSolverPolicy(const std::string& text)
         {"dense", VolumeLinearSolverPolicy::DenseOnly},
         {"iterativeonly", VolumeLinearSolverPolicy::IterativeOnly},
         {"iterative", VolumeLinearSolverPolicy::IterativeOnly},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::PlasmaAnalysis::PlasmaEnvironmentModelKind>
+parsePlasmaEnvironmentModelKind(const std::string& text)
+{
+    using SCDAT::Toolkit::PlasmaAnalysis::PlasmaEnvironmentModelKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<PlasmaEnvironmentModelKind>;
+    static const Registry kRegistry{
+        {"spisccpreference", PlasmaEnvironmentModelKind::SpisCcpReference},
+        {"spis_ccp_reference", PlasmaEnvironmentModelKind::SpisCcpReference},
+        {"ccp", PlasmaEnvironmentModelKind::SpisCcpReference},
+        {"spisorbitalwake", PlasmaEnvironmentModelKind::SpisOrbitalWake},
+        {"spis_orbital_wake", PlasmaEnvironmentModelKind::SpisOrbitalWake},
+        {"wake", PlasmaEnvironmentModelKind::SpisOrbitalWake},
+        {"spisthrusterplume", PlasmaEnvironmentModelKind::SpisThrusterPlume},
+        {"spis_thruster_plume", PlasmaEnvironmentModelKind::SpisThrusterPlume},
+        {"thrusterplume", PlasmaEnvironmentModelKind::SpisThrusterPlume},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind>
+parsePlasmaDistributionModelKind(const std::string& text)
+{
+    using SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<PlasmaDistributionModelKind>;
+    static const Registry kRegistry{
+        {"maxwellianprojected", PlasmaDistributionModelKind::MaxwellianProjected},
+        {"maxwellian_projected", PlasmaDistributionModelKind::MaxwellianProjected},
+        {"maxwellian", PlasmaDistributionModelKind::MaxwellianProjected},
+        {"wakeanisotropic", PlasmaDistributionModelKind::WakeAnisotropic},
+        {"wake_anisotropic", PlasmaDistributionModelKind::WakeAnisotropic},
+        {"wake", PlasmaDistributionModelKind::WakeAnisotropic},
+        {"multipopulationhybrid", PlasmaDistributionModelKind::MultiPopulationHybrid},
+        {"multi_population_hybrid", PlasmaDistributionModelKind::MultiPopulationHybrid},
+        {"hybrid", PlasmaDistributionModelKind::MultiPopulationHybrid},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::PlasmaAnalysis::PlasmaReactionRegistryKind>
+parsePlasmaReactionRegistryKind(const std::string& text)
+{
+    using SCDAT::Toolkit::PlasmaAnalysis::PlasmaReactionRegistryKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<PlasmaReactionRegistryKind>;
+    static const Registry kRegistry{
+        {"spiscore", PlasmaReactionRegistryKind::SpisCore},
+        {"spis_core", PlasmaReactionRegistryKind::SpisCore},
+        {"core", PlasmaReactionRegistryKind::SpisCore},
+        {"spisdenseplasma", PlasmaReactionRegistryKind::SpisDensePlasma},
+        {"spis_dense_plasma", PlasmaReactionRegistryKind::SpisDensePlasma},
+        {"dense", PlasmaReactionRegistryKind::SpisDensePlasma},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::PlasmaAnalysis::PlasmaDiagnosticSetKind>
+parsePlasmaDiagnosticSetKind(const std::string& text)
+{
+    using SCDAT::Toolkit::PlasmaAnalysis::PlasmaDiagnosticSetKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<PlasmaDiagnosticSetKind>;
+    static const Registry kRegistry{
+        {"spiscorediagnostics", PlasmaDiagnosticSetKind::SpisCoreDiagnostics},
+        {"spis_core_diagnostics", PlasmaDiagnosticSetKind::SpisCoreDiagnostics},
+        {"corediagnostics", PlasmaDiagnosticSetKind::SpisCoreDiagnostics},
+        {"sheathmultiscalediagnostics", PlasmaDiagnosticSetKind::SheathMultiscaleDiagnostics},
+        {"sheath_multiscale_diagnostics", PlasmaDiagnosticSetKind::SheathMultiscaleDiagnostics},
+        {"multiscale", PlasmaDiagnosticSetKind::SheathMultiscaleDiagnostics},
+        {"fullphysicsdiagnostics", PlasmaDiagnosticSetKind::FullPhysicsDiagnostics},
+        {"full_physics_diagnostics", PlasmaDiagnosticSetKind::FullPhysicsDiagnostics},
+        {"fullphysics", PlasmaDiagnosticSetKind::FullPhysicsDiagnostics},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::InternalCharging::InternalChargingSourceMode>
+parseInternalChargingSourceMode(const std::string& text)
+{
+    using SCDAT::Toolkit::InternalCharging::InternalChargingSourceMode;
+    using Registry = SCDAT::Basic::StringModelRegistry<InternalChargingSourceMode>;
+    static const Registry kRegistry{
+        {"preset", InternalChargingSourceMode::Preset},
+        {"radiation", InternalChargingSourceMode::Radiation},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::InternalCharging::InternalMaterialStackModelKind>
+parseInternalMaterialStackModelKind(const std::string& text)
+{
+    using SCDAT::Toolkit::InternalCharging::InternalMaterialStackModelKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<InternalMaterialStackModelKind>;
+    static const Registry kRegistry{
+        {"spislayeredstack", InternalMaterialStackModelKind::SpisLayeredStack},
+        {"spis_layered_stack", InternalMaterialStackModelKind::SpisLayeredStack},
+        {"layered", InternalMaterialStackModelKind::SpisLayeredStack},
+        {"spisharnessbundle", InternalMaterialStackModelKind::SpisHarnessBundle},
+        {"spis_harness_bundle", InternalMaterialStackModelKind::SpisHarnessBundle},
+        {"harness", InternalMaterialStackModelKind::SpisHarnessBundle},
+        {"spisbacksheetstack", InternalMaterialStackModelKind::SpisBacksheetStack},
+        {"spis_backsheet_stack", InternalMaterialStackModelKind::SpisBacksheetStack},
+        {"backsheet", InternalMaterialStackModelKind::SpisBacksheetStack},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::InternalCharging::InternalGeometryModelKind>
+parseInternalGeometryModelKind(const std::string& text)
+{
+    using SCDAT::Toolkit::InternalCharging::InternalGeometryModelKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<InternalGeometryModelKind>;
+    static const Registry kRegistry{
+        {"layerstack1d", InternalGeometryModelKind::LayerStack1D},
+        {"layer_stack_1d", InternalGeometryModelKind::LayerStack1D},
+        {"layers", InternalGeometryModelKind::LayerStack1D},
+        {"shieldedlayerstack1d", InternalGeometryModelKind::ShieldedLayerStack1D},
+        {"shielded_layer_stack_1d", InternalGeometryModelKind::ShieldedLayerStack1D},
+        {"shielded", InternalGeometryModelKind::ShieldedLayerStack1D},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::InternalCharging::InternalPrimarySourceModelKind>
+parseInternalPrimarySourceModelKind(const std::string& text)
+{
+    using SCDAT::Toolkit::InternalCharging::InternalPrimarySourceModelKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<InternalPrimarySourceModelKind>;
+    static const Registry kRegistry{
+        {"presetmonoenergeticflux", InternalPrimarySourceModelKind::PresetMonoEnergeticFlux},
+        {"preset_monoenergetic_flux", InternalPrimarySourceModelKind::PresetMonoEnergeticFlux},
+        {"preset", InternalPrimarySourceModelKind::PresetMonoEnergeticFlux},
+        {"radiationdrivecoupled", InternalPrimarySourceModelKind::RadiationDriveCoupled},
+        {"radiation_drive_coupled", InternalPrimarySourceModelKind::RadiationDriveCoupled},
+        {"coupled", InternalPrimarySourceModelKind::RadiationDriveCoupled},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::InternalCharging::InternalPhysicsProcessListKind>
+parseInternalPhysicsProcessListKind(const std::string& text)
+{
+    using SCDAT::Toolkit::InternalCharging::InternalPhysicsProcessListKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<InternalPhysicsProcessListKind>;
+    static const Registry kRegistry{
+        {"geant4emstandardlike", InternalPhysicsProcessListKind::Geant4EmStandardLike},
+        {"geant4_em_standard_like", InternalPhysicsProcessListKind::Geant4EmStandardLike},
+        {"emstandard", InternalPhysicsProcessListKind::Geant4EmStandardLike},
+        {"geant4shieldinglike", InternalPhysicsProcessListKind::Geant4ShieldingLike},
+        {"geant4_shielding_like", InternalPhysicsProcessListKind::Geant4ShieldingLike},
+        {"shielding", InternalPhysicsProcessListKind::Geant4ShieldingLike},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::InternalCharging::InternalEnergyDepositionModelKind>
+parseInternalEnergyDepositionModelKind(const std::string& text)
+{
+    using SCDAT::Toolkit::InternalCharging::InternalEnergyDepositionModelKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<InternalEnergyDepositionModelKind>;
+    static const Registry kRegistry{
+        {"continuousslabdeposition", InternalEnergyDepositionModelKind::ContinuousSlabDeposition},
+        {"continuous_slab_deposition",
+         InternalEnergyDepositionModelKind::ContinuousSlabDeposition},
+        {"continuous", InternalEnergyDepositionModelKind::ContinuousSlabDeposition},
+        {"geant4steprecorderlike", InternalEnergyDepositionModelKind::Geant4StepRecorderLike},
+        {"geant4_step_recorder_like", InternalEnergyDepositionModelKind::Geant4StepRecorderLike},
+        {"steprecorder", InternalEnergyDepositionModelKind::Geant4StepRecorderLike},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::Toolkit::InternalCharging::InternalChargeResponseModelKind>
+parseInternalChargeResponseModelKind(const std::string& text)
+{
+    using SCDAT::Toolkit::InternalCharging::InternalChargeResponseModelKind;
+    using Registry = SCDAT::Basic::StringModelRegistry<InternalChargeResponseModelKind>;
+    static const Registry kRegistry{
+        {"spislayereddielectric", InternalChargeResponseModelKind::SpisLayeredDielectric},
+        {"spis_layered_dielectric", InternalChargeResponseModelKind::SpisLayeredDielectric},
+        {"surface", InternalChargeResponseModelKind::SpisLayeredDielectric},
+        {"radiationinducedconductivityrelaxation",
+         InternalChargeResponseModelKind::RadiationInducedConductivityRelaxation},
+        {"radiation_induced_conductivity_relaxation",
+         InternalChargeResponseModelKind::RadiationInducedConductivityRelaxation},
+        {"ricrelaxation", InternalChargeResponseModelKind::RadiationInducedConductivityRelaxation},
     };
     return kRegistry.tryParse(text);
 }
@@ -1431,6 +1754,57 @@ PlasmaScenarioPreset loadPlasmaScenarioPresetFromJson(const fs::path& json_path,
     apply_number("dense_plasma_threshold_m3", preset.config.dense_plasma_threshold_m3);
     apply_number("initial_potential_v", preset.config.initial_potential_v);
 
+    if (const auto enable_spis_style_organization =
+            extractBoolField(config_scope, "enable_spis_style_organization");
+        enable_spis_style_organization)
+    {
+        preset.config.enable_spis_style_organization = *enable_spis_style_organization;
+    }
+    if (const auto environment_model = extractStringField(config_scope, "environment_model");
+        environment_model)
+    {
+        const auto parsed = parsePlasmaEnvironmentModelKind(*environment_model);
+        if (!parsed)
+        {
+            throw std::runtime_error("Unsupported environment_model in plasma config json: " +
+                                     *environment_model);
+        }
+        preset.config.environment_model = *parsed;
+    }
+    if (const auto distribution_model = extractStringField(config_scope, "distribution_model");
+        distribution_model)
+    {
+        const auto parsed = parsePlasmaDistributionModelKind(*distribution_model);
+        if (!parsed)
+        {
+            throw std::runtime_error(
+                "Unsupported distribution_model in plasma config json: " + *distribution_model);
+        }
+        preset.config.distribution_model = *parsed;
+    }
+    if (const auto reaction_registry = extractStringField(config_scope, "reaction_registry");
+        reaction_registry)
+    {
+        const auto parsed = parsePlasmaReactionRegistryKind(*reaction_registry);
+        if (!parsed)
+        {
+            throw std::runtime_error("Unsupported reaction_registry in plasma config json: " +
+                                     *reaction_registry);
+        }
+        preset.config.reaction_registry = *parsed;
+    }
+    if (const auto diagnostic_set = extractStringField(config_scope, "diagnostic_set");
+        diagnostic_set)
+    {
+        const auto parsed = parsePlasmaDiagnosticSetKind(*diagnostic_set);
+        if (!parsed)
+        {
+            throw std::runtime_error("Unsupported diagnostic_set in plasma config json: " +
+                                     *diagnostic_set);
+        }
+        preset.config.diagnostic_set = *parsed;
+    }
+
     auto plasma_text = extractObjectField(config_scope, "initial_plasma");
     if (!plasma_text)
     {
@@ -1462,21 +1836,22 @@ PlasmaScenarioPreset loadPlasmaScenarioPresetFromJson(const fs::path& json_path,
     return preset;
 }
 
-SurfaceChargingScenarioPreset loadSurfaceScenarioPresetFromJson(const fs::path& json_path,
-                                                                fs::path& output_path)
+InternalChargingScenarioPreset loadInternalScenarioPresetFromJson(const fs::path& json_path,
+                                                                  fs::path& output_path)
 {
     const std::string content = readTextFile(json_path);
     const auto run_scope = extractObjectField(content, "run").value_or(content);
     const auto config_scope = extractObjectField(content, "config").value_or(content);
 
-    auto preset = SCDAT::Toolkit::SurfaceCharging::makeDefaultSurfaceChargingScenarioPreset();
+    auto preset = SCDAT::Toolkit::InternalCharging::makeDefaultInternalChargingScenarioPreset();
     const auto base_preset = extractStringField(content, "base_preset")
                                  .value_or(extractStringField(content, "preset").value_or(""));
     if (!base_preset.empty())
     {
-        if (!SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(base_preset, preset))
+        if (!SCDAT::Toolkit::InternalCharging::tryGetInternalChargingScenarioPreset(base_preset,
+                                                                                    preset))
         {
-            throw std::runtime_error("Unknown surface base preset in json: " + base_preset);
+            throw std::runtime_error("Unknown internal base preset in json: " + base_preset);
         }
     }
 
@@ -1484,7 +1859,6 @@ SurfaceChargingScenarioPreset loadSurfaceScenarioPresetFromJson(const fs::path& 
     {
         preset.name = *name;
     }
-
     if (const auto time_step_s = extractNumberField(run_scope, "time_step_s"); time_step_s)
     {
         preset.time_step_s = *time_step_s;
@@ -1492,22 +1866,6 @@ SurfaceChargingScenarioPreset loadSurfaceScenarioPresetFromJson(const fs::path& 
     if (const auto steps = extractNumberField(run_scope, "steps"); steps)
     {
         preset.steps = static_cast<std::size_t>(std::max(0.0, std::floor(*steps + 0.5)));
-    }
-    if (const auto adaptive = extractBoolField(run_scope, "adaptive_time_stepping"); adaptive)
-    {
-        preset.adaptive_time_stepping = *adaptive;
-    }
-    if (const auto total_duration = extractNumberField(run_scope, "total_duration_s"); total_duration)
-    {
-        preset.total_duration_s = *total_duration;
-    }
-    if (const auto minimum_dt = extractNumberField(run_scope, "minimum_time_step_s"); minimum_dt)
-    {
-        preset.minimum_time_step_s = *minimum_dt;
-    }
-    if (const auto maximum_dt = extractNumberField(run_scope, "maximum_time_step_s"); maximum_dt)
-    {
-        preset.maximum_time_step_s = *maximum_dt;
     }
 
     if (const auto output_csv = extractStringField(content, "output_csv"); output_csv)
@@ -1541,209 +1899,129 @@ SurfaceChargingScenarioPreset loadSurfaceScenarioPresetFromJson(const fs::path& 
             target = static_cast<std::size_t>(std::max(0.0, std::floor(*value + 0.5)));
         }
     };
-    auto apply_path = [&](const std::string& key, fs::path& target) {
-        if (const auto value = extractStringField(config_scope, key); value)
-        {
-            target = *value;
-        }
-    };
 
-    apply_number("surface_area_m2", preset.config.surface_area_m2);
-    apply_number("capacitance_per_area_f_per_m2", preset.config.capacitance_per_area_f_per_m2);
-    apply_number("dielectric_thickness_m", preset.config.dielectric_thickness_m);
-    apply_number("bulk_flow_velocity_m_per_s", preset.config.bulk_flow_velocity_m_per_s);
-    apply_number("flow_alignment_cosine", preset.config.flow_alignment_cosine);
-    apply_number("electron_flow_coupling", preset.config.electron_flow_coupling);
-    apply_number("ion_directed_velocity_m_per_s", preset.config.ion_directed_velocity_m_per_s);
-    apply_number("live_pic_probe_delta_v", preset.config.live_pic_probe_delta_v);
-    apply_number("live_pic_reference_potential_v", preset.config.live_pic_reference_potential_v);
-    apply_number("pic_recalibration_trigger_v", preset.config.pic_recalibration_trigger_v);
-    apply_number("body_capacitance_f", preset.config.body_capacitance_f);
-    apply_number("max_delta_potential_v_per_step", preset.config.max_delta_potential_v_per_step);
-    apply_number("plasma_electron_density_m3", preset.config.plasma.electron_density_m3);
-    apply_number("plasma_ion_density_m3", preset.config.plasma.ion_density_m3);
-    apply_number("plasma_electron_temperature_ev", preset.config.plasma.electron_temperature_ev);
-    apply_number("plasma_ion_temperature_ev", preset.config.plasma.ion_temperature_ev);
-    apply_number("plasma_ion_mass_amu", preset.config.plasma.ion_mass_amu);
-    apply_size_t("live_pic_window_steps", preset.config.live_pic_window_steps);
-    apply_size_t("live_pic_window_layers", preset.config.live_pic_window_layers);
-    apply_size_t("live_pic_particles_per_element", preset.config.live_pic_particles_per_element);
-    apply_size_t("pic_recalibration_interval_steps", preset.config.pic_recalibration_interval_steps);
-    apply_size_t("pic_calibration_samples", preset.config.pic_calibration_samples);
+    applyUnifiedSolverConfigFromJsonObject(config_scope, preset.config.solver_config);
+    applyReproducibilityConfigFromJsonObject(config_scope, preset.config.seed,
+                                             preset.config.sampling_policy);
 
-    apply_bool("floating", preset.config.floating);
-    apply_bool("derive_capacitance_from_material", preset.config.derive_capacitance_from_material);
-    apply_bool("use_reference_current_balance", preset.config.use_reference_current_balance);
-    apply_bool("enable_pic_calibration", preset.config.enable_pic_calibration);
-    apply_bool("enable_live_pic_window", preset.config.enable_live_pic_window);
-    apply_bool("enable_live_pic_mcc", preset.config.enable_live_pic_mcc);
-    apply_bool("enable_body_patch_circuit", preset.config.enable_body_patch_circuit);
-    apply_bool("enable_secondary_electron", preset.config.enable_secondary_electron);
-    apply_bool("enable_backscatter", preset.config.enable_backscatter);
-    apply_bool("enable_photoelectron", preset.config.enable_photoelectron);
-    apply_bool("enable_external_field_solver_bridge",
-               preset.config.enable_external_field_solver_bridge);
-    apply_bool("enable_external_volume_solver_bridge",
-               preset.config.enable_external_volume_solver_bridge);
-    apply_bool("has_electron_spectrum", preset.config.has_electron_spectrum);
-    apply_bool("has_ion_spectrum", preset.config.has_ion_spectrum);
+    apply_size_t("layers", preset.config.layers);
+    apply_number("thickness_m", preset.config.thickness_m);
+    apply_number("area_m2", preset.config.area_m2);
+    apply_number("incident_current_density_a_per_m2",
+                 preset.config.incident_current_density_a_per_m2);
+    apply_number("incident_energy_ev", preset.config.incident_energy_ev);
+    apply_number("incident_charge_state_abs", preset.config.incident_charge_state_abs);
+    apply_number("radiation_conductivity_charge_gain_s_per_m_per_c_per_m3",
+                 preset.config.radiation_conductivity_charge_gain_s_per_m_per_c_per_m3);
+    apply_number("radiation_conductivity_dose_gain_s_per_m_per_gy",
+                 preset.config.radiation_conductivity_dose_gain_s_per_m_per_gy);
+    apply_number("radiation_conductivity_dose_rate_gain_s2_per_m_per_gy",
+                 preset.config.radiation_conductivity_dose_rate_gain_s2_per_m_per_gy);
+    apply_number("min_effective_conductivity_s_per_m",
+                 preset.config.min_effective_conductivity_s_per_m);
+    apply_number("max_effective_conductivity_s_per_m",
+                 preset.config.max_effective_conductivity_s_per_m);
+    apply_bool("enable_spis_style_organization", preset.config.enable_spis_style_organization);
 
-    apply_path("external_field_solver_request_path", preset.config.external_field_solver_request_path);
-    apply_path("external_field_solver_result_path", preset.config.external_field_solver_result_path);
-    apply_path("external_volume_solver_request_path", preset.config.external_volume_solver_request_path);
-    apply_path("external_volume_solver_result_path", preset.config.external_volume_solver_result_path);
-    apply_path("external_volume_mesh_path", preset.config.external_volume_mesh_path);
-    apply_path("external_surface_volume_projection_path",
-               preset.config.external_surface_volume_projection_path);
-
-    if (const auto runtime_route = extractStringField(config_scope, "runtime_route");
-        runtime_route)
+    if (const auto material_name = extractStringField(config_scope, "material_name"); material_name)
     {
-        const auto parsed = parseSurfaceRuntimeRoute(*runtime_route);
+        preset.config.material_name = *material_name;
+    }
+    if (const auto source_mode = extractStringField(config_scope, "source_mode"); source_mode)
+    {
+        const auto parsed = parseInternalChargingSourceMode(*source_mode);
         if (!parsed)
         {
-            throw std::runtime_error("Unsupported runtime_route in surface config json: " +
-                                     *runtime_route);
+            throw std::runtime_error("Unsupported source_mode in internal config json: " +
+                                     *source_mode);
         }
-        preset.config.runtime_route = *parsed;
+        preset.config.source_mode = *parsed;
     }
-
-    if (const auto algorithm_mode = extractStringField(config_scope, "current_algorithm_mode");
-        algorithm_mode)
+    if (const auto material_stack_model =
+            extractStringField(config_scope, "material_stack_model");
+        material_stack_model)
     {
-        const auto parsed = parseSurfaceCurrentAlgorithmMode(*algorithm_mode);
+        const auto parsed = parseInternalMaterialStackModelKind(*material_stack_model);
         if (!parsed)
         {
             throw std::runtime_error(
-                "Unsupported current_algorithm_mode in surface config json: " +
-                *algorithm_mode);
+                "Unsupported material_stack_model in internal config json: " +
+                *material_stack_model);
         }
-        preset.config.current_algorithm_mode = *parsed;
+        preset.config.material_stack_model = *parsed;
     }
-
-    if (const auto benchmark_mode = extractStringField(config_scope, "benchmark_mode");
-        benchmark_mode)
+    if (const auto geometry_model = extractStringField(config_scope, "geometry_model");
+        geometry_model)
     {
-        const auto parsed = parseSurfaceBenchmarkMode(*benchmark_mode);
+        const auto parsed = parseInternalGeometryModelKind(*geometry_model);
         if (!parsed)
         {
-            throw std::runtime_error("Unsupported benchmark_mode in surface config json: " +
-                                     *benchmark_mode);
+            throw std::runtime_error("Unsupported geometry_model in internal config json: " +
+                                     *geometry_model);
         }
-        preset.config.benchmark_mode = *parsed;
+        preset.config.geometry_model = *parsed;
     }
-
-    if (const auto solver_policy = extractStringField(config_scope, "volume_linear_solver_policy");
-        solver_policy)
+    if (const auto primary_source_model =
+            extractStringField(config_scope, "primary_source_model");
+        primary_source_model)
     {
-        const auto parsed = parseVolumeLinearSolverPolicy(*solver_policy);
+        const auto parsed = parseInternalPrimarySourceModelKind(*primary_source_model);
         if (!parsed)
         {
             throw std::runtime_error(
-                "Unsupported volume_linear_solver_policy in surface config json: " +
-                *solver_policy);
+                "Unsupported primary_source_model in internal config json: " +
+                *primary_source_model);
         }
-        preset.config.volume_linear_solver_policy = *parsed;
+        preset.config.primary_source_model = *parsed;
     }
-
-    if (const auto see_model = extractStringField(config_scope, "reference_see_model"); see_model)
+    if (const auto physics_process_list =
+            extractStringField(config_scope, "physics_process_list");
+        physics_process_list)
     {
-        const auto parsed_see_model = parseSecondaryElectronEmissionModel(*see_model);
-        if (!parsed_see_model)
-        {
-            throw std::runtime_error("Unsupported reference_see_model in surface config json: " +
-                                     *see_model);
-        }
-        preset.config.reference_see_model = *parsed_see_model;
-    }
-
-    if (const auto model_text = extractStringField(config_scope, "electron_collection_model");
-        model_text)
-    {
-        const auto parsed_model = parseElectronCollectionModelKind(*model_text);
-        if (!parsed_model)
+        const auto parsed = parseInternalPhysicsProcessListKind(*physics_process_list);
+        if (!parsed)
         {
             throw std::runtime_error(
-                "Unsupported electron_collection_model in surface config json: " + *model_text);
+                "Unsupported physics_process_list in internal config json: " +
+                *physics_process_list);
         }
-        preset.config.electron_collection_model = *parsed_model;
+        preset.config.physics_process_list = *parsed;
     }
-
-    auto plasma_text = extractObjectField(config_scope, "plasma_model");
-    if (!plasma_text)
+    if (const auto energy_deposition_model =
+            extractStringField(config_scope, "energy_deposition_model");
+        energy_deposition_model)
     {
-        plasma_text = extractObjectField(config_scope, "plasma");
-    }
-    if (plasma_text)
-    {
-        applyPlasmaParametersFromJsonObject(*plasma_text, preset.config.plasma);
-    }
-
-    auto emission_text = extractObjectField(config_scope, "surface_emission");
-    if (!emission_text)
-    {
-        emission_text = extractObjectField(config_scope, "emission");
-    }
-    if (emission_text)
-    {
-        applyEmissionParametersFromJsonObject(*emission_text, preset.config.emission);
-    }
-
-    if (const auto material_alias = extractStringField(config_scope, "material_alias");
-        material_alias)
-    {
-        const auto* resolved = resolveMaterialAliasOrName(*material_alias);
-        if (resolved == nullptr)
+        const auto parsed = parseInternalEnergyDepositionModelKind(*energy_deposition_model);
+        if (!parsed)
         {
-            throw std::runtime_error("Unknown material_alias in surface config json: " +
-                                     *material_alias);
+            throw std::runtime_error(
+                "Unsupported energy_deposition_model in internal config json: " +
+                *energy_deposition_model);
         }
-        preset.config.material = *resolved;
+        preset.config.energy_deposition_model = *parsed;
     }
-    if (const auto material_name = extractStringField(config_scope, "material_name");
-        material_name)
+    if (const auto charge_response_model =
+            extractStringField(config_scope, "charge_response_model");
+        charge_response_model)
     {
-        const auto* resolved = resolveMaterialAliasOrName(*material_name);
-        if (resolved == nullptr)
+        const auto parsed = parseInternalChargeResponseModelKind(*charge_response_model);
+        if (!parsed)
         {
-            throw std::runtime_error("Unknown material_name in surface config json: " +
-                                     *material_name);
+            throw std::runtime_error(
+                "Unsupported charge_response_model in internal config json: " +
+                *charge_response_model);
         }
-        preset.config.material = *resolved;
-    }
-
-    auto material_text = extractObjectField(config_scope, "surface_material");
-    if (!material_text)
-    {
-        material_text = extractObjectField(config_scope, "material");
-    }
-    if (material_text)
-    {
-        applyMaterialFromJsonObject(*material_text, preset.config.material);
-    }
-
-    applyStructuredTopologyFromJson(config_scope, preset.config);
-
-    if (const auto spectrum_text = extractObjectField(config_scope, "electron_spectrum"); spectrum_text)
-    {
-        if (!applySpectrumFromJsonObject(*spectrum_text, Particle::ParticleType::ELECTRON,
-                                         preset.config.electron_spectrum))
-        {
-            throw std::runtime_error("Failed to parse electron_spectrum in surface config json.");
-        }
-        preset.config.has_electron_spectrum = true;
-    }
-    if (const auto spectrum_text = extractObjectField(config_scope, "ion_spectrum"); spectrum_text)
-    {
-        if (!applySpectrumFromJsonObject(*spectrum_text, Particle::ParticleType::ION,
-                                         preset.config.ion_spectrum))
-        {
-            throw std::runtime_error("Failed to parse ion_spectrum in surface config json.");
-        }
-        preset.config.has_ion_spectrum = true;
+        preset.config.charge_response_model = *parsed;
     }
 
     return preset;
+}
+
+SurfaceChargingScenarioPreset loadSurfaceScenarioPresetFromJson(const fs::path& json_path,
+                                                                fs::path& output_path)
+{
+    const SurfaceScenarioLoader surface_scenario_loader;
+    return surface_scenario_loader.loadFromJson(json_path, output_path);
 }
 
 RadiationScenarioPreset loadRadiationScenarioPresetFromJson(const fs::path& json_path,
@@ -1815,6 +2093,11 @@ RadiationScenarioPreset loadRadiationScenarioPresetFromJson(const fs::path& json
             target = static_cast<unsigned int>(std::max(0.0, std::floor(*value + 0.5)));
         }
     };
+
+    applyUnifiedSolverConfigFromJsonObject(config_scope, preset.config.solver_config);
+    applyReproducibilityConfigFromJsonObject(config_scope, preset.config.seed,
+                                             preset.config.sampling_policy);
+    preset.config.monte_carlo_seed = preset.config.seed;
 
     apply_size_t("layers", preset.config.layers);
     apply_number("thickness_m", preset.config.thickness_m);
@@ -2030,6 +2313,10 @@ VacuumArcScenarioPreset loadArcScenarioPresetFromJson(const fs::path& json_path,
             target = *value;
         }
     };
+
+    applyUnifiedSolverConfigFromJsonObject(config_scope, preset.config.solver_config);
+    applyReproducibilityConfigFromJsonObject(config_scope, preset.config.seed,
+                                             preset.config.sampling_policy);
 
     apply_number("gap_distance_m", preset.config.gap_distance_m);
     apply_number("applied_field_v_per_m", preset.config.applied_field_v_per_m);
@@ -2315,7 +2602,8 @@ void printUsage(const std::string& exe_name)
     std::cout << "Spacecraft Charging and Discharging Analysis Toolkit\n\n";
     std::cout << "Usage:\n";
     std::cout << "  " << exe_name << " help\n";
-    std::cout << "  " << exe_name << " presets [plasma|surface|internal|radiation|arc]\n";
+    std::cout << "  " << exe_name
+              << " presets [plasma|surface|surface-replay|internal|radiation|arc]\n";
     std::cout << "  " << exe_name << " status\n";
     std::cout << "  " << exe_name << " summary [result_csv]\n";
     std::cout << "  " << exe_name << " plasma [preset] [output_csv]\n";
@@ -2323,6 +2611,7 @@ void printUsage(const std::string& exe_name)
     std::cout << "  " << exe_name << " surface [preset] [output_csv]\n";
     std::cout << "  " << exe_name << " surface-config <config_json> [output_csv]\n";
     std::cout << "  " << exe_name << " internal [preset] [output_csv]\n";
+    std::cout << "  " << exe_name << " internal-config <config_json> [output_csv]\n";
     std::cout << "  " << exe_name
               << " internal-radiation [internal_preset] [radiation_preset] [output_csv]\n";
     std::cout << "  " << exe_name << " radiation [preset] [output_csv]\n";
@@ -2413,55 +2702,11 @@ int runPlasma(const PlasmaScenarioPreset& preset, const fs::path& output_path)
 
 int runSurface(const SurfaceChargingScenarioPreset& preset, const fs::path& output_path)
 {
-    DensePlasmaSurfaceCharging charging;
-    if (!charging.initialize(preset.config))
+    const SurfaceSimulationRunner runner;
+    const auto run_result = runner.run(preset, output_path);
+    if (!run_result.success)
     {
-        throw std::runtime_error("Failed to initialize surface charging toolkit");
-    }
-
-    if (preset.adaptive_time_stepping && preset.total_duration_s > 0.0)
-    {
-        double elapsed_time_s = 0.0;
-        std::size_t sample_count = 0;
-        const double minimum_dt_s = std::max(1.0e-12, preset.minimum_time_step_s);
-        const double maximum_dt_s =
-            std::max(minimum_dt_s, preset.maximum_time_step_s);
-        while (elapsed_time_s + 1.0e-12 < preset.total_duration_s)
-        {
-            const double remaining_time_s = preset.total_duration_s - elapsed_time_s;
-            double dt = 0.0;
-            if (preset.steps > 0 && sample_count >= preset.steps)
-            {
-                // Avoid a final oversized tail step after the adaptive budget is
-                // exhausted; finish the horizon with bounded chunks instead.
-                dt = std::min(remaining_time_s, maximum_dt_s);
-            }
-            else
-            {
-                dt = charging.recommendTimeStep(remaining_time_s, minimum_dt_s, maximum_dt_s);
-            }
-            if (!charging.advance(dt))
-            {
-                throw std::runtime_error("Surface charging adaptive advance failed");
-            }
-            elapsed_time_s += dt;
-            sample_count += 1;
-        }
-    }
-    else
-    {
-        for (std::size_t i = 0; i < preset.steps; ++i)
-        {
-            if (!charging.advance(preset.time_step_s))
-            {
-                throw std::runtime_error("Surface charging advance failed");
-            }
-        }
-    }
-
-    if (!charging.exportResults(output_path))
-    {
-        throw std::runtime_error("Failed to export surface charging results");
+        throw std::runtime_error(run_result.error_message);
     }
 
     std::cout << "Surface preset '" << preset.name << "' wrote results to " << output_path.string()
@@ -2570,6 +2815,14 @@ int runInternalRadiationCoupled(const InternalChargingScenarioPreset& internal_p
             drive.incident_energy_ev = std::max(1.0, radiation_preset.config.mean_energy_ev);
             drive.incident_charge_state_abs =
                 mapRadiationSpeciesToChargeStateAbs(radiation_preset.config.particle_species);
+            drive.deposition_record_contract_id = "geant4-aligned-deposition-record-v1";
+            drive.process_history_contract_id = "geant4-aligned-process-history-v1";
+            drive.provenance_source = "radiation_toolkit_online_coupling";
+            drive.process_dispatch_mode =
+                radiation_preset.config.enable_monte_carlo_transport ? "track_tagged_dispatch"
+                                                                     : "aggregate_tagged_dispatch";
+            drive.secondary_provenance_available =
+                radiation_algorithm.getStatus().track_secondary_event_count > 0.0;
             const double base_drive_current_density_a_per_m2 =
                 mapDepositedEnergyToCurrentDensity(current_deposited_energy_delta_j_per_m2, step_dt,
                                                    drive.incident_energy_ev,
@@ -2652,6 +2905,37 @@ int runInternalRadiationCoupled(const InternalChargingScenarioPreset& internal_p
         }
     }
 
+    auto radiation_output_path = output_path;
+    radiation_output_path.replace_extension();
+    radiation_output_path += ".radiation_drive.csv";
+    if (!radiation_algorithm.exportResults(radiation_output_path))
+    {
+        throw std::runtime_error("Failed to export radiation drive history for internal-radiation coupling");
+    }
+
+    InternalChargingRadiationDrive export_drive;
+    export_drive.incident_energy_ev = std::max(1.0, radiation_preset.config.mean_energy_ev);
+    export_drive.incident_charge_state_abs =
+        mapRadiationSpeciesToChargeStateAbs(radiation_preset.config.particle_species);
+    export_drive.incident_current_density_a_per_m2 = current_drive_current_density_a_per_m2;
+    export_drive.deposition_record_contract_id = "geant4-aligned-deposition-record-v1";
+    export_drive.process_history_contract_id = "geant4-aligned-process-history-v1";
+    export_drive.provenance_source = "radiation_toolkit_online_coupling";
+    export_drive.process_dispatch_mode =
+        radiation_preset.config.enable_monte_carlo_transport ? "track_tagged_dispatch"
+                                                             : "aggregate_tagged_dispatch";
+    export_drive.secondary_provenance_available =
+        radiation_algorithm.getStatus().track_secondary_event_count > 0.0;
+    export_drive.deposition_history_path = (radiation_output_path.parent_path() /
+                                            radiation_output_path.stem())
+                                               .string() +
+                                           ".deposition_history.json";
+    export_drive.process_history_path = (radiation_output_path.parent_path() /
+                                         radiation_output_path.stem())
+                                            .string() +
+                                        ".process_history.json";
+    internal_algorithm.setRadiationDrive(export_drive);
+
     if (!internal_algorithm.exportResults(output_path))
     {
         throw std::runtime_error("Failed to export internal-radiation coupled results");
@@ -2665,7 +2949,8 @@ int runInternalRadiationCoupled(const InternalChargingScenarioPreset& internal_p
 
     std::cout << "Internal-radiation presets '" << internal_preset.name << "' + '"
               << radiation_preset.name << "' wrote results to " << output_path.string()
-              << " and coupling history to " << coupling_history_path.string() << '\n';
+              << ", coupling history to " << coupling_history_path.string()
+              << " and radiation drive artifact to " << radiation_output_path.string() << '\n';
     return 0;
 }
 
@@ -2723,6 +3008,162 @@ int runArc(const VacuumArcScenarioPreset& preset, const fs::path& output_path)
 
 } // namespace
 
+namespace SCDAT
+{
+namespace MainEntry
+{
+
+namespace detail
+{
+
+std::string readTextFile(const std::filesystem::path& path)
+{
+    return ::readTextFile(path);
+}
+
+std::optional<std::string> extractObjectField(const std::string& text,
+                                              const std::string& key)
+{
+    return ::extractObjectField(text, key);
+}
+
+std::optional<std::string> extractStringField(const std::string& text,
+                                              const std::string& key)
+{
+    return ::extractStringField(text, key);
+}
+
+std::optional<double> extractNumberField(const std::string& text,
+                                         const std::string& key)
+{
+    return ::extractNumberField(text, key);
+}
+
+std::optional<bool> extractBoolField(const std::string& text,
+                                     const std::string& key)
+{
+    return ::extractBoolField(text, key);
+}
+
+void applyUnifiedSolverConfigFromJsonObject(
+    const std::string& text,
+    SCDAT::Coupling::Contracts::SolverConfig& solver_config)
+{
+    ::applyUnifiedSolverConfigFromJsonObject(text, solver_config);
+}
+
+void applyReproducibilityConfigFromJsonObject(const std::string& text,
+                                              unsigned int& seed,
+                                              std::string& sampling_policy)
+{
+    ::applyReproducibilityConfigFromJsonObject(text, seed, sampling_policy);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute>
+parseSurfaceRuntimeRoute(const std::string& text)
+{
+    return ::parseSurfaceRuntimeRoute(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfacePicStrategy>
+parseSurfacePicStrategy(const std::string& text)
+{
+    return ::parseSurfacePicStrategy(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfaceLegacyInputAdapterKind>
+parseSurfaceLegacyInputAdapterKind(const std::string& text)
+{
+    return ::parseSurfaceLegacyInputAdapterKind(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfacePicRuntimeKind>
+parseSurfacePicRuntimeKind(const std::string& text)
+{
+    return ::parseSurfacePicRuntimeKind(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfaceInstrumentSetKind>
+parseSurfaceInstrumentSetKind(const std::string& text)
+{
+    return ::parseSurfaceInstrumentSetKind(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfaceCurrentAlgorithmMode>
+parseSurfaceCurrentAlgorithmMode(const std::string& text)
+{
+    return ::parseSurfaceCurrentAlgorithmMode(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SurfaceBenchmarkMode>
+parseSurfaceBenchmarkMode(const std::string& text)
+{
+    return ::parseSurfaceBenchmarkMode(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::VolumeLinearSolverPolicy>
+parseVolumeLinearSolverPolicy(const std::string& text)
+{
+    return ::parseVolumeLinearSolverPolicy(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::SecondaryElectronEmissionModel>
+parseSecondaryElectronEmissionModel(const std::string& text)
+{
+    return ::parseSecondaryElectronEmissionModel(text);
+}
+
+std::optional<SCDAT::Toolkit::SurfaceCharging::ElectronCollectionModelKind>
+parseElectronCollectionModelKind(const std::string& text)
+{
+    return ::parseElectronCollectionModelKind(text);
+}
+
+void applyPlasmaParametersFromJsonObject(
+    const std::string& object_text,
+    SCDAT::Toolkit::PlasmaAnalysis::PlasmaParameters& target)
+{
+    ::applyPlasmaParametersFromJsonObject(object_text, target);
+}
+
+void applyEmissionParametersFromJsonObject(
+    const std::string& object_text,
+    SCDAT::Toolkit::SurfaceCharging::EmissionModelParameters& target)
+{
+    ::applyEmissionParametersFromJsonObject(object_text, target);
+}
+
+const SCDAT::Material::MaterialProperty*
+resolveMaterialAliasOrName(const std::string& text)
+{
+    return ::resolveMaterialAliasOrName(text);
+}
+
+void applyMaterialFromJsonObject(const std::string& object_text,
+                                 SCDAT::Material::MaterialProperty& material)
+{
+    ::applyMaterialFromJsonObject(object_text, material);
+}
+
+void applyStructuredTopologyFromJson(
+    const std::string& config_scope,
+    SCDAT::Toolkit::SurfaceCharging::SurfaceChargingConfig& config)
+{
+    ::applyStructuredTopologyFromJson(config_scope, config);
+}
+
+bool applySpectrumFromJsonObject(const std::string& spectrum_text,
+                                 SCDAT::Particle::ParticleType particle_type,
+                                 SCDAT::Particle::ResolvedSpectrum& target)
+{
+    return ::applySpectrumFromJsonObject(spectrum_text, particle_type, target);
+}
+
+} // namespace detail
+
+} // namespace MainEntry
+} // namespace SCDAT
+
 int main(int argc, char* argv[])
 {
     try
@@ -2730,6 +3171,7 @@ int main(int argc, char* argv[])
         const std::string exe_name = (argc > 0) ? fs::path(argv[0]).filename().string() : "SCDAT";
         const std::string command = (argc > 1) ? argv[1] : "help";
         DataAnalyzer analyzer;
+        const SurfaceScenarioCatalog surface_scenario_catalog;
 
         if (command == "help" || command == "--help" || command == "-h")
         {
@@ -2752,8 +3194,12 @@ int main(int argc, char* argv[])
             }
             if (module == "all" || module == "surface")
             {
-                printPresetNames("surface",
-                                 SCDAT::Toolkit::SurfaceCharging::listSurfaceChargingScenarioPresetNames());
+                printPresetNames("surface", surface_scenario_catalog.listMainlinePresetNames());
+            }
+            if (module == "surface-replay")
+            {
+                printPresetNames("surface-replay",
+                                 surface_scenario_catalog.listReplayPresetNames());
             }
             if (module == "all" || module == "internal")
             {
@@ -2770,6 +3216,7 @@ int main(int argc, char* argv[])
             }
 
             if (module != "all" && module != "plasma" && module != "surface" &&
+                module != "surface-replay" &&
                 module != "internal" && module != "radiation" && module != "arc")
             {
                 throw std::runtime_error("Unknown module for presets command: " + module);
@@ -2829,11 +3276,10 @@ int main(int argc, char* argv[])
         }
         if (command == "surface")
         {
-            auto preset = SCDAT::Toolkit::SurfaceCharging::makeDefaultSurfaceChargingScenarioPreset();
+            auto preset = surface_scenario_catalog.makeDefaultPreset();
             const auto selection =
                 resolveRunSelection(argc, argv, 2, preset.name, preset.default_output_csv, "surface");
-            if (!SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
-                    selection.preset_name, preset))
+            if (!surface_scenario_catalog.tryGetMainlinePreset(selection.preset_name, preset))
             {
                 throw std::runtime_error("Unknown surface preset: " + selection.preset_name);
             }
@@ -2848,7 +3294,8 @@ int main(int argc, char* argv[])
             }
 
             fs::path output_path;
-            auto preset = loadSurfaceScenarioPresetFromJson(argv[2], output_path);
+            const SurfaceScenarioLoader surface_scenario_loader;
+            auto preset = surface_scenario_loader.loadFromJson(argv[2], output_path);
             if (argc > 3)
             {
                 output_path = argv[3];
@@ -2866,6 +3313,22 @@ int main(int argc, char* argv[])
                 throw std::runtime_error("Unknown internal preset: " + selection.preset_name);
             }
             return runInternal(preset, selection.output_path);
+        }
+        if (command == "internal-config")
+        {
+            if (argc < 3)
+            {
+                throw std::runtime_error(
+                    "internal-config command requires a JSON file path: internal-config <config_json> [output_csv]");
+            }
+
+            fs::path output_path;
+            auto preset = loadInternalScenarioPresetFromJson(argv[2], output_path);
+            if (argc > 3)
+            {
+                output_path = argv[3];
+            }
+            return runInternal(preset, output_path);
         }
         if (command == "internal-radiation")
         {
@@ -2953,3 +3416,5 @@ int main(int argc, char* argv[])
         return 1;
     }
 }
+
+

@@ -18,6 +18,8 @@ set(FIELDSOLVER_TEST_TARGETS
     ExtendedFieldSolver_test
     PoissonSolver_test
     MultiBoundaryElectricFieldSolver_test
+    SurfaceBarrierModels_test
+    SurfaceFieldVolumeBridge_test
 )
 
 foreach(test_target IN LISTS FIELDSOLVER_TEST_TARGETS)

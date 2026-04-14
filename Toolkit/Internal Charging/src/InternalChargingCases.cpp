@@ -14,6 +14,13 @@ namespace
 InternalChargingConfiguration makeGeoElectronBeltConfig()
 {
     InternalChargingConfiguration config;
+    config.material_stack_model = InternalMaterialStackModelKind::SpisLayeredStack;
+    config.geometry_model = InternalGeometryModelKind::ShieldedLayerStack1D;
+    config.primary_source_model = InternalPrimarySourceModelKind::PresetMonoEnergeticFlux;
+    config.physics_process_list = InternalPhysicsProcessListKind::Geant4ShieldingLike;
+    config.energy_deposition_model = InternalEnergyDepositionModelKind::Geant4StepRecorderLike;
+    config.charge_response_model =
+        InternalChargeResponseModelKind::RadiationInducedConductivityRelaxation;
     config.layers = 24;
     config.thickness_m = 4.0e-3;
     config.area_m2 = 5.0e-2;
@@ -26,6 +33,12 @@ InternalChargingConfiguration makeGeoElectronBeltConfig()
 InternalChargingConfiguration makeMeoHarnessConfig()
 {
     InternalChargingConfiguration config;
+    config.material_stack_model = InternalMaterialStackModelKind::SpisHarnessBundle;
+    config.geometry_model = InternalGeometryModelKind::LayerStack1D;
+    config.primary_source_model = InternalPrimarySourceModelKind::PresetMonoEnergeticFlux;
+    config.physics_process_list = InternalPhysicsProcessListKind::Geant4EmStandardLike;
+    config.energy_deposition_model = InternalEnergyDepositionModelKind::ContinuousSlabDeposition;
+    config.charge_response_model = InternalChargeResponseModelKind::SpisLayeredDielectric;
     config.layers = 20;
     config.thickness_m = 1.5e-3;
     config.area_m2 = 7.0e-3;
@@ -38,6 +51,13 @@ InternalChargingConfiguration makeMeoHarnessConfig()
 InternalChargingConfiguration makeBacksheetConfig()
 {
     InternalChargingConfiguration config;
+    config.material_stack_model = InternalMaterialStackModelKind::SpisBacksheetStack;
+    config.geometry_model = InternalGeometryModelKind::LayerStack1D;
+    config.primary_source_model = InternalPrimarySourceModelKind::PresetMonoEnergeticFlux;
+    config.physics_process_list = InternalPhysicsProcessListKind::Geant4ShieldingLike;
+    config.energy_deposition_model = InternalEnergyDepositionModelKind::Geant4StepRecorderLike;
+    config.charge_response_model =
+        InternalChargeResponseModelKind::RadiationInducedConductivityRelaxation;
     config.layers = 18;
     config.thickness_m = 1.0e-3;
     config.area_m2 = 2.0e-2;

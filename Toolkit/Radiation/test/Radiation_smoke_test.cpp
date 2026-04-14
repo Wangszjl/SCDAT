@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <vector>
 
 using SCDAT::Toolkit::Radiation::RadiationDoseAlgorithm;
@@ -17,6 +18,14 @@ using SCDAT::Toolkit::Radiation::RadiationStatus;
 
 namespace
 {
+std::string readTextFile(const std::filesystem::path& path)
+{
+    std::ifstream input(path);
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
 std::vector<double> normalizedDepthDoseProfile(const RadiationStatus& status,
                                                double layer_thickness_m)
 {
@@ -124,6 +133,22 @@ TEST(RadiationSmokeTest, MonteCarloTransportExportsTrackCsv)
     track_path.replace_extension();
     track_path += ".tracks.csv";
     EXPECT_TRUE(std::filesystem::exists(track_path));
+    auto deposition_history_path = csv_path;
+    deposition_history_path.replace_extension();
+    deposition_history_path += ".deposition_history.json";
+    auto process_history_path = csv_path;
+    process_history_path.replace_extension();
+    process_history_path += ".process_history.json";
+    auto transport_benchmark_path = csv_path;
+    transport_benchmark_path.replace_extension();
+    transport_benchmark_path += ".radiation_transport_benchmark.json";
+    auto simulation_artifact_path = csv_path;
+    simulation_artifact_path.replace_extension();
+    simulation_artifact_path += ".simulation_artifact.json";
+    EXPECT_TRUE(std::filesystem::exists(deposition_history_path));
+    EXPECT_TRUE(std::filesystem::exists(process_history_path));
+    EXPECT_TRUE(std::filesystem::exists(transport_benchmark_path));
+    EXPECT_TRUE(std::filesystem::exists(simulation_artifact_path));
 
     std::ifstream input(track_path);
     ASSERT_TRUE(input.is_open());
@@ -134,6 +159,44 @@ TEST(RadiationSmokeTest, MonteCarloTransportExportsTrackCsv)
         ++line_count;
     }
     EXPECT_GT(line_count, 1u);
+
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(
+        sidecar.find("\"deposition_record_contract_id\": \"geant4-aligned-deposition-record-v1\""),
+        std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"process_history_contract_id\": \"geant4-aligned-process-history-v1\""),
+        std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"deposition_history_artifact_path\":"),
+        std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"radiation_transport_benchmark_contract_id\": \"radiation-transport-benchmark-v1\""),
+        std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"radiation_transport_benchmark_artifact_path\":"),
+        std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"simulation_artifact_contract_id\": \"simulation-artifact-v1\""),
+        std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"simulation_artifact_path\":"),
+        std::string::npos);
+
+    const auto transport_benchmark = readTextFile(transport_benchmark_path);
+    EXPECT_NE(
+        transport_benchmark.find("\"schema_version\": \"scdat.radiation_transport_benchmark.v1\""),
+        std::string::npos);
+    EXPECT_NE(
+        transport_benchmark.find("\"contract_id\": \"radiation-transport-benchmark-v1\""),
+        std::string::npos);
+    const auto simulation_artifact = readTextFile(simulation_artifact_path);
+    EXPECT_NE(
+        simulation_artifact.find("\"schema_version\": \"scdat.simulation_artifact.v1\""),
+        std::string::npos);
+    EXPECT_NE(
+        simulation_artifact.find("\"contract_id\": \"simulation-artifact-v1\""),
+        std::string::npos);
 }
 
 TEST(RadiationSmokeTest, TrackSchemaV2StatisticsAreReproducible)

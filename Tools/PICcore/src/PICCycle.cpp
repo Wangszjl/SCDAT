@@ -279,6 +279,9 @@ bool PICCycle::initialize()
 
     field_interpolator_->setMesh(nodes_, elements_);
     charge_depositor_->setMesh(nodes_, elements_);
+    charge_depositor_->setTrajectoryDepositionScheme(
+        params_.trajectory_charge_deposition_kernel,
+        params_.trajectory_charge_deposition_segments);
 
     // Reset runtime statistics.
     cycle_stats_ = CycleStatistics();

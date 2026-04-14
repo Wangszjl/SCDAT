@@ -1,0 +1,370 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scdat.local/contracts/config_schema_v1.json",
+  "title": "SCDAT Unified Config Schema v1",
+  "description": "Unified configuration schema for Plasma/Surface/Internal/Radiation/VacuumArc JSON entrypoints.",
+  "type": "object",
+  "additionalProperties": true,
+  "$defs": {
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0
+    },
+    "vector3": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        {
+          "type": "object",
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "z": { "type": "number" }
+          },
+          "required": ["x", "y", "z"],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "runBlock": {
+      "type": "object",
+      "properties": {
+        "time_step_s": { "$ref": "#/$defs/positiveNumber" },
+        "steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "output_csv": { "type": "string" },
+        "adaptive_time_stepping": { "type": "boolean" },
+        "total_duration_s": { "$ref": "#/$defs/nonNegativeNumber" },
+        "minimum_time_step_s": { "$ref": "#/$defs/positiveNumber" },
+        "maximum_time_step_s": { "$ref": "#/$defs/positiveNumber" }
+      },
+      "additionalProperties": true
+    },
+    "plasmaDocument": {
+      "type": "object",
+      "properties": {
+        "schema_version": { "type": "string" },
+        "module": { "const": "plasma" },
+        "base_preset": { "type": "string" },
+        "preset": { "type": "string" },
+        "name": { "type": "string" },
+        "run": { "$ref": "#/$defs/runBlock" },
+        "config": {
+          "type": "object",
+          "properties": {
+            "domain_size": { "$ref": "#/$defs/vector3" },
+            "domain_size_m": { "$ref": "#/$defs/vector3" },
+            "resolution": { "$ref": "#/$defs/vector3" },
+            "time_step_s": { "$ref": "#/$defs/positiveNumber" },
+            "dense_plasma_threshold_m3": { "$ref": "#/$defs/nonNegativeNumber" },
+            "initial_potential_v": { "type": "number" },
+            "enable_spis_style_organization": { "type": "boolean" },
+            "environment_model": { "type": "string" },
+            "distribution_model": { "type": "string" },
+            "reaction_registry": { "type": "string" },
+            "diagnostic_set": { "type": "string" },
+            "initial_plasma": {
+              "type": "object",
+              "properties": {
+                "electron_density_m3": { "$ref": "#/$defs/nonNegativeNumber" },
+                "ion_density_m3": { "$ref": "#/$defs/nonNegativeNumber" },
+                "electron_temperature_ev": { "$ref": "#/$defs/nonNegativeNumber" },
+                "ion_temperature_ev": { "$ref": "#/$defs/nonNegativeNumber" },
+                "ion_mass_amu": { "$ref": "#/$defs/nonNegativeNumber" },
+                "neutral_density_m3": { "$ref": "#/$defs/nonNegativeNumber" },
+                "electric_field_v_per_m": { "type": "number" },
+                "pressure_pa": { "$ref": "#/$defs/nonNegativeNumber" }
+              },
+              "additionalProperties": true
+            },
+            "reaction_collision": {
+              "type": "object",
+              "properties": {
+                "enable_electron_impact_ionization": { "type": "boolean" },
+                "enable_radiative_recombination": { "type": "boolean" },
+                "enable_charge_exchange": { "type": "boolean" },
+                "enable_elastic_momentum_transfer": { "type": "boolean" },
+                "ionization_threshold_ev": { "$ref": "#/$defs/nonNegativeNumber" },
+                "ionization_cross_section_m2": { "$ref": "#/$defs/nonNegativeNumber" },
+                "charge_exchange_cross_section_m2": { "$ref": "#/$defs/nonNegativeNumber" },
+                "elastic_momentum_cross_section_m2": { "$ref": "#/$defs/nonNegativeNumber" },
+                "max_relative_density_change_per_step": { "$ref": "#/$defs/nonNegativeNumber" }
+              },
+              "additionalProperties": true
+            },
+            "advanced_closure": {
+              "type": "object",
+              "properties": {
+                "enable_non_equilibrium_closure": { "type": "boolean" },
+                "enable_turbulence_closure": { "type": "boolean" },
+                "non_equilibrium_model": { "type": "string" },
+                "turbulence_model": { "type": "string" },
+                "non_equilibrium_relaxation_gain": { "$ref": "#/$defs/nonNegativeNumber" },
+                "non_equilibrium_ratio_cap": { "$ref": "#/$defs/nonNegativeNumber" },
+                "turbulence_mixing_length_m": { "$ref": "#/$defs/nonNegativeNumber" },
+                "turbulence_gain": { "$ref": "#/$defs/nonNegativeNumber" },
+                "max_temperature_correction_ev_per_step": { "$ref": "#/$defs/nonNegativeNumber" },
+                "max_relative_density_correction_per_step": { "$ref": "#/$defs/nonNegativeNumber" }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "required": ["run", "config"],
+      "additionalProperties": true
+    },
+    "surfaceDocument": {
+      "type": "object",
+      "properties": {
+        "schema_version": { "type": "string" },
+        "module": { "const": "surface" },
+        "base_preset": { "type": "string" },
+        "preset": { "type": "string" },
+        "name": { "type": "string" },
+        "output_csv": { "type": "string" },
+        "run": { "$ref": "#/$defs/runBlock" },
+        "config": {
+          "type": "object",
+          "properties": {
+            "surface_runtime_route": { "type": "string" },
+            "runtime_route": { "type": "string" },
+            "surface_pic_strategy": { "type": "string" },
+            "legacy_input_adapter": { "type": "string" },
+            "surface_pic_runtime": { "type": "string" },
+            "surface_instrument_set": { "type": "string" },
+            "reference_family": { "type": "string" },
+            "reference_case_id": { "type": "string" },
+            "reference_matrix_case_id": { "type": "string" },
+            "coupling_mode": { "type": "string" },
+            "deposition_scheme": { "type": "string" },
+            "collision_set": { "type": "string" },
+            "physics_process_set": { "type": "string" },
+            "convergence_policy": { "type": "string" },
+            "solver_max_iterations": { "type": "integer", "minimum": 1 },
+            "solver_residual_tolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "solver_relaxation": { "$ref": "#/$defs/positiveNumber" },
+            "seed": { "type": "integer", "minimum": 0 },
+            "sampling_policy": { "type": "string" },
+            "current_algorithm_mode": { "type": "string" },
+            "benchmark_mode": { "type": "string" },
+            "volume_linear_solver_policy": { "type": "string" },
+            "reference_see_model": { "type": "string" },
+            "surface_area_m2": { "$ref": "#/$defs/positiveNumber" },
+            "dielectric_thickness_m": { "$ref": "#/$defs/positiveNumber" },
+            "bulk_flow_velocity_m_per_s": { "$ref": "#/$defs/nonNegativeNumber" },
+            "flow_alignment_cosine": { "type": "number", "minimum": -1, "maximum": 1 },
+            "enable_pic_calibration": { "type": "boolean" },
+            "enable_live_pic_window": { "type": "boolean" },
+            "enable_live_pic_mcc": { "type": "boolean" },
+            "enable_body_patch_circuit": { "type": "boolean" },
+            "live_pic_collision_cross_section_set_id": { "type": "string" },
+            "plasma_model": { "type": "object", "additionalProperties": true },
+            "surface_emission": { "type": "object", "additionalProperties": true },
+            "surface_material": { "type": "object", "additionalProperties": true },
+            "electron_spectrum": { "type": "object", "additionalProperties": true },
+            "ion_spectrum": { "type": "object", "additionalProperties": true },
+            "bodies": {
+              "type": "array",
+              "items": { "type": "object", "additionalProperties": true }
+            },
+            "patches": {
+              "type": "array",
+              "items": { "type": "object", "additionalProperties": true }
+            },
+            "interfaces": {
+              "type": "array",
+              "items": { "type": "object", "additionalProperties": true }
+            },
+            "body_boundary_groups": {
+              "type": "array",
+              "items": { "type": "object", "additionalProperties": true }
+            },
+            "patch_boundary_groups": {
+              "type": "array",
+              "items": { "type": "object", "additionalProperties": true }
+            },
+            "boundary_mappings": {
+              "type": "array",
+              "items": { "type": "object", "additionalProperties": true }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "required": ["run", "config"],
+      "additionalProperties": true
+    },
+    "internalDocument": {
+      "type": "object",
+      "properties": {
+        "schema_version": { "type": "string" },
+        "module": { "const": "internal" },
+        "base_preset": { "type": "string" },
+        "preset": { "type": "string" },
+        "name": { "type": "string" },
+        "output_csv": { "type": "string" },
+        "run": { "$ref": "#/$defs/runBlock" },
+        "config": {
+          "type": "object",
+          "properties": {
+            "layers": { "type": "integer", "minimum": 1 },
+            "thickness_m": { "$ref": "#/$defs/positiveNumber" },
+            "area_m2": { "$ref": "#/$defs/positiveNumber" },
+            "incident_current_density_a_per_m2": { "$ref": "#/$defs/nonNegativeNumber" },
+            "incident_energy_ev": { "$ref": "#/$defs/nonNegativeNumber" },
+            "incident_charge_state_abs": { "$ref": "#/$defs/positiveNumber" },
+            "source_mode": { "type": "string" },
+            "enable_spis_style_organization": { "type": "boolean" },
+            "material_name": { "type": "string" },
+            "material_stack_model": { "type": "string" },
+            "geometry_model": { "type": "string" },
+            "primary_source_model": { "type": "string" },
+            "physics_process_list": { "type": "string" },
+            "energy_deposition_model": { "type": "string" },
+            "charge_response_model": { "type": "string" },
+            "coupling_mode": { "type": "string" },
+            "deposition_scheme": { "type": "string" },
+            "collision_set": { "type": "string" },
+            "physics_process_set": { "type": "string" },
+            "convergence_policy": { "type": "string" },
+            "solver_max_iterations": { "type": "integer", "minimum": 1 },
+            "solver_residual_tolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "solver_relaxation": { "$ref": "#/$defs/positiveNumber" },
+            "seed": { "type": "integer", "minimum": 0 },
+            "sampling_policy": { "type": "string" },
+            "radiation_conductivity_charge_gain_s_per_m_per_c_per_m3": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "radiation_conductivity_dose_gain_s_per_m_per_gy": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "radiation_conductivity_dose_rate_gain_s2_per_m_per_gy": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "min_effective_conductivity_s_per_m": { "$ref": "#/$defs/nonNegativeNumber" },
+            "max_effective_conductivity_s_per_m": { "$ref": "#/$defs/nonNegativeNumber" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "required": ["run", "config"],
+      "additionalProperties": true
+    },
+    "radiationDocument": {
+      "type": "object",
+      "properties": {
+        "schema_version": { "type": "string" },
+        "module": { "const": "radiation" },
+        "base_preset": { "type": "string" },
+        "preset": { "type": "string" },
+        "name": { "type": "string" },
+        "output_csv": { "type": "string" },
+        "run": { "$ref": "#/$defs/runBlock" },
+        "config": {
+          "type": "object",
+          "properties": {
+            "layers": { "type": "integer", "minimum": 1 },
+            "thickness_m": { "$ref": "#/$defs/positiveNumber" },
+            "area_m2": { "$ref": "#/$defs/positiveNumber" },
+            "particle_flux_m2_s": { "$ref": "#/$defs/nonNegativeNumber" },
+            "mean_energy_ev": { "$ref": "#/$defs/nonNegativeNumber" },
+            "particle_species": { "type": "string" },
+            "physics_list": { "type": "string" },
+            "material_name": { "type": "string" },
+            "material": { "type": "string" },
+            "coupling_mode": { "type": "string" },
+            "deposition_scheme": { "type": "string" },
+            "collision_set": { "type": "string" },
+            "physics_process_set": { "type": "string" },
+            "convergence_policy": { "type": "string" },
+            "solver_max_iterations": { "type": "integer", "minimum": 1 },
+            "solver_residual_tolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "solver_relaxation": { "$ref": "#/$defs/positiveNumber" },
+            "seed": { "type": "integer", "minimum": 0 },
+            "sampling_policy": { "type": "string" },
+            "attenuation_length_fraction": { "$ref": "#/$defs/positiveNumber" },
+            "stopping_data_version": { "type": "string" },
+            "stopping_data_allow_rollback": { "type": "boolean" },
+            "enable_monte_carlo_transport": { "type": "boolean" },
+            "monte_carlo_histories_per_step": { "type": "integer", "minimum": 1 },
+            "monte_carlo_max_steps_per_track": { "type": "integer", "minimum": 1 },
+            "monte_carlo_max_recorded_points": { "type": "integer", "minimum": 1 },
+            "monte_carlo_lateral_span_m": { "$ref": "#/$defs/positiveNumber" },
+            "monte_carlo_angular_sigma_deg": { "$ref": "#/$defs/nonNegativeNumber" },
+            "monte_carlo_seed": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
+        }
+      },
+      "required": ["run", "config"],
+      "additionalProperties": true
+    },
+    "arcDocument": {
+      "type": "object",
+      "properties": {
+        "schema_version": { "type": "string" },
+        "module": { "const": "arc" },
+        "base_preset": { "type": "string" },
+        "preset": { "type": "string" },
+        "name": { "type": "string" },
+        "output_csv": { "type": "string" },
+        "run": { "$ref": "#/$defs/runBlock" },
+        "config": {
+          "type": "object",
+          "properties": {
+            "alignment_mode": { "type": "string" },
+            "emission_strategy": { "type": "string" },
+            "gap_distance_m": { "$ref": "#/$defs/positiveNumber" },
+            "applied_field_v_per_m": { "$ref": "#/$defs/nonNegativeNumber" },
+            "surface_potential_v": { "type": "number" },
+            "surface_charge_density_c_per_m2": { "type": "number" },
+            "cathode_temperature_k": { "$ref": "#/$defs/nonNegativeNumber" },
+            "anode_temperature_k": { "$ref": "#/$defs/nonNegativeNumber" },
+            "channel_radius_m": { "$ref": "#/$defs/positiveNumber" },
+            "surface_capacitance_f": { "$ref": "#/$defs/positiveNumber" },
+            "surface_leakage_conductance_s": { "$ref": "#/$defs/nonNegativeNumber" },
+            "surface_load_model": { "type": "string" },
+            "coupling_mode": { "type": "string" },
+            "deposition_scheme": { "type": "string" },
+            "collision_set": { "type": "string" },
+            "physics_process_set": { "type": "string" },
+            "convergence_policy": { "type": "string" },
+            "solver_max_iterations": { "type": "integer", "minimum": 1 },
+            "solver_residual_tolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "solver_relaxation": { "$ref": "#/$defs/positiveNumber" },
+            "seed": { "type": "integer", "minimum": 0 },
+            "sampling_policy": { "type": "string" },
+            "enable_pic_mcc_collisions": { "type": "boolean" },
+            "enable_neutral_outgassing_feedback": { "type": "boolean" },
+            "enable_secondary_electron_emission": { "type": "boolean" },
+            "channel_parameters": { "type": "object", "additionalProperties": true },
+            "integrator_parameters": { "type": "object", "additionalProperties": true },
+            "emission_parameters": { "type": "object", "additionalProperties": true }
+          },
+          "additionalProperties": true
+        }
+      },
+      "required": ["run", "config"],
+      "additionalProperties": true
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/plasmaDocument" },
+    { "$ref": "#/$defs/surfaceDocument" },
+    { "$ref": "#/$defs/internalDocument" },
+    { "$ref": "#/$defs/radiationDocument" },
+    { "$ref": "#/$defs/arcDocument" }
+  ]
+}

@@ -16,6 +16,16 @@
     "mean_energy_ev": 8.5e4,
     "particle_species": "electron",
     "physics_list": "geant4_em_livermore",
+    "coupling_mode": "transport_deposition_coupled",
+    "deposition_scheme": "geant4_step",
+    "collision_set": "none",
+    "physics_process_set": "geant4_em_livermore",
+    "convergence_policy": "fixed_iteration",
+    "solver_max_iterations": 32,
+    "solver_residual_tolerance": 1.0e-6,
+    "solver_relaxation": 1.0,
+    "seed": 20260408,
+    "sampling_policy": "deterministic",
     "material_name": "kapton",
     "attenuation_length_fraction": 0.20
   }

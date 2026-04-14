@@ -1,0 +1,55 @@
+{
+  "schema_version": "v1",
+  "module": "vacuum_arc_benchmark_matrix",
+  "description": "ArcPIC-aligned benchmark matrix covering aligned and legacy modes for the core benchmark family.",
+  "cases": [
+    {
+      "preset": "microgap_flashover",
+      "alignment_mode": "aligned",
+      "min_peak_current_a": 1.0e-12,
+      "min_channel_conductivity_s_per_m": 100.0,
+      "max_charge_conservation_error_c": 1.0e-12,
+      "require_collision_fallback_clear": true
+    },
+    {
+      "preset": "microgap_flashover",
+      "alignment_mode": "legacy",
+      "min_peak_current_a": 1.0e-12,
+      "min_channel_conductivity_s_per_m": 100.0,
+      "max_charge_conservation_error_c": 1.0e-12,
+      "require_collision_fallback_clear": true
+    },
+    {
+      "preset": "triple_junction_flashover",
+      "alignment_mode": "aligned",
+      "min_peak_current_a": 1.0e-12,
+      "min_channel_conductivity_s_per_m": 100.0,
+      "max_charge_conservation_error_c": 1.0e-12,
+      "require_collision_fallback_clear": true
+    },
+    {
+      "preset": "triple_junction_flashover",
+      "alignment_mode": "legacy",
+      "min_peak_current_a": 1.0e-12,
+      "min_channel_conductivity_s_per_m": 100.0,
+      "max_charge_conservation_error_c": 1.0e-12,
+      "require_collision_fallback_clear": true
+    },
+    {
+      "preset": "restrike_recovery",
+      "alignment_mode": "aligned",
+      "min_peak_current_a": 1.0e-12,
+      "min_channel_conductivity_s_per_m": 100.0,
+      "max_charge_conservation_error_c": 1.0e-12,
+      "require_collision_fallback_clear": true
+    },
+    {
+      "preset": "restrike_recovery",
+      "alignment_mode": "legacy",
+      "min_peak_current_a": 1.0e-12,
+      "min_channel_conductivity_s_per_m": 100.0,
+      "max_charge_conservation_error_c": 1.0e-12,
+      "require_collision_fallback_clear": true
+    }
+  ]
+}

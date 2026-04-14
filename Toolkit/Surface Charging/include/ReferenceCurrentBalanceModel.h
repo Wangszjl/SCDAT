@@ -103,17 +103,12 @@ class ReferenceCurrentBalanceModel
     }
 
   private:
-    static double whippleYield(double peak_energy_ev, double peak_yield,
-                               double incident_energy_ev, double surface_potential_v);
-    static double simsYield(double peak_energy_ev, double peak_yield, double exponent_n,
-                            double incident_energy_ev, double surface_potential_v);
-    static double katzYield(const Material::MaterialProperty& material, double incident_energy_ev,
-                            double surface_potential_v);
-    static double ionSecondaryYield(double peak_energy_kev, double peak_yield,
-                                    double incident_energy_ev, double surface_potential_v);
-    static double backscatterYield(double incident_energy_ev, double surface_potential_v,
-                                   double atomic_number);
-    static double bodyPhotoCurrentDensity(double base_photo_current_density_a_per_m2);
+        static double ionSecondaryYield(const Material::MaterialProperty& material,
+                                                                        double incident_energy_ev, double surface_potential_v);
+        static double backscatterYield(const Material::MaterialProperty& material,
+                                                                     double incident_energy_ev, double surface_potential_v);
+    static double bodyPhotoCurrentDensity(double base_photo_current_density_a_per_m2,
+                                          double emission_scale);
     static double patchPhotoCurrentDensity(double base_photo_current_density_a_per_m2,
                                            double incidence_angle_deg);
     static double conductionCurrentDensity(double body_potential_v, double patch_potential_v,
@@ -127,11 +122,18 @@ class ReferenceCurrentBalanceModel
     static double safeExp(double exponent);
     static double erfApprox(double x);
 
-    double computeElectronCollection(double surface_potential_v) const;
-    double computeIonCollection(double surface_potential_v) const;
+    double computeElectronCollection(double surface_potential_v, double collection_scale) const;
+    double computeIonCollection(double surface_potential_v,
+                                const Material::MaterialProperty& material) const;
     double computeSeeYield(const Material::MaterialProperty& material, double incident_energy_ev,
                            double surface_potential_v) const;
     double emissionEscapeProbability(double surface_potential_v, double characteristic_energy_ev) const;
+    double positivePotentialIonBarrierScale(const Material::MaterialProperty& material,
+                                            double surface_potential_v,
+                                            double characteristic_energy_ev) const;
+    double ionSecondaryRecollectionScale(const Material::MaterialProperty& material,
+                                         double surface_potential_v,
+                                         double characteristic_energy_ev) const;
     double rolePotential(ReferenceSurfaceRole role, double body_potential_v,
                          double patch_potential_v) const;
 

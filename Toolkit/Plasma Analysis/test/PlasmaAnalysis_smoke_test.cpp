@@ -13,8 +13,10 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -40,6 +42,14 @@ using SCDAT::Toolkit::PlasmaAnalysis::TurbulenceClosureModel;
 
 namespace
 {
+
+std::string readTextFile(const std::filesystem::path& path)
+{
+    std::ifstream input(path);
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
 
 bool containsRegion(const std::vector<MultiScaleRegionType>& regions,
                     MultiScaleRegionType target)
@@ -210,6 +220,94 @@ TEST(PlasmaAnalysisSmokeTest, ToolkitInitializesAdvancesAndExports)
     ASSERT_TRUE(integration.exportResults(csv_path));
     EXPECT_TRUE(std::filesystem::exists(csv_path));
     EXPECT_GE(integration.getStatus().steps_completed, 5u);
+}
+
+TEST(PlasmaAnalysisSmokeTest, HallThrusterPresetCarriesSpisOrganizationMetadata)
+{
+    PICFluidIntegration integration;
+    PlasmaScenarioPreset preset;
+    ASSERT_TRUE(
+        SCDAT::Toolkit::PlasmaAnalysis::tryGetPlasmaScenarioPreset("hall_thruster_plume", preset));
+
+    EXPECT_TRUE(preset.config.enable_spis_style_organization);
+    EXPECT_EQ(preset.config.environment_model,
+              SCDAT::Toolkit::PlasmaAnalysis::PlasmaEnvironmentModelKind::SpisThrusterPlume);
+    EXPECT_EQ(
+        preset.config.distribution_model,
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::MultiPopulationHybrid);
+    EXPECT_EQ(preset.config.reaction_registry,
+              SCDAT::Toolkit::PlasmaAnalysis::PlasmaReactionRegistryKind::SpisDensePlasma);
+    EXPECT_EQ(preset.config.diagnostic_set,
+              SCDAT::Toolkit::PlasmaAnalysis::PlasmaDiagnosticSetKind::FullPhysicsDiagnostics);
+
+    ASSERT_TRUE(integration.initialize(preset.config));
+    ASSERT_TRUE(integration.advance(preset.config.time_step_s));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "plasma_analysis_spis_metadata.csv";
+    ASSERT_TRUE(integration.exportResults(csv_path));
+
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find("\"organization_family\": \"spis_numeric_v1\""), std::string::npos);
+    EXPECT_NE(sidecar.find("\"environment_model\": \"spis_thruster_plume\""), std::string::npos);
+    EXPECT_NE(sidecar.find("\"distribution_model\": \"multi_population_hybrid\""),
+              std::string::npos);
+      EXPECT_NE(sidecar.find("\"reaction_registry\": \"spis_dense_plasma\""), std::string::npos);
+      EXPECT_NE(sidecar.find("\"diagnostic_set\": \"full_physics_diagnostics\""),
+                std::string::npos);
+      EXPECT_NE(sidecar.find("\"diagnostic_contract_id\": \"plasma-physics-diagnostics-v1\""),
+                std::string::npos);
+  }
+
+TEST(PlasmaAnalysisSmokeTest, ExportResultsWritesPhysicsDiagnosticsArtifact)
+{
+    PICFluidIntegration integration;
+    PlasmaScenarioPreset preset;
+    ASSERT_TRUE(
+        SCDAT::Toolkit::PlasmaAnalysis::tryGetPlasmaScenarioPreset("hall_thruster_plume", preset));
+
+    preset.config.advanced_closure.enable_non_equilibrium_closure = true;
+    preset.config.advanced_closure.enable_turbulence_closure = true;
+    preset.config.advanced_closure.non_equilibrium_model =
+        NonEquilibriumClosureModel::CollisionalThermalization;
+    preset.config.advanced_closure.turbulence_model =
+        TurbulenceClosureModel::MixingLengthEddyDiffusivity;
+
+    ASSERT_TRUE(integration.initialize(preset.config));
+    ASSERT_TRUE(integration.advance(preset.config.time_step_s));
+
+    auto csv_path = std::filesystem::temp_directory_path() / "plasma_analysis_diagnostics.csv";
+    ASSERT_TRUE(integration.exportResults(csv_path));
+
+    const auto metadata_sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata_sidecar.find("\"plasma_physics_diagnostics_artifact_path\": "
+                                    "\"plasma_analysis_diagnostics.physics_diagnostics.json\""),
+              std::string::npos);
+    EXPECT_NE(metadata_sidecar.find("\"diagnostic_contract_id\": "
+                                    "\"plasma-physics-diagnostics-v1\""),
+              std::string::npos);
+
+    csv_path.replace_extension(".physics_diagnostics.json");
+    ASSERT_TRUE(std::filesystem::exists(csv_path));
+
+    const auto diagnostics_artifact = readTextFile(csv_path);
+    EXPECT_NE(diagnostics_artifact.find("\"schema_version\": "
+                                        "\"scdat.plasma.physics_diagnostics.v1\""),
+              std::string::npos);
+    EXPECT_NE(diagnostics_artifact.find("\"contract_id\": "
+                                        "\"plasma-physics-diagnostics-v1\""),
+              std::string::npos);
+    EXPECT_NE(diagnostics_artifact.find("\"reaction_contract_id\": "
+                                        "\"plasma-reaction-balance-v1\""),
+              std::string::npos);
+    EXPECT_NE(diagnostics_artifact.find("\"diagnostic_set\": \"full_physics_diagnostics\""),
+              std::string::npos);
+    EXPECT_NE(diagnostics_artifact.find("\"advanced_closure_enabled\": true"),
+              std::string::npos);
+    EXPECT_NE(diagnostics_artifact.find("\"reaction_active_processes\": "),
+              std::string::npos);
+    EXPECT_NE(diagnostics_artifact.find("\"boundary_layer_resolved\": true"),
+              std::string::npos);
 }
 
 TEST(PlasmaAnalysisSmokeTest, MultiScaleSpatialDecomposerProducesDeterministicSignature)
@@ -611,11 +709,12 @@ TEST(PlasmaAnalysisSmokeTest, FluidAlgorithmAdapterExposesReactionCollisionDiagn
     EXPECT_TRUE(data_set.metadata.find("recombination_sink_m3_per_s") != data_set.metadata.end());
     EXPECT_TRUE(data_set.metadata.find("effective_collision_frequency_hz") != data_set.metadata.end());
     EXPECT_TRUE(data_set.metadata.find("charge_exchange_frequency_hz") != data_set.metadata.end());
-    EXPECT_TRUE(data_set.metadata.find("reaction_energy_loss_ev_per_s") != data_set.metadata.end());
-    EXPECT_TRUE(data_set.metadata.find("reaction_momentum_transfer_ratio") != data_set.metadata.end());
+      EXPECT_TRUE(data_set.metadata.find("reaction_energy_loss_ev_per_s") != data_set.metadata.end());
+      EXPECT_TRUE(data_set.metadata.find("reaction_momentum_transfer_ratio") != data_set.metadata.end());
+      EXPECT_TRUE(data_set.metadata.find("reaction_contract_id") != data_set.metadata.end());
 
-    EXPECT_TRUE(std::isfinite(std::stod(data_set.metadata.at("effective_collision_frequency_hz"))));
-}
+      EXPECT_TRUE(std::isfinite(std::stod(data_set.metadata.at("effective_collision_frequency_hz"))));
+  }
 
 TEST(PlasmaAnalysisSmokeTest, PlasmaAdvancedClosureModelRelaxesNonEquilibriumTemperature)
 {
@@ -711,12 +810,13 @@ TEST(PlasmaAnalysisSmokeTest, FluidAlgorithmAdapterExposesAdvancedClosureDiagnos
     EXPECT_TRUE(data_set.metadata.find("advanced_closure_enabled") != data_set.metadata.end());
     EXPECT_TRUE(data_set.metadata.find("non_equilibrium_ratio") != data_set.metadata.end());
     EXPECT_TRUE(data_set.metadata.find("non_equilibrium_relaxation_rate_hz") != data_set.metadata.end());
-    EXPECT_TRUE(data_set.metadata.find("turbulence_eddy_diffusivity_m2_per_s") != data_set.metadata.end());
-    EXPECT_TRUE(data_set.metadata.find("turbulence_dissipation_rate_w_per_m3") != data_set.metadata.end());
-    EXPECT_TRUE(data_set.metadata.find("closure_active_terms") != data_set.metadata.end());
+      EXPECT_TRUE(data_set.metadata.find("turbulence_eddy_diffusivity_m2_per_s") != data_set.metadata.end());
+      EXPECT_TRUE(data_set.metadata.find("turbulence_dissipation_rate_w_per_m3") != data_set.metadata.end());
+      EXPECT_TRUE(data_set.metadata.find("closure_active_terms") != data_set.metadata.end());
+      EXPECT_TRUE(data_set.metadata.find("diagnostic_contract_id") != data_set.metadata.end());
 
-    EXPECT_TRUE(std::isfinite(std::stod(data_set.metadata.at("non_equilibrium_ratio"))));
-    EXPECT_TRUE(
+      EXPECT_TRUE(std::isfinite(std::stod(data_set.metadata.at("non_equilibrium_ratio"))));
+      EXPECT_TRUE(
         std::isfinite(std::stod(data_set.metadata.at("turbulence_eddy_diffusivity_m2_per_s"))));
 }
 

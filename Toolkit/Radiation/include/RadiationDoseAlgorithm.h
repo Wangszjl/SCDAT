@@ -2,6 +2,7 @@
 
 #include "RadiationStoppingDataGovernance.h"
 
+#include "../../Tools/Coupling/include/BenchmarkContracts.h"
 #include "../../Tools/Material/include/MaterialDatabase.h"
 #include "../../Tools/Output/include/ResultExporter.h"
 
@@ -63,6 +64,9 @@ struct HeavyIonProcessEnhancementConfig
 
 struct RadiationConfiguration
 {
+    Coupling::Contracts::SolverConfig solver_config{};
+    unsigned int seed = 20260408u;
+    std::string sampling_policy = "deterministic";
     std::size_t layers = 16;
     double thickness_m = 2.0e-3;
     double area_m2 = 1.0e-2;
@@ -201,6 +205,8 @@ class RadiationDoseAlgorithm
         std::size_t layerIndexForDepth(double depth_m) const;
         void appendTrackPoint(const RadiationStatus::TrackPoint& point);
         bool exportTrackCsv(const std::filesystem::path& csv_path) const;
+        bool exportDepositionHistoryJson(const std::filesystem::path& csv_path) const;
+        bool exportProcessHistoryJson(const std::filesystem::path& csv_path) const;
         double geant4AlignedMassStoppingPowerMeVcm2PerG(double mean_energy_ev) const;
         double geant4AlignedElectronMassStoppingPowerMeVcm2PerG(double mean_energy_ev,
                                                                                                                         double z_over_a,

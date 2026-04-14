@@ -8,6 +8,13 @@ It now supports two long-lived routes:
 - `SCDATUnified`
   - default high-level runtime path
   - used for multi-body, multi-patch, multi-material surface charging studies
+- `SurfacePic`
+  - unified surface-kernel route with live PIC / MCC current sampling as the primary source
+  - keeps benchmark exports, node-level diagnostics, and shared-surface runtime contracts active
+- `SurfacePicHybrid`
+  - unified surface-kernel route that uses PIC as the primary source and reference physics as a
+    physical completion term
+  - no longer uses the old fixed `0.5` empirical blend
 - `LegacyBenchmark`
   - benchmark path used to compare against the legacy C and MATLAB references in `ref/`
 
@@ -99,7 +106,20 @@ Sidecar reports are now written alongside the main CSV when applicable:
 ## Benchmark Philosophy
 - `LegacyBenchmark` is for reference reproduction and regression.
 - `SCDATUnified` is for the advanced predictive framework.
+- `SurfacePic` and `SurfacePicHybrid` now also terminate in the same neutral-named surface kernel
+  used by `SCDATUnified`; route choice changes the source/completion inputs, not the downstream
+  kernel contracts.
 - The two routes intentionally coexist and should not be confused.
+
+## Regression Status
+The kernel-alignment refactor now has the following regression boundary in place:
+
+- GEO / LEO / MATLAB reference routes export benchmark-case and simulation-artifact contracts
+- benchmark artifacts now include current-component RMSE families and
+  `final_current_derivative_a_per_m2_per_v`
+- `scripts/run/surface_reference_matrix.json` plus
+  `scripts/python/check_surface_reference_matrix_gate.py` form the formal reference-family gate
+- the reference matrix gate currently passes for the aligned GEO / LEO / MATLAB benchmark set
 
 ## Scripts
 Helpful local tools live in [`scripts`](e:\3-Code\1-Cplusplus\PIC-Surface-Charging-master\Toolkit\Surface Charging\scripts):

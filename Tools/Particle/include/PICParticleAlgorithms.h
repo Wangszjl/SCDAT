@@ -29,6 +29,13 @@ using ChargeDepositorPtr = std::shared_ptr<ChargeDepositor>;
 using NodeId = Mesh::NodeId;
 using ElementId = Mesh::ElementId;
 
+enum class TrajectoryChargeDepositionKernel
+{
+    NearestPoint,
+    LinearSegmentCloud,
+    QuadratureGauss3
+};
+
 /**
  * @brief 绮掑瓙浣嶇疆璺熻釜缁撴瀯 / Particle Location Tracking Structure
  * @details 鐢ㄤ簬璺熻釜绮掑瓙鍦ㄩ潪缁撴瀯鍖栫綉鏍间腑鐨勭簿纭綅缃俊鎭紝
@@ -154,6 +161,9 @@ public:
                                      ElementId element_id, double charge, double weight, double dt,
                                      std::vector<double>& charge_density);
 
+    void setTrajectoryDepositionScheme(TrajectoryChargeDepositionKernel kernel,
+                                       std::size_t segment_count);
+
     // 娓呴浂鐢佃嵎瀵嗗害
     void clearChargeDensity(std::vector<double>& charge_density);
 
@@ -168,6 +178,10 @@ private:
     // 杈呭姪鏂规硶
     void performDeposit(const std::vector<double>& barycentric, const std::vector<NodeId>& nodes,
                        double charge_contribution, std::vector<double>& charge_density);
+
+    TrajectoryChargeDepositionKernel trajectory_kernel_ =
+        TrajectoryChargeDepositionKernel::LinearSegmentCloud;
+    std::size_t trajectory_segment_count_ = 10;
 };
 
 /**

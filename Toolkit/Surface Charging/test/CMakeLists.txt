@@ -22,3 +22,11 @@ target_link_libraries(SurfaceCharging_smoke_test
         GTest::gtest_main
 )
 gtest_discover_tests(SurfaceCharging_smoke_test)
+
+add_executable(SurfaceCharging_object_layer_test SurfaceCharging_object_layer_test.cpp)
+target_link_libraries(SurfaceCharging_object_layer_test
+    PRIVATE
+        SCDAT::Toolkit::Surface_Charging
+        GTest::gtest_main
+)
+gtest_discover_tests(SurfaceCharging_object_layer_test)

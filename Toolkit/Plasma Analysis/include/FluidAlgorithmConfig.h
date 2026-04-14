@@ -36,6 +36,33 @@ struct ReactionCollisionConfig
     double max_relative_density_change_per_step = 0.08;
 };
 
+enum class PlasmaEnvironmentModelKind
+{
+    SpisCcpReference = 0,
+    SpisOrbitalWake = 1,
+    SpisThrusterPlume = 2,
+};
+
+enum class PlasmaDistributionModelKind
+{
+    MaxwellianProjected = 0,
+    WakeAnisotropic = 1,
+    MultiPopulationHybrid = 2,
+};
+
+enum class PlasmaReactionRegistryKind
+{
+    SpisCore = 0,
+    SpisDensePlasma = 1,
+};
+
+enum class PlasmaDiagnosticSetKind
+{
+    SpisCoreDiagnostics = 0,
+    SheathMultiscaleDiagnostics = 1,
+    FullPhysicsDiagnostics = 2,
+};
+
 enum class NonEquilibriumClosureModel
 {
     Disabled = 0,
@@ -73,6 +100,12 @@ struct FluidAlgorithmConfig
     double time_step_s = 1.0e-9;
     double dense_plasma_threshold_m3 = 1.0e18;
     double initial_potential_v = 25.0;
+    bool enable_spis_style_organization = true;
+    PlasmaEnvironmentModelKind environment_model = PlasmaEnvironmentModelKind::SpisThrusterPlume;
+    PlasmaDistributionModelKind distribution_model =
+        PlasmaDistributionModelKind::MultiPopulationHybrid;
+    PlasmaReactionRegistryKind reaction_registry = PlasmaReactionRegistryKind::SpisCore;
+    PlasmaDiagnosticSetKind diagnostic_set = PlasmaDiagnosticSetKind::FullPhysicsDiagnostics;
     PlasmaParameters initial_plasma;
     ReactionCollisionConfig reaction_collision;
     AdvancedClosureConfig advanced_closure;

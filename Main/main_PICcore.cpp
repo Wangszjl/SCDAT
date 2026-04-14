@@ -1,6 +1,6 @@
 #include "Basic/include/Constants.h"
 #include "FieldSolver/include/PoissonSolver.h"
-#include "Interactions/Collisions/include/CollisionAlgorithm.h"
+#include "Interactions/Collisions/include/CollisionPicAdapter.h"
 #include "Mesh/include/MeshParsing.h"
 #include "Output/include/ResultExporter.h"
 #include "PICcore/include/PICCycle.h"
@@ -26,10 +26,9 @@ namespace
 
 using SCDAT::Basic::Constants::MathConstants;
 using SCDAT::Basic::Constants::PhysicsConstants;
-using SCDAT::Collision::CollisionParameters;
-using SCDAT::Collision::CollisionProcessFactory;
+using SCDAT::Collision::BackgroundMccRuntimeConfig;
+using SCDAT::Collision::CollisionCrossSectionSetId;
 using SCDAT::Collision::MonteCarloCollisionHandler;
-using SCDAT::Collision::ParticleSpecies;
 using SCDAT::Geometry::Point3D;
 using SCDAT::Geometry::Vector3D;
 using SCDAT::Particle::AbsorbingBoundaryCondition;
@@ -66,6 +65,8 @@ struct BenchmarkConfig
     double ion_temperature_ev = 0.026;
     double initial_plasma_density = 1.4e14;
     std::string output_csv = "results/pic_mcc_turner_minimal.csv";
+    std::string collision_cross_section_set_id = "background_mcc_v1";
+    bool collision_reinitialize_each_step = false;
 
     [[nodiscard]] double electrodeSideLength() const
     {
@@ -81,13 +82,6 @@ struct BenchmarkConfig
     {
         return rf_cycles * steps_per_cycle;
     }
-};
-
-struct CollisionStepResult
-{
-    int collisions = 0;
-    int created_particles = 0;
-    std::size_t removed_particles = 0;
 };
 
 struct LayerProfile
@@ -234,47 +228,6 @@ void initializeBenchmarkParticles(ParticleManager& particle_manager, const VolMe
     }
 }
 
-CollisionStepResult applyCollisionStep(ParticleManager& particle_manager,
-                                       MonteCarloCollisionHandler& collision_handler, double dt)
-{
-    const auto before = collision_handler.getStatistics();
-
-    std::vector<SCDAT::Collision::ParticleObject> working_particles;
-    const auto live_particles = particle_manager.getAllParticles();
-    working_particles.reserve(live_particles.size());
-    for (const auto* particle : live_particles)
-    {
-        if (particle)
-        {
-            working_particles.push_back(*particle);
-        }
-    }
-
-    auto created_particles = collision_handler.processCollisions(working_particles, dt);
-
-    for (const auto& updated_particle : working_particles)
-    {
-        if (auto* particle = particle_manager.getParticle(updated_particle.getId()))
-        {
-            *particle = updated_particle;
-        }
-    }
-
-    if (!created_particles.empty())
-    {
-        particle_manager.getContainer().addParticles(created_particles);
-    }
-
-    const std::size_t removed_particles = particle_manager.removeInactiveParticles();
-    const auto after = collision_handler.getStatistics();
-
-    return {
-        after.total_collisions - before.total_collisions,
-        after.particles_created - before.particles_created,
-        removed_particles,
-    };
-}
-
 LayerProfile collectLayerProfile(const BenchmarkConfig& config, const LayerMap& layers,
                                  const PICCycle& cycle, const ParticleManager& particle_manager)
 {
@@ -356,7 +309,8 @@ LayerProfile collectLayerProfile(const BenchmarkConfig& config, const LayerMap& 
     return profile;
 }
 
-void writeLayerProfileResults(const std::string& filename, const LayerProfile& profile)
+void writeLayerProfileResults(const std::string& filename, const LayerProfile& profile,
+                              const BenchmarkConfig& config)
 {
     ColumnarDataSet data_set;
     data_set.axis_name = "z_m";
@@ -367,6 +321,10 @@ void writeLayerProfileResults(const std::string& filename, const LayerProfile& p
     data_set.scalar_series["ion_density_m3"] = profile.ion_density;
     data_set.scalar_series["electron_temperature_ev"] = profile.electron_temperature_ev;
     data_set.metadata["module"] = "PIC-MCC";
+    data_set.metadata["collision_cross_section_set_id"] = config.collision_cross_section_set_id;
+    data_set.metadata["collision_runtime_source"] = "tools.interactions.collisions";
+    data_set.metadata["collision_reinitialize_each_step"] =
+        config.collision_reinitialize_each_step ? "true" : "false";
 
     ResultExporter exporter;
     if (auto result = exporter.exportDataSet(filename, data_set); !result)
@@ -385,6 +343,8 @@ void printRuntimeSummary(const BenchmarkConfig& config, const VolMesh& mesh,
     std::cout << "Pressure: " << config.pressure << " Pa\n";
     std::cout << "RF frequency: " << config.rf_frequency / 1.0e6 << " MHz\n";
     std::cout << "RF voltage amplitude: " << config.rf_voltage << " V\n";
+    std::cout << "Collision cross-section set: " << config.collision_cross_section_set_id << '\n';
+    std::cout << "Collision runtime source: tools.interactions.collisions\n";
     std::cout << "Mesh nodes/elements: " << mesh.getNodeCount() << " / " << mesh.getElementCount()
               << '\n';
     std::cout << "Time step: " << std::scientific << config.timeStep() << " s\n";
@@ -423,6 +383,22 @@ int main(int argc, char* argv[])
         if (argc > 4)
         {
             config.output_csv = argv[4];
+        }
+        if (argc > 5)
+        {
+            config.collision_cross_section_set_id = argv[5];
+        }
+        if (argc > 6)
+        {
+            config.collision_reinitialize_each_step = std::stoi(argv[6]) != 0;
+        }
+
+        const auto cross_section_set_id =
+            SCDAT::Collision::parseCollisionCrossSectionSetId(config.collision_cross_section_set_id);
+        if (!cross_section_set_id)
+        {
+            throw std::runtime_error("Unsupported collision cross-section set id: " +
+                                     config.collision_cross_section_set_id);
         }
 
         std::filesystem::create_directories(
@@ -484,47 +460,28 @@ int main(int argc, char* argv[])
             makeLinearPotentialProfile(mesh->getNodes(), 0.0, 0.0, config.gap_distance));
 
         MonteCarloCollisionHandler collision_handler(12345);
-        collision_handler.clearCollisionProcesses();
+        SCDAT::Collision::initializeConfiguredCollisionHandler(
+            collision_handler, *cross_section_set_id, config.neutral_density,
+            config.initial_plasma_density, config.initial_plasma_density);
 
-        CollisionParameters elastic_params;
-        elastic_params.cross_section_max = 2.0e-19;
+        BackgroundMccRuntimeConfig collision_runtime_config;
+        collision_runtime_config.floor_densities.neutral_density_m3 = config.neutral_density;
+        collision_runtime_config.floor_densities.ion_density_m3 = config.initial_plasma_density;
+        collision_runtime_config.floor_densities.electron_density_m3 = config.initial_plasma_density;
+        collision_runtime_config.cross_section_set_id = *cross_section_set_id;
+        collision_runtime_config.reinitialize_configuration =
+            config.collision_reinitialize_each_step;
 
-        CollisionParameters excitation_params;
-        excitation_params.energy_threshold = 11.5;
-        excitation_params.cross_section_max = 2.5e-20;
-        excitation_params.energy_loss = 11.5;
-
-        CollisionParameters ionization_params;
-        ionization_params.energy_threshold = 15.76;
-        ionization_params.cross_section_max = 3.0e-20;
-        ionization_params.energy_loss = 15.76;
-        ionization_params.additional_params["ion_mass_number"] = 40.0;
-        ionization_params.additional_params["ion_charge_number"] = 1.0;
-
-        collision_handler.addCollisionProcess(
-            "elastic_e_n",
-            CollisionProcessFactory::createElasticProcess(
-                ParticleSpecies::ELECTRON, ParticleSpecies::NEUTRAL, config.neutral_density,
-                elastic_params));
-        collision_handler.addCollisionProcess(
-            "excitation_e_n",
-            CollisionProcessFactory::createExcitationProcess(
-                ParticleSpecies::ELECTRON, ParticleSpecies::NEUTRAL, config.neutral_density,
-                excitation_params));
-        collision_handler.addCollisionProcess(
-            "ionization_e_n",
-            CollisionProcessFactory::createIonizationProcess(
-                ParticleSpecies::ELECTRON, ParticleSpecies::NEUTRAL, config.neutral_density,
-                ionization_params));
+        const double discharge_volume_m3 = config.electrode_area * config.gap_distance;
 
         std::cout << "Running minimal PIC-MCC benchmark\n";
         std::cout << "  cycles           : " << config.rf_cycles << '\n';
         std::cout << "  z layers         : " << config.nz << '\n';
         std::cout << "  particles/element: " << config.particles_per_element << '\n';
         std::cout << "  dt               : " << std::scientific << config.timeStep() << " s\n";
+        std::cout << "  cross sections   : " << config.collision_cross_section_set_id << '\n';
         std::cout << "  total steps      : " << config.totalSteps() << "\n\n";
 
-        std::size_t total_removed_particles = 0;
         auto wall_start = std::chrono::steady_clock::now();
 
         for (int step = 0; step < config.totalSteps(); ++step)
@@ -541,9 +498,9 @@ int main(int argc, char* argv[])
                 break;
             }
 
-            const auto collision_result =
-                applyCollisionStep(*particle_manager, collision_handler, config.timeStep());
-            total_removed_particles += collision_result.removed_particles;
+            const auto collision_result = SCDAT::Collision::executeBackgroundMccStep(
+                particle_manager->getContainer(), collision_handler, config.timeStep(),
+                discharge_volume_m3, collision_runtime_config);
             particle_manager->updateParticleAges(config.timeStep());
 
             if ((step + 1) % std::max(1, config.steps_per_cycle / 2) == 0 ||
@@ -553,7 +510,7 @@ int main(int argc, char* argv[])
                 std::cout << "Step " << std::setw(4) << (step + 1) << '/' << config.totalSteps()
                           << "  active=" << particle_stats.active_particles
                           << "  total_collisions=" << collision_handler.getStatistics().total_collisions
-                          << "  removed=" << total_removed_particles << '\n';
+                          << "  generated=" << collision_result.generated_particles << '\n';
             }
         }
 
@@ -563,7 +520,7 @@ int main(int argc, char* argv[])
 
         const LayerProfile profile =
             collectLayerProfile(config, layers, cycle, *particle_manager);
-        writeLayerProfileResults(config.output_csv, profile);
+        writeLayerProfileResults(config.output_csv, profile, config);
 
         const auto particle_stats = particle_manager->getStatistics();
         const auto collision_stats = collision_handler.getStatistics();

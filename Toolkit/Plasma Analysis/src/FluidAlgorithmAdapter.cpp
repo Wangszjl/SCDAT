@@ -10,6 +10,64 @@ namespace Toolkit
 {
 namespace PlasmaAnalysis
 {
+namespace
+{
+
+const char* environmentModelName(PlasmaEnvironmentModelKind model)
+{
+    switch (model)
+    {
+    case PlasmaEnvironmentModelKind::SpisCcpReference:
+        return "spis_ccp_reference";
+    case PlasmaEnvironmentModelKind::SpisOrbitalWake:
+        return "spis_orbital_wake";
+    case PlasmaEnvironmentModelKind::SpisThrusterPlume:
+    default:
+        return "spis_thruster_plume";
+    }
+}
+
+const char* distributionModelName(PlasmaDistributionModelKind model)
+{
+    switch (model)
+    {
+    case PlasmaDistributionModelKind::MaxwellianProjected:
+        return "maxwellian_projected";
+    case PlasmaDistributionModelKind::WakeAnisotropic:
+        return "wake_anisotropic";
+    case PlasmaDistributionModelKind::MultiPopulationHybrid:
+    default:
+        return "multi_population_hybrid";
+    }
+}
+
+const char* reactionRegistryName(PlasmaReactionRegistryKind registry)
+{
+    switch (registry)
+    {
+    case PlasmaReactionRegistryKind::SpisDensePlasma:
+        return "spis_dense_plasma";
+    case PlasmaReactionRegistryKind::SpisCore:
+    default:
+        return "spis_core";
+    }
+}
+
+const char* diagnosticSetName(PlasmaDiagnosticSetKind diagnostic_set)
+{
+    switch (diagnostic_set)
+    {
+    case PlasmaDiagnosticSetKind::SpisCoreDiagnostics:
+        return "spis_core_diagnostics";
+    case PlasmaDiagnosticSetKind::SheathMultiscaleDiagnostics:
+        return "sheath_multiscale_diagnostics";
+    case PlasmaDiagnosticSetKind::FullPhysicsDiagnostics:
+    default:
+        return "full_physics_diagnostics";
+    }
+}
+
+} // namespace
 
 bool FluidAlgorithmAdapter::initialize(const FluidAlgorithmConfig& config)
 {
@@ -265,6 +323,24 @@ Output::ColumnarDataSet FluidAlgorithmAdapter::buildProfileDataSet() const
     }
 
     data_set.metadata["module"] = "Plasma Analysis";
+    data_set.metadata["organization_family"] =
+        config_.enable_spis_style_organization ? "spis_numeric_v1" : "native";
+    data_set.metadata["environment_model"] = environmentModelName(config_.environment_model);
+    data_set.metadata["distribution_model"] = distributionModelName(config_.distribution_model);
+    data_set.metadata["reaction_registry"] = reactionRegistryName(config_.reaction_registry);
+    data_set.metadata["diagnostic_set"] = diagnosticSetName(config_.diagnostic_set);
+    data_set.metadata["reaction_contract_id"] = "plasma-reaction-balance-v1";
+    data_set.metadata["diagnostic_contract_id"] = "plasma-physics-diagnostics-v1";
+    data_set.metadata["diagnostic_contract_family"] = "spis_physics_diagnostics";
+    data_set.metadata["diagnostic_contract_supports_boundary_layer"] = "true";
+    data_set.metadata["diagnostic_contract_supports_non_equilibrium"] = "true";
+    data_set.metadata["domain_size_xyz_m"] =
+        std::to_string(config_.domain_size.x()) + "," + std::to_string(config_.domain_size.y()) +
+        "," + std::to_string(config_.domain_size.z());
+    data_set.metadata["resolution_xyz"] =
+        std::to_string(static_cast<long long>(config_.resolution.x())) + "," +
+        std::to_string(static_cast<long long>(config_.resolution.y())) + "," +
+        std::to_string(static_cast<long long>(config_.resolution.z()));
     data_set.metadata["sheath_thickness_m"] = std::to_string(status_.sheath_thickness_m);
     data_set.metadata["presheath_thickness_m"] = std::to_string(status_.presheath_thickness_m);
     data_set.metadata["sheath_potential_drop_v"] = std::to_string(status_.sheath_potential_drop_v);

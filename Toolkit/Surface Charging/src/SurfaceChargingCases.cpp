@@ -136,27 +136,35 @@ SurfaceChargingConfig makeLeoBaseConfig()
     config.electron_flow_coupling = 0.015;
     config.patch_incidence_angle_deg = 0.0;
     config.patch_flow_angle_deg = 0.0;
-    config.plasma.electron_density_m3 = 8.0e11;
-    config.plasma.ion_density_m3 = 8.5e11;
-    config.plasma.electron_temperature_ev = 0.28;
-    config.plasma.ion_temperature_ev = 0.12;
+    // Align the default ram-facing LEO environment with the cold Maxwellian
+    // reference deck (ref/LEO case 5): 1e4 cm^-3 and 0.1 eV for both species.
+    config.plasma.electron_density_m3 = 1.0e10;
+    config.plasma.ion_density_m3 = 1.0e10;
+    config.plasma.electron_temperature_ev = 0.10;
+    config.plasma.ion_temperature_ev = 0.10;
     config.plasma.ion_mass_amu = 16.0;
     config.plasma.neutral_density_m3 = 1.0e14;
     config.plasma.pressure_pa = 1.0e-5;
     config.material = makeKaptonSurface();
     config.emission.surface_temperature_k = 320.0;
     config.emission.enhancement_factor = 1.05;
-    config.emission.photon_flux_m2_s = 3.0e19;
+    config.emission.photon_flux_m2_s = 0.0;
     config.reference_see_model = SecondaryElectronEmissionModel::Sims;
+    config.body_floating = true;
+    config.body_initial_potential_v = 0.0;
     config.body_capacitance_f = 2.0e-10;
+    config.body_photo_current_density_a_per_m2 = 0.0;
+    config.patch_photo_current_density_a_per_m2 = 0.0;
     config.max_delta_potential_v_per_step = 10.0;
     config.has_electron_spectrum = true;
     config.has_ion_spectrum = true;
-    config.electron_spectrum = makeDoubleMaxwellSpectrum(
-        Particle::ParticleType::ELECTRON, 8.0e11, 0.18, 1.1, 0.06, 0.0, PhysicsConstants::ElectronMass /
-                                                                      PhysicsConstants::AtomicMassUnit);
-    config.ion_spectrum = makeDoubleMaxwellSpectrum(Particle::ParticleType::ION, 8.5e11, 0.12, 0.45,
-                                                    0.10, 0.0, 16.0);
+    config.electron_spectrum = makeSingleMaxwellSpectrum(
+        Particle::ParticleType::ELECTRON, config.plasma.electron_density_m3,
+        config.plasma.electron_temperature_ev, 0.0,
+        PhysicsConstants::ElectronMass / PhysicsConstants::AtomicMassUnit);
+    config.ion_spectrum =
+        makeSingleMaxwellSpectrum(Particle::ParticleType::ION, config.plasma.ion_density_m3,
+                                  config.plasma.ion_temperature_ev, 0.0, 16.0);
     return config;
 }
 
@@ -273,7 +281,9 @@ SurfaceChargingConfig makeGeoEcssKaptonPicCircuitConfig()
     config.enable_live_pic_window = true;
     config.enable_live_pic_mcc = true;
     config.enable_body_patch_circuit = true;
-    config.body_capacitance_f = 4.0e-10;
+    config.body_floating = true;
+    config.body_capacitance_f = 3.0e-10;
+    config.capacitance_per_area_f_per_m2 = 5.0e-9;
     config.surface_area_m2 = 4.0e-2;
     config.pic_calibration_samples = 6144;
     config.pic_recalibration_interval_steps = 8;
@@ -282,6 +292,20 @@ SurfaceChargingConfig makeGeoEcssKaptonPicCircuitConfig()
     config.live_pic_window_layers = 6;
     config.live_pic_particles_per_element = 3;
     config.live_pic_probe_delta_v = 5.0;
+    config.material.setScalarProperty("body_atomic_number", 13.0);
+    config.material.setScalarProperty("body_ion_secondary_yield", 0.244);
+    config.material.setScalarProperty("body_ion_secondary_peak_energy_kev", 230.0);
+    config.material.setScalarProperty("body_secondary_electron_yield", 0.97);
+    config.material.setScalarProperty("body_secondary_yield_peak_energy_ev", 300.0);
+    config.material.setScalarProperty("body_sims_exponent_n", 1.621);
+    config.material.setScalarProperty("body_katz_r1", 154.0);
+    config.material.setScalarProperty("body_katz_n1", 0.80);
+    config.material.setScalarProperty("body_katz_r2", 220.0);
+    config.material.setScalarProperty("body_katz_n2", 1.76);
+    config.material.setScalarProperty("body_electron_collection_coefficient", 2.0 / 3.0);
+    config.body_photo_current_density_a_per_m2 = 1.0e-4;
+    config.patch_photo_current_density_a_per_m2 = 6.0e-5;
+    config.photoelectron_temperature_ev = 3.75;
     return config;
 }
 
@@ -318,7 +342,116 @@ SurfaceChargingConfig makeThrusterPlumeConfig()
     return config;
 }
 
-std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
+void applyReferenceFamilyContract(SurfaceChargingConfig& config,
+                                  const std::string& family,
+                                  const std::string& case_id,
+                                  const std::string& matrix_case_id)
+{
+    config.reference_family = family;
+    config.reference_case_id = case_id;
+    config.reference_matrix_case_id = matrix_case_id;
+}
+
+void assignPublicBenchmarkSourceForMatrixCase(SurfaceChargingConfig& config,
+                                              const std::string& matrix_case_id)
+{
+    if (config.benchmark_source != SurfaceBenchmarkSource::None)
+    {
+        return;
+    }
+
+    if (matrix_case_id == "geo_ecss_kapton_2000s")
+    {
+        config.benchmark_source = SurfaceBenchmarkSource::CGeo;
+        return;
+    }
+    if (matrix_case_id == "leo_ram_facing_2000s")
+    {
+        config.benchmark_source = SurfaceBenchmarkSource::CLeoRam;
+        return;
+    }
+    if (matrix_case_id == "leo_wake_facing_negative_tail_2000s")
+    {
+        config.benchmark_source = SurfaceBenchmarkSource::CLeoWake;
+    }
+}
+
+void applySurfacePicContract(SurfaceChargingConfig& config,
+                                 const std::string& case_id,
+                                 const std::string& matrix_case_id)
+{
+    const bool enforce_geo_solver_blueprint = matrix_case_id == "geo_ecss_kapton_2000s";
+
+    if (enforce_geo_solver_blueprint && config.solver_config.coupling_mode.empty())
+    {
+        config.solver_config.coupling_mode = "field_particle_implicit";
+    }
+    if (enforce_geo_solver_blueprint && config.solver_config.convergence_policy.empty())
+    {
+        config.solver_config.convergence_policy = "residual_norm_guarded";
+    }
+    if (config.solver_config.deposition_scheme.empty())
+    {
+        // Keep the current CIC kernel as the baseline, but pin it explicitly so
+        // surface-route presets always resolve through the same deposition path.
+        config.solver_config.deposition_scheme = "pic_window_cic";
+    }
+    if (config.solver_config.collision_set.empty())
+    {
+        config.solver_config.collision_set = "surface_pic_v1";
+    }
+    if (config.solver_config.physics_process_set.empty())
+    {
+        config.solver_config.physics_process_set = "surface_process_core_v1";
+    }
+    if (enforce_geo_solver_blueprint)
+    {
+        config.solver_config.max_iterations =
+            std::max<std::size_t>(config.solver_config.max_iterations, 64);
+        config.solver_config.residual_tolerance =
+            std::max(1.0e-9, config.solver_config.residual_tolerance);
+        if (!std::isfinite(config.solver_config.relaxation_factor) ||
+            config.solver_config.relaxation_factor <= 0.0)
+        {
+            config.solver_config.relaxation_factor = 0.65;
+        }
+        config.solver_config.relaxation_factor =
+            std::clamp(config.solver_config.relaxation_factor, 0.05, 0.65);
+    }
+
+    config.legacy_input_adapter_kind = SurfaceLegacyInputAdapterKind::None;
+    config.surface_pic_runtime_kind = SurfacePicRuntimeKind::GraphCoupledSharedSurface;
+    config.surface_instrument_set_kind = SurfaceInstrumentSetKind::SurfacePicObserverSet;
+    assignPublicBenchmarkSourceForMatrixCase(config, matrix_case_id);
+    applyReferenceFamilyContract(config, "surface_pic_reference_family", case_id,
+                                 matrix_case_id);
+}
+
+void applyUnifiedReferenceContract(SurfaceChargingConfig& config,
+                                   const std::string& case_id,
+                                   const std::string& matrix_case_id)
+{
+    config.legacy_input_adapter_kind = SurfaceLegacyInputAdapterKind::None;
+    config.surface_pic_runtime_kind = SurfacePicRuntimeKind::LocalWindowSampler;
+    config.surface_instrument_set_kind = SurfaceInstrumentSetKind::MetadataOnly;
+    assignPublicBenchmarkSourceForMatrixCase(config, matrix_case_id);
+    applyReferenceFamilyContract(config, "geo_leo_mat_reference_family", case_id,
+                                 matrix_case_id);
+}
+
+void applyLegacyDeckContract(SurfaceChargingConfig& config,
+                             SurfaceLegacyInputAdapterKind adapter_kind,
+                             const std::string& case_id,
+                             const std::string& matrix_case_id)
+{
+    config.legacy_input_adapter_kind = adapter_kind;
+    config.surface_pic_runtime_kind = SurfacePicRuntimeKind::LocalWindowSampler;
+    config.surface_instrument_set_kind = SurfaceInstrumentSetKind::MetadataOnly;
+    applyReferenceFamilyContract(config, "geo_leo_mat_reference_family", case_id,
+                                 matrix_case_id);
+}
+
+std::array<SurfaceChargingScenarioPreset, 15> buildPresets()
 {
     SurfaceChargingScenarioPreset geo_ref;
     geo_ref.name = "geo_ecss_kapton_ref";
@@ -326,8 +459,10 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     geo_ref.config = makeGeoEcssKaptonReferenceConfig();
     geo_ref.config.runtime_route = SurfaceRuntimeRoute::SCDATUnified;
     geo_ref.config.benchmark_source = SurfaceBenchmarkSource::None;
-    geo_ref.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedSpisAligned;
-    geo_ref.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedSpisAligned;
+    geo_ref.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    geo_ref.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+    applyUnifiedReferenceContract(geo_ref.config, "geo_ecss_kapton_ref",
+                                  "geo_ecss_kapton_2000s");
     geo_ref.time_step_s = 1.0 / 3.0;
     geo_ref.steps = 6006;
     geo_ref.default_output_csv = "results/surface_geo_ecss_kapton_ref.csv";
@@ -336,16 +471,20 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     geo_pic.name = "geo_ecss_kapton_pic_circuit";
     geo_pic.description = "GEO ECSS Kapton case with spectrum-driven current balance and PIC-circuit calibration.";
     geo_pic.config = makeGeoEcssKaptonPicCircuitConfig();
-    geo_pic.config.runtime_route = SurfaceRuntimeRoute::SCDATUnified;
+    geo_pic.config.runtime_route = SurfaceRuntimeRoute::SurfacePic;
+    geo_pic.config.surface_pic_strategy = SurfacePicStrategy::SurfacePicCalibrated;
+    geo_pic.config.live_pic_collision_cross_section_set_id = "surface_pic_v1";
     geo_pic.config.benchmark_source = SurfaceBenchmarkSource::None;
-    geo_pic.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedSpisAligned;
-    geo_pic.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedSpisAligned;
-    geo_pic.time_step_s = 2.0e-1;
-    geo_pic.steps = 200;
+    geo_pic.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    geo_pic.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+    applySurfacePicContract(geo_pic.config, "geo_ecss_kapton_pic_circuit",
+                                "geo_ecss_kapton_2000s");
+    geo_pic.time_step_s = 5.0e-5;
+    geo_pic.steps = 512;
     geo_pic.adaptive_time_stepping = true;
-    geo_pic.total_duration_s = 2.0e3;
-    geo_pic.minimum_time_step_s = 2.0e-1;
-    geo_pic.maximum_time_step_s = 2.0e1;
+    geo_pic.total_duration_s = 2.56e-2;
+    geo_pic.minimum_time_step_s = 1.0e-6;
+    geo_pic.maximum_time_step_s = 5.0e-3;
     geo_pic.default_output_csv = "results/surface_geo_ecss_kapton_pic_circuit.csv";
 
     SurfaceChargingScenarioPreset leo_ref_ram;
@@ -354,8 +493,10 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     leo_ref_ram.config = makeLeoRamReferenceConfig();
     leo_ref_ram.config.runtime_route = SurfaceRuntimeRoute::SCDATUnified;
     leo_ref_ram.config.benchmark_source = SurfaceBenchmarkSource::None;
-    leo_ref_ram.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedSpisAligned;
-    leo_ref_ram.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedSpisAligned;
+    leo_ref_ram.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    leo_ref_ram.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+    applyUnifiedReferenceContract(leo_ref_ram.config, "leo_ref_ram_facing",
+                                  "leo_ram_facing_2000s");
     leo_ref_ram.time_step_s = 2.0e-8;
     leo_ref_ram.steps = 600;
     leo_ref_ram.adaptive_time_stepping = true;
@@ -370,8 +511,10 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     leo_ref_wake.config = makeLeoWakeReferenceConfig();
     leo_ref_wake.config.runtime_route = SurfaceRuntimeRoute::SCDATUnified;
     leo_ref_wake.config.benchmark_source = SurfaceBenchmarkSource::None;
-    leo_ref_wake.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedSpisAligned;
-    leo_ref_wake.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedSpisAligned;
+    leo_ref_wake.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    leo_ref_wake.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+    applyUnifiedReferenceContract(leo_ref_wake.config, "leo_ref_wake_facing",
+                                  "leo_wake_facing_negative_tail_2000s");
     leo_ref_wake.time_step_s = 2.0e-8;
     leo_ref_wake.steps = 600;
     leo_ref_wake.adaptive_time_stepping = true;
@@ -384,10 +527,14 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     leo_pic_ram.name = "leo_pic_circuit_ram_facing";
     leo_pic_ram.description = "LEO ram-facing case with spectrum-driven reference current balance and PIC calibration.";
     leo_pic_ram.config = makeLeoRamPicCircuitConfig();
-    leo_pic_ram.config.runtime_route = SurfaceRuntimeRoute::SCDATUnified;
+    leo_pic_ram.config.runtime_route = SurfaceRuntimeRoute::SurfacePic;
+    leo_pic_ram.config.surface_pic_strategy = SurfacePicStrategy::SurfacePicCalibrated;
+    leo_pic_ram.config.live_pic_collision_cross_section_set_id = "surface_pic_v1";
     leo_pic_ram.config.benchmark_source = SurfaceBenchmarkSource::None;
-    leo_pic_ram.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedSpisAligned;
-    leo_pic_ram.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedSpisAligned;
+    leo_pic_ram.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    leo_pic_ram.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+    applySurfacePicContract(leo_pic_ram.config, "leo_pic_circuit_ram_facing",
+                                "leo_ram_facing_2000s");
     leo_pic_ram.time_step_s = 2.0e-8;
     leo_pic_ram.steps = 600;
     leo_pic_ram.adaptive_time_stepping = true;
@@ -400,10 +547,14 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     leo_pic_wake.name = "leo_pic_circuit_wake_facing";
     leo_pic_wake.description = "LEO wake-facing case with spectrum-driven reference current balance and PIC calibration.";
     leo_pic_wake.config = makeLeoWakePicCircuitConfig();
-    leo_pic_wake.config.runtime_route = SurfaceRuntimeRoute::SCDATUnified;
+    leo_pic_wake.config.runtime_route = SurfaceRuntimeRoute::SurfacePic;
+    leo_pic_wake.config.surface_pic_strategy = SurfacePicStrategy::SurfacePicCalibrated;
+    leo_pic_wake.config.live_pic_collision_cross_section_set_id = "surface_pic_v1";
     leo_pic_wake.config.benchmark_source = SurfaceBenchmarkSource::None;
-    leo_pic_wake.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedSpisAligned;
-    leo_pic_wake.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedSpisAligned;
+    leo_pic_wake.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    leo_pic_wake.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+    applySurfacePicContract(leo_pic_wake.config, "leo_pic_circuit_wake_facing",
+                                "leo_wake_facing_negative_tail_2000s");
     leo_pic_wake.time_step_s = 2.0e-8;
     leo_pic_wake.steps = 600;
     leo_pic_wake.adaptive_time_stepping = true;
@@ -412,14 +563,39 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     leo_pic_wake.maximum_time_step_s = 5.0;
     leo_pic_wake.default_output_csv = "results/surface_leo_pic_circuit_wake_facing.csv";
 
+    SurfaceChargingScenarioPreset geo_pic_direct = geo_pic;
+    geo_pic_direct.name = "geo_ecss_kapton_surface_pic_direct";
+    geo_pic_direct.description =
+        "GEO ECSS Kapton case using the formal surface-PIC direct current route.";
+    geo_pic_direct.config.runtime_route = SurfaceRuntimeRoute::SurfacePic;
+    geo_pic_direct.config.surface_pic_strategy = SurfacePicStrategy::SurfacePicDirect;
+    geo_pic_direct.config.enable_pic_calibration = false;
+    applySurfacePicContract(geo_pic_direct.config, "geo_ecss_kapton_surface_pic_direct",
+                                "geo_ecss_kapton_2000s");
+    geo_pic_direct.default_output_csv = "results/surface_geo_ecss_kapton_surface_pic_direct.csv";
+
+    SurfaceChargingScenarioPreset leo_pic_ram_hybrid = leo_pic_ram;
+    leo_pic_ram_hybrid.name = "leo_pic_circuit_ram_facing_hybrid";
+    leo_pic_ram_hybrid.description =
+        "LEO ram-facing case using the formal surface-PIC hybrid reference route.";
+    leo_pic_ram_hybrid.config.runtime_route = SurfaceRuntimeRoute::SurfacePicHybrid;
+    leo_pic_ram_hybrid.config.surface_pic_strategy = SurfacePicStrategy::SurfacePicHybridReference;
+    applySurfacePicContract(leo_pic_ram_hybrid.config,
+                                "leo_pic_circuit_ram_facing_hybrid",
+                                "leo_ram_facing_2000s");
+    leo_pic_ram_hybrid.default_output_csv =
+        "results/surface_leo_pic_circuit_ram_facing_hybrid.csv";
+
     SurfaceChargingScenarioPreset thruster_plume;
     thruster_plume.name = "thruster_plume_dielectric";
     thruster_plume.description = "Near-thruster plume driven surface current balance case.";
     thruster_plume.config = makeThrusterPlumeConfig();
     thruster_plume.config.runtime_route = SurfaceRuntimeRoute::SCDATUnified;
     thruster_plume.config.benchmark_source = SurfaceBenchmarkSource::None;
-    thruster_plume.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedSpisAligned;
-    thruster_plume.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedSpisAligned;
+    thruster_plume.config.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    thruster_plume.config.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+    applyReferenceFamilyContract(thruster_plume.config, "thruster_surface_family",
+                                 "thruster_plume_dielectric", "thruster_plume_reference");
     thruster_plume.time_step_s = 1.0e-9;
     thruster_plume.steps = 80;
     thruster_plume.default_output_csv = "results/surface_thruster_plume_dielectric.csv";
@@ -435,6 +611,10 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     geo_ref_legacy.config.current_algorithm_mode =
         SurfaceCurrentAlgorithmMode::LegacyRefCompatible;
     geo_ref_legacy.config.benchmark_mode = SurfaceBenchmarkMode::LegacyRefCompatible;
+    applyLegacyDeckContract(geo_ref_legacy.config,
+                            SurfaceLegacyInputAdapterKind::CTextReferenceDeck,
+                            "geo_ecss_kapton_ref_legacy_compatible",
+                            "geo_ecss_kapton_2000s");
     geo_ref_legacy.time_step_s = 1.0e-3;
     geo_ref_legacy.steps = 12;
     geo_ref_legacy.default_output_csv =
@@ -451,6 +631,10 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     leo_ref_ram_legacy.config.current_algorithm_mode =
         SurfaceCurrentAlgorithmMode::LegacyRefCompatible;
     leo_ref_ram_legacy.config.benchmark_mode = SurfaceBenchmarkMode::LegacyRefCompatible;
+    applyLegacyDeckContract(leo_ref_ram_legacy.config,
+                            SurfaceLegacyInputAdapterKind::CTextReferenceDeck,
+                            "leo_ref_ram_facing_legacy_compatible",
+                            "leo_ram_facing_2000s");
     leo_ref_ram_legacy.time_step_s = 1.0;
     leo_ref_ram_legacy.steps = 68;
     leo_ref_ram_legacy.default_output_csv =
@@ -467,6 +651,10 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     leo_ref_wake_legacy.config.current_algorithm_mode =
         SurfaceCurrentAlgorithmMode::LegacyRefCompatible;
     leo_ref_wake_legacy.config.benchmark_mode = SurfaceBenchmarkMode::LegacyRefCompatible;
+    applyLegacyDeckContract(leo_ref_wake_legacy.config,
+                            SurfaceLegacyInputAdapterKind::CTextReferenceDeck,
+                            "leo_ref_wake_facing_legacy_compatible",
+                            "leo_wake_facing_negative_tail_2000s");
     leo_ref_wake_legacy.time_step_s = 1.0;
     leo_ref_wake_legacy.steps = 68;
     leo_ref_wake_legacy.default_output_csv =
@@ -483,6 +671,10 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     geo_ref_matlab.config.current_algorithm_mode =
         SurfaceCurrentAlgorithmMode::LegacyRefCompatible;
     geo_ref_matlab.config.benchmark_mode = SurfaceBenchmarkMode::LegacyRefCompatible;
+    applyLegacyDeckContract(geo_ref_matlab.config,
+                            SurfaceLegacyInputAdapterKind::MatlabReferenceDeck,
+                            "geo_ecss_kapton_ref_matlab_compatible",
+                            "geo_ecss_kapton_2000s");
     geo_ref_matlab.time_step_s = 3.285188e-2;
     geo_ref_matlab.steps = 60880;
     geo_ref_matlab.default_output_csv =
@@ -499,6 +691,10 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     leo_ref_ram_matlab.config.current_algorithm_mode =
         SurfaceCurrentAlgorithmMode::LegacyRefCompatible;
     leo_ref_ram_matlab.config.benchmark_mode = SurfaceBenchmarkMode::LegacyRefCompatible;
+    applyLegacyDeckContract(leo_ref_ram_matlab.config,
+                            SurfaceLegacyInputAdapterKind::MatlabReferenceDeck,
+                            "leo_ref_ram_facing_matlab_compatible",
+                            "leo_ram_facing_2000s");
     leo_ref_ram_matlab.time_step_s = 1.0;
     leo_ref_ram_matlab.steps = 68;
     leo_ref_ram_matlab.default_output_csv =
@@ -515,14 +711,29 @@ std::array<SurfaceChargingScenarioPreset, 13> buildPresets()
     leo_ref_wake_matlab.config.current_algorithm_mode =
         SurfaceCurrentAlgorithmMode::LegacyRefCompatible;
     leo_ref_wake_matlab.config.benchmark_mode = SurfaceBenchmarkMode::LegacyRefCompatible;
+    applyLegacyDeckContract(leo_ref_wake_matlab.config,
+                            SurfaceLegacyInputAdapterKind::MatlabReferenceDeck,
+                            "leo_ref_wake_facing_matlab_compatible",
+                            "leo_wake_facing_negative_tail_2000s");
     leo_ref_wake_matlab.time_step_s = 1.0;
     leo_ref_wake_matlab.steps = 68;
     leo_ref_wake_matlab.default_output_csv =
         "results/surface_leo_ref_wake_facing_matlab_compatible.csv";
 
-    return {geo_ref,            geo_pic,            leo_ref_ram,         leo_ref_wake,
-            leo_pic_ram,        leo_pic_wake,       thruster_plume,      geo_ref_legacy,
-            leo_ref_ram_legacy, leo_ref_wake_legacy, geo_ref_matlab,     leo_ref_ram_matlab,
+    return {geo_ref,
+            geo_pic,
+            geo_pic_direct,
+            leo_ref_ram,
+            leo_ref_wake,
+            leo_pic_ram,
+            leo_pic_ram_hybrid,
+            leo_pic_wake,
+            thruster_plume,
+            geo_ref_legacy,
+            leo_ref_ram_legacy,
+            leo_ref_wake_legacy,
+            geo_ref_matlab,
+            leo_ref_ram_matlab,
             leo_ref_wake_matlab};
 }
 
@@ -530,6 +741,70 @@ const auto& presets()
 {
     static const auto kPresets = buildPresets();
     return kPresets;
+}
+
+bool hasPresetNameSuffix(const std::string& value, const std::string& suffix)
+{
+    if (suffix.size() > value.size())
+    {
+        return false;
+    }
+    return value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool isLegacyReplayPresetName(const std::string& name)
+{
+    return hasPresetNameSuffix(name, "_legacy_compatible") ||
+           hasPresetNameSuffix(name, "_matlab_compatible");
+}
+
+const auto& mainlinePresets()
+{
+    static const auto kMainlinePresets = []() {
+        std::vector<SurfaceChargingScenarioPreset> filtered;
+        filtered.reserve(presets().size());
+        for (const auto& preset : presets())
+        {
+            if (!isLegacyReplayPresetName(preset.name))
+            {
+                filtered.push_back(preset);
+            }
+        }
+        return filtered;
+    }();
+    return kMainlinePresets;
+}
+
+const auto& replayPresets()
+{
+    static const auto kReplayPresets = []() {
+        std::vector<SurfaceChargingScenarioPreset> filtered;
+        filtered.reserve(presets().size());
+        for (const auto& preset : presets())
+        {
+            if (isLegacyReplayPresetName(preset.name))
+            {
+                filtered.push_back(preset);
+            }
+        }
+        return filtered;
+    }();
+    return kReplayPresets;
+}
+
+bool tryGetPresetFromCollection(const std::string& canonical_name,
+                                const std::vector<SurfaceChargingScenarioPreset>& candidates,
+                                SurfaceChargingScenarioPreset& preset)
+{
+    for (const auto& candidate : candidates)
+    {
+        if (candidate.name == canonical_name)
+        {
+            preset = candidate;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool tryResolveAlias(const std::string& name, std::string& canonical_name)
@@ -557,8 +832,8 @@ bool tryResolveAlias(const std::string& name, std::string& canonical_name)
 std::vector<std::string> listSurfaceChargingScenarioPresetNames()
 {
     std::vector<std::string> names;
-    names.reserve(presets().size() + 3);
-    for (const auto& preset : presets())
+    names.reserve(mainlinePresets().size() + 3);
+    for (const auto& preset : mainlinePresets())
     {
         names.push_back(preset.name);
     }
@@ -568,29 +843,51 @@ std::vector<std::string> listSurfaceChargingScenarioPresetNames()
     return names;
 }
 
-bool tryGetSurfaceChargingScenarioPreset(const std::string& name,
-                                         SurfaceChargingScenarioPreset& preset)
+std::vector<std::string> listSurfaceChargingReplayScenarioPresetNames()
+{
+    std::vector<std::string> names;
+    names.reserve(replayPresets().size());
+    for (const auto& preset : replayPresets())
+    {
+        names.push_back(preset.name);
+    }
+    return names;
+}
+
+bool tryGetSurfaceChargingMainlineScenarioPreset(const std::string& name,
+                                                 SurfaceChargingScenarioPreset& preset)
 {
     std::string canonical_name = name;
     tryResolveAlias(name, canonical_name);
-    for (const auto& candidate : presets())
+    return tryGetPresetFromCollection(canonical_name, mainlinePresets(), preset);
+}
+
+bool tryGetSurfaceChargingReplayScenarioPreset(const std::string& name,
+                                               SurfaceChargingScenarioPreset& preset)
+{
+    std::string canonical_name = name;
+    return tryGetPresetFromCollection(canonical_name, replayPresets(), preset);
+}
+
+bool tryGetSurfaceChargingScenarioPreset(const std::string& name,
+                                         SurfaceChargingScenarioPreset& preset)
+{
+    if (tryGetSurfaceChargingMainlineScenarioPreset(name, preset))
     {
-        if (candidate.name == canonical_name)
-        {
-            preset = candidate;
-            return true;
-        }
+        return true;
     }
-    return false;
+    return tryGetSurfaceChargingReplayScenarioPreset(name, preset);
 }
 
 SurfaceChargingScenarioPreset makeDefaultSurfaceChargingScenarioPreset()
 {
     SurfaceChargingScenarioPreset preset;
-    tryGetSurfaceChargingScenarioPreset("leo_daylight_kapton", preset);
+    tryGetSurfaceChargingMainlineScenarioPreset("leo_daylight_kapton", preset);
     return preset;
 }
 
 } // namespace SurfaceCharging
 } // namespace Toolkit
 } // namespace SCDAT
+
+

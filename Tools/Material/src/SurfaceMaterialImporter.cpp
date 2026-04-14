@@ -1,11 +1,11 @@
-#include "../include/SPISMaterialImporter.h"
+#include "../include/SurfaceMaterialImporter.h"
 
 namespace SCDAT
 {
 namespace Material
 {
 
-VoidResult SPISMaterialImporter::importPath(const std::filesystem::path& path,
+VoidResult SurfaceMaterialImporter::importPath(const std::filesystem::path& path,
                                             MaterialDatabase& database) const
 {
     if (!std::filesystem::exists(path))
@@ -52,3 +52,4 @@ VoidResult SPISMaterialImporter::importPath(const std::filesystem::path& path,
 
 } // namespace Material
 } // namespace SCDAT
+

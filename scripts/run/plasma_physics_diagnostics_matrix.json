@@ -1,0 +1,67 @@
+{
+  "cases": [
+    {
+      "preset": "ccp_argon_10pa",
+      "steps": 2,
+      "time_step_s": 5.0e-10,
+      "expected_environment_model": "spis_ccp_reference",
+      "expected_reaction_registry": "spis_core",
+      "expected_diagnostic_set": "spis_core_diagnostics",
+      "expected_contract_id": "plasma-physics-diagnostics-v1",
+      "expected_dense_plasma_detected": true,
+      "min_sheath_thickness_m": 1.0e-8,
+      "min_presheath_thickness_m": 1.0e-8,
+      "min_ion_mach_at_sheath_edge": 1.0,
+      "min_reaction_active_processes": 1,
+      "min_effective_collision_frequency_hz": 1.0,
+      "require_boundary_layer_resolved": true,
+      "require_reaction_balance_active": true
+    },
+    {
+      "preset": "leo_wake",
+      "steps": 2,
+      "time_step_s": 2.0e-7,
+      "expected_environment_model": "spis_orbital_wake",
+      "expected_reaction_registry": "spis_core",
+      "expected_diagnostic_set": "sheath_multiscale_diagnostics",
+      "expected_contract_id": "plasma-physics-diagnostics-v1",
+      "expected_dense_plasma_detected": false,
+      "min_sheath_thickness_m": 1.0e-6,
+      "min_presheath_thickness_m": 1.0e-6,
+      "min_ion_mach_at_sheath_edge": 1.0,
+      "min_reaction_active_processes": 1,
+      "min_effective_collision_frequency_hz": 1.0e-2,
+      "require_boundary_layer_resolved": true,
+      "require_reaction_balance_active": true
+    },
+    {
+      "preset": "hall_thruster_plume",
+      "steps": 2,
+      "time_step_s": 2.5e-8,
+      "config": {
+        "advanced_closure": {
+          "enable_non_equilibrium_closure": true,
+          "enable_turbulence_closure": true,
+          "non_equilibrium_model": "collisional_thermalization",
+          "turbulence_model": "mixing_length_eddy_diffusivity"
+        }
+      },
+      "expected_environment_model": "spis_thruster_plume",
+      "expected_reaction_registry": "spis_dense_plasma",
+      "expected_diagnostic_set": "full_physics_diagnostics",
+      "expected_contract_id": "plasma-physics-diagnostics-v1",
+      "expected_dense_plasma_detected": true,
+      "require_advanced_closure_enabled": true,
+      "min_sheath_thickness_m": 1.0e-7,
+      "min_presheath_thickness_m": 1.0e-7,
+      "min_ion_mach_at_sheath_edge": 1.0,
+      "min_reaction_active_processes": 2,
+      "min_effective_collision_frequency_hz": 1.0,
+      "min_non_equilibrium_ratio": 1.01,
+      "min_turbulence_eddy_diffusivity_m2_per_s": 1.0e-12,
+      "min_closure_active_terms": 2,
+      "require_boundary_layer_resolved": true,
+      "require_reaction_balance_active": true
+    }
+  ]
+}

@@ -19,6 +19,7 @@ target_link_libraries(Material_test
     PRIVATE
         SCDAT::Tools::Geometry
         SCDAT::Tools::Material
+        SCDAT::Tools::FieldSolver
         GTest::gtest_main
 )
 gtest_discover_tests(Material_test)

@@ -132,6 +132,41 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME KernelContractCatalogGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_kernel_contract_catalog_gate.py
+            --project-root ${CMAKE_SOURCE_DIR}
+            --catalog ${CMAKE_SOURCE_DIR}/documentation/contracts/kernel_contract_catalog_v1.json
+            --report-json ${CMAKE_BINARY_DIR}/kernel_contract_catalog_gate.json
+            --report-md ${CMAKE_BINARY_DIR}/kernel_contract_catalog_gate.md
+    )
+
+    add_test(
+        NAME BenchmarkCaseMatrixGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_benchmark_case_matrix_gate.py
+            --project-root ${CMAKE_SOURCE_DIR}
+            --matrix ${CMAKE_SOURCE_DIR}/documentation/contracts/benchmark_case_matrix_v1.json
+            --report-json ${CMAKE_BINARY_DIR}/benchmark_case_matrix_gate.json
+            --report-md ${CMAKE_BINARY_DIR}/benchmark_case_matrix_gate.md
+    )
+
+    add_test(
+        NAME SurfaceReferenceMatrixGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_surface_reference_matrix_gate.py
+            --project-root ${CMAKE_SOURCE_DIR}
+            --scdat-exe $<TARGET_FILE:SCDAT>
+            --matrix ${CMAKE_SOURCE_DIR}/scripts/run/surface_reference_matrix.json
+            --output-root ${CMAKE_BINARY_DIR}/surface_reference_matrix_gate
+            --report-json ${CMAKE_BINARY_DIR}/surface_reference_matrix_gate.json
+            --report-md ${CMAKE_BINARY_DIR}/surface_reference_matrix_gate.md
+    )
+
+    add_test(
         NAME FourLayerGateSystemGate
         COMMAND
             ${Python3_EXECUTABLE}
@@ -268,6 +303,17 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME VacuumArcBenchmarkMatrixGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_vacuum_arc_benchmark_matrix_gate.py
+            --project-root ${CMAKE_SOURCE_DIR}
+            --scdat-exe $<TARGET_FILE:SCDAT>
+            --matrix ${CMAKE_SOURCE_DIR}/scripts/run/vacuum_arc_benchmark_matrix.json
+            --output-root ${CMAKE_BINARY_DIR}/vacuum_arc_benchmark_matrix_gate
+    )
+
+    add_test(
         NAME InternalRadiationCouplingRegressionGate
         COMMAND
             ${Python3_EXECUTABLE}
@@ -280,6 +326,17 @@ if(BUILD_TESTING)
             --max-ratio-cv 1e-4
             --max-rho-increase-count 0
             --require-monotonic-electric-field
+    )
+
+    add_test(
+        NAME InternalRadiationCouplingContractGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_internal_radiation_coupling_contract_gate.py
+            --project-root ${CMAKE_SOURCE_DIR}
+            --scdat-exe $<TARGET_FILE:SCDAT>
+            --matrix ${CMAKE_SOURCE_DIR}/scripts/run/internal_radiation_coupling_matrix.json
+            --output-root ${CMAKE_BINARY_DIR}/internal_radiation_coupling_contract_gate
     )
 
     add_test(
@@ -351,6 +408,7 @@ if(BUILD_TESTING)
     add_subdirectory(Tools/Coupling/test)
     add_subdirectory(Tools/Diagnostics/test)
     add_subdirectory(Tools/FieldSolver/test)
+    add_subdirectory(Tools/Solver/test)
     add_subdirectory(Tools/Material/test)
     add_subdirectory(Tools/Output/test)
     add_subdirectory(Tools/PICcore/test)

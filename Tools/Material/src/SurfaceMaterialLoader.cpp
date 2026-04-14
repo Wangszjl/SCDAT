@@ -1,4 +1,4 @@
-#include "../include/SPISMaterialLoader.h"
+#include "../include/SurfaceMaterialLoader.h"
 
 #include <algorithm>
 #include <cctype>
@@ -109,7 +109,7 @@ void applyCommonField(const std::string& key, const std::string& value, Material
 
 } // namespace
 
-VoidResult SPISMaterialLoader::loadCsv(const std::filesystem::path& path,
+VoidResult SurfaceMaterialLoader::loadCsv(const std::filesystem::path& path,
                                        MaterialDatabase& database) const
 {
     std::ifstream input(path);
@@ -155,7 +155,7 @@ VoidResult SPISMaterialLoader::loadCsv(const std::filesystem::path& path,
     return VoidResult::success();
 }
 
-VoidResult SPISMaterialLoader::loadKeyValueFile(const std::filesystem::path& path,
+VoidResult SurfaceMaterialLoader::loadKeyValueFile(const std::filesystem::path& path,
                                                 MaterialDatabase& database) const
 {
     std::ifstream input(path);
@@ -208,3 +208,4 @@ VoidResult SPISMaterialLoader::loadKeyValueFile(const std::filesystem::path& pat
 
 } // namespace Material
 } // namespace SCDAT
+

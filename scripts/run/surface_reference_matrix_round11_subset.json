@@ -1,0 +1,84 @@
+{
+  "schema_version": "v1",
+  "module": "surface_reference_matrix",
+  "description": "Round 11 subset matrix for transition-event and shared-runtime regression evidence.",
+  "cases": [
+    {
+      "case_label": "r11_geo_surface_pic_direct_transition_events",
+      "preset": "geo_ecss_kapton_surface_pic_direct",
+      "expected_reference_family": "surface_pic_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_metadata_values": {
+        "runtime_route": "SurfacePic",
+        "surface_pic_strategy": "SurfacePicDirect",
+        "surface_pic_runtime": "graph_coupled_shared_surface"
+      },
+      "run_overrides": {
+        "time_step_s": 5.0e-5,
+        "steps": 32,
+        "total_duration_s": 1.6e-3,
+        "adaptive_time_stepping": false
+      },
+      "config_overrides": {
+        "surface_material": {
+          "scalar_properties": {
+            "transition_local_time_enabled": 1.0,
+            "transition_local_time_base_hour": 12.0,
+            "transition_local_time_daylight_start_hour": 6.0,
+            "transition_local_time_daylight_end_hour": 18.0,
+            "transition_spinning_enabled": 1.0,
+            "transition_spin_period_s": 5400.0,
+            "transition_sun_flux_enabled": 1.0,
+            "transition_sun_flux_base_scale": 1.0,
+            "transition_sun_flux_night_scale": 1.0,
+            "transition_sun_flux_spin_amplitude": 0.0,
+            "transition_sun_flux_pic_recalibration_min_scale": 0.0,
+            "surface_photo_barrier_scaler_kind": 4.0,
+            "surface_secondary_barrier_scaler_kind": 2.0,
+            "surface_ion_secondary_barrier_scaler_kind": 3.0,
+            "surface_backscatter_barrier_scaler_kind": 1.0
+          }
+        }
+      }
+    },
+    {
+      "case_label": "r11_leo_surface_pic_hybrid_transition_events",
+      "preset": "leo_pic_circuit_ram_facing_hybrid",
+      "expected_reference_family": "surface_pic_reference_family",
+      "expected_reference_matrix_case_id": "leo_ram_facing_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_metadata_values": {
+        "runtime_route": "SurfacePicHybrid",
+        "surface_pic_strategy": "SurfacePicHybridReference",
+        "surface_pic_runtime": "graph_coupled_shared_surface"
+      },
+      "run_overrides": {
+        "time_step_s": 5.0e-6,
+        "steps": 8,
+        "adaptive_time_stepping": false
+      },
+      "config_overrides": {
+        "surface_material": {
+          "scalar_properties": {
+            "transition_local_time_enabled": 1.0,
+            "transition_local_time_base_hour": 23.0,
+            "transition_local_time_daylight_start_hour": 6.0,
+            "transition_local_time_daylight_end_hour": 18.0,
+            "transition_spinning_enabled": 1.0,
+            "transition_spin_period_s": 3600.0,
+            "transition_sun_flux_enabled": 1.0,
+            "transition_sun_flux_base_scale": 1.0,
+            "transition_sun_flux_night_scale": 1.0,
+            "transition_sun_flux_spin_amplitude": 0.0,
+            "transition_sun_flux_pic_recalibration_min_scale": 0.0,
+            "surface_photo_barrier_scaler_kind": 2.0,
+            "surface_secondary_barrier_scaler_kind": 3.0,
+            "surface_ion_secondary_barrier_scaler_kind": 2.0,
+            "surface_backscatter_barrier_scaler_kind": 1.0
+          }
+        }
+      }
+    }
+  ]
+}

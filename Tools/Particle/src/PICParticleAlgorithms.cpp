@@ -315,6 +315,13 @@ void ChargeDepositor::setMesh(const std::vector<Mesh::NodePtr>& nodes,
     }
 }
 
+void ChargeDepositor::setTrajectoryDepositionScheme(
+    TrajectoryChargeDepositionKernel kernel, std::size_t segment_count)
+{
+    trajectory_kernel_ = kernel;
+    trajectory_segment_count_ = std::clamp<std::size_t>(segment_count, 1, 128);
+}
+
 void ChargeDepositor::depositCharge(const Utils::Point3D& position, ElementId element_id,
                                     double charge, double weight,
                                     std::vector<double>& charge_density)
@@ -370,50 +377,58 @@ void ChargeDepositor::depositChargeAlongTrajectory(const Utils::Point3D& start_p
     if (elements_.empty())
         return;
 
-    // 鏀硅繘鐨勮建杩圭Н鍒嗘矇绉畻锟?
-    // 灏嗚建杩瑰垎鎴愬娈碉紝鍦ㄦ瘡娈典腑娌夌Н鐩稿簲鐨勭數锟?
-
-    const int num_segments = 10; // 鍒嗘锟?
     Utils::Vector3D trajectory = end_pos - start_pos;
-    double segment_length = trajectory.magnitude() / num_segments;
-
-    if (segment_length < 1e-15)
+    if (trajectory.magnitude() < 1e-15)
     {
-        // 杞ㄨ抗澶煭锛岀洿鎺ュ湪璧风偣娌夌Н
         depositCharge(start_pos, element_id, charge, weight, charge_density);
         return;
     }
 
-    double charge_per_segment = charge / num_segments;
-
-    for (int i = 0; i < num_segments; ++i)
+    if (trajectory_kernel_ == TrajectoryChargeDepositionKernel::NearestPoint)
     {
-        // 璁＄畻褰撳墠娈电殑涓偣
-        double t = (i + 0.5) / num_segments;
-        Utils::Point3D segment_center = start_pos + trajectory * t;
-
-        // 鍦ㄦ涓績娌夌Н鐢佃嵎
-        depositCharge(segment_center, element_id, charge_per_segment, weight, charge_density);
+        depositCharge(end_pos, element_id, charge, weight, charge_density);
+        return;
     }
 
-    // 棰濆鐨勭數鑽峰畧鎭掓锟?
-    // 纭繚娌夌Н鐨勬€荤數鑽风瓑浜庤緭鍏ョ數锟?
-    static double total_deposited = 0.0;
-    static double total_input = 0.0;
-    total_deposited += charge_per_segment * num_segments;
-    total_input += charge;
+    const std::size_t num_segments = std::max<std::size_t>(1, trajectory_segment_count_);
 
-    // 锟?0000娆℃矇绉鏌ヤ竴娆″畧鎭掓€э紙澶у箙鍑忓皯杈撳嚭棰戠巼锟?
-    static int deposit_count = 0;
-    deposit_count++;
-    if (deposit_count % 100000 == 0)
-    { // 锟?000鏀逛负100000锛屽噺灏戣緭锟?
-        double conservation_error =
-            std::abs(total_deposited - total_input) / std::max(total_input, 1e-20);
-        if (conservation_error > 1e-10)
+    if (trajectory_kernel_ == TrajectoryChargeDepositionKernel::QuadratureGauss3)
+    {
+        // Gauss-Legendre 3-point quadrature on each segment for smoother deposition.
+        constexpr std::array<double, 3> kNodes = {
+            -0.7745966692414834, 0.0, 0.7745966692414834};
+        constexpr std::array<double, 3> kWeights = {
+            5.0 / 18.0, 8.0 / 18.0, 5.0 / 18.0};
+
+        for (std::size_t segment = 0; segment < num_segments; ++segment)
         {
-            // std::cerr << "璀﹀憡: 鐢佃嵎瀹堟亽璇樊 " << conservation_error << std::endl;  // 瀹屽叏娉ㄩ噴锟?
+            const double segment_start_t = static_cast<double>(segment) /
+                                           static_cast<double>(num_segments);
+            const double segment_end_t = static_cast<double>(segment + 1) /
+                                         static_cast<double>(num_segments);
+            const double segment_center_t = 0.5 * (segment_start_t + segment_end_t);
+            const double segment_half_span_t = 0.5 * (segment_end_t - segment_start_t);
+
+            for (std::size_t q = 0; q < kNodes.size(); ++q)
+            {
+                const double t = segment_center_t + segment_half_span_t * kNodes[q];
+                const Utils::Point3D sample_point = start_pos + trajectory * t;
+                const double weighted_charge = charge * kWeights[q] /
+                                               static_cast<double>(num_segments);
+                depositCharge(sample_point, element_id, weighted_charge, weight, charge_density);
+            }
         }
+        return;
+    }
+
+    // Linear cloud-in-cell style segment-center deposition.
+    const double charge_per_segment = charge / static_cast<double>(num_segments);
+    for (std::size_t segment = 0; segment < num_segments; ++segment)
+    {
+        const double t = (static_cast<double>(segment) + 0.5) /
+                         static_cast<double>(num_segments);
+        const Utils::Point3D segment_center = start_pos + trajectory * t;
+        depositCharge(segment_center, element_id, charge_per_segment, weight, charge_density);
     }
 }
 

@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 
 using SCDAT::Toolkit::InternalCharging::InternalChargingScenarioPreset;
 using SCDAT::Toolkit::InternalCharging::ParticleTransportModel;
@@ -18,6 +20,14 @@ constexpr double kEpsilon0 = 8.8541878128e-12;
 constexpr double kKaptonPermittivity = 3.4;
 constexpr double kElementaryChargeC = 1.602176634e-19;
 constexpr double kEvToJ = 1.602176634e-19;
+
+std::string readTextFile(const std::filesystem::path& path)
+{
+    std::ifstream input(path);
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
 }
 
 TEST(InternalChargingSmokeTest, ToolkitInitializesAdvancesAndExports)
@@ -45,6 +55,77 @@ TEST(InternalChargingSmokeTest, ToolkitInitializesAdvancesAndExports)
     EXPECT_GT(status.deposited_charge_rate_c_per_m3_s, 0.0);
     EXPECT_GT(status.deposited_particle_rate_per_m3_s, 0.0);
     EXPECT_NEAR(status.effective_incident_charge_state_abs, 1.0, 1.0e-12);
+}
+
+TEST(InternalChargingSmokeTest, PresetExportsSpisAndGeantStyleOrganizationMetadata)
+{
+    SpacecraftInternalChargingAlgorithm algorithm;
+    InternalChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::InternalCharging::tryGetInternalChargingScenarioPreset(
+        "geo_electron_belt", preset));
+
+    EXPECT_TRUE(preset.config.enable_spis_style_organization);
+    EXPECT_EQ(
+        preset.config.material_stack_model,
+        SCDAT::Toolkit::InternalCharging::InternalMaterialStackModelKind::SpisLayeredStack);
+    EXPECT_EQ(preset.config.geometry_model,
+              SCDAT::Toolkit::InternalCharging::InternalGeometryModelKind::ShieldedLayerStack1D);
+    EXPECT_EQ(
+        preset.config.physics_process_list,
+        SCDAT::Toolkit::InternalCharging::InternalPhysicsProcessListKind::Geant4ShieldingLike);
+    EXPECT_EQ(
+        preset.config.energy_deposition_model,
+        SCDAT::Toolkit::InternalCharging::InternalEnergyDepositionModelKind::Geant4StepRecorderLike);
+    EXPECT_EQ(
+        preset.config.charge_response_model,
+        SCDAT::Toolkit::InternalCharging::InternalChargeResponseModelKind::
+            RadiationInducedConductivityRelaxation);
+
+    ASSERT_TRUE(algorithm.initialize(preset.config));
+    ASSERT_TRUE(algorithm.advance(preset.time_step_s));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "internal_charging_organization.csv";
+    ASSERT_TRUE(algorithm.exportResults(csv_path));
+
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find("\"organization_family\": \"spis_geant4_numeric_v1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"material_stack_model\": \"spis_layered_stack\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"geometry_model\": \"shielded_layer_stack_1d\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"primary_source_model\": \"preset_monoenergetic_flux\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"physics_process_list\": \"geant4_shielding_like\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"energy_deposition_model\": \"geant4_step_recorder_like\""),
+              std::string::npos);
+    EXPECT_NE(
+        sidecar.find(
+            "\"charge_response_model\": \"radiation_induced_conductivity_relaxation\""),
+        std::string::npos);
+    EXPECT_NE(sidecar.find("\"deposition_record_contract_id\": \"aggregate-dose-drive-v1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"process_history_contract_id\": \"aggregate-process-history-v1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"drive_provenance_source\": \"internal_preset\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"internal_drive_provenance_contract_id\": \"\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"internal_drive_layer_alignment_contract_id\": \"\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"simulation_artifact_contract_id\": \"simulation-artifact-v1\""),
+              std::string::npos);
+
+    auto simulation_artifact_path = csv_path;
+    simulation_artifact_path.replace_extension(".simulation_artifact.json");
+    ASSERT_TRUE(std::filesystem::exists(simulation_artifact_path));
+    const auto simulation_artifact = readTextFile(simulation_artifact_path);
+    EXPECT_NE(simulation_artifact.find("\"schema_version\": \"scdat.simulation_artifact.v1\""),
+              std::string::npos);
+    EXPECT_NE(simulation_artifact.find("\"contract_id\": \"simulation-artifact-v1\""),
+              std::string::npos);
 }
 
 TEST(InternalChargingSmokeTest, TransportDepositsConservedChargeAndEnergyPerArea)

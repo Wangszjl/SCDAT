@@ -10,7 +10,7 @@ namespace SCDAT
 namespace Material
 {
 
-class SPISMaterialLoader
+class SurfaceMaterialLoader
 {
   public:
     VoidResult loadCsv(const std::filesystem::path& path, MaterialDatabase& database) const;
@@ -19,3 +19,4 @@ class SPISMaterialLoader
 
 } // namespace Material
 } // namespace SCDAT
+

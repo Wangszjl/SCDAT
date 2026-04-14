@@ -1,0 +1,20 @@
+{
+  "schema_version": "v1",
+  "module": "surface",
+  "base_preset": "geo_ecss_kapton_surface_pic_direct",
+  "name": "surface_surface_pic_hybrid_example",
+  "run": {
+    "time_step_s": 2.0e-1,
+    "steps": 2,
+    "output_csv": "results/surface_surface_pic_hybrid_example.csv"
+  },
+  "config": {
+    "surface_runtime_route": "surface_pic_hybrid",
+    "surface_pic_strategy": "surface_pic_hybrid_reference",
+    "enable_live_pic_window": true,
+    "enable_live_pic_mcc": true,
+    "enable_body_patch_circuit": true,
+    "live_pic_collision_cross_section_set_id": "surface_pic_v1"
+  }
+}
+

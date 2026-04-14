@@ -27,6 +27,13 @@ MODULE_CASES = [
         "default_dt": 2.0e-8,
     },
     {
+        "module": "internal",
+        "definition": "internalDocument",
+        "command": "internal-config",
+        "config": "scripts/run/internal_config_full_example.json",
+        "default_dt": 1.0e-3,
+    },
+    {
         "module": "radiation",
         "definition": "radiationDocument",
         "command": "radiation-config",

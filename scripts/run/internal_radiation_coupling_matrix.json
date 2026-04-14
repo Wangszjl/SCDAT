@@ -1,0 +1,23 @@
+{
+  "schema_version": "v1",
+  "module": "internal_radiation_coupling_matrix",
+  "description": "Contract gate matrix for Radiation -> Internal coupled artifact production and consumption.",
+  "cases": [
+    {
+      "internal_preset": "geo_electron_belt",
+      "radiation_preset": "geo_electron_belt_dose",
+      "expected_deposition_contract_id": "geant4-aligned-deposition-record-v1",
+      "expected_process_contract_id": "geant4-aligned-process-history-v1",
+      "expected_radiation_transport_benchmark_contract_id": "radiation-transport-benchmark-v1",
+      "expected_internal_response_coupled_solve_contract_id": "internal-response-coupled-solve-v1"
+    },
+    {
+      "internal_preset": "meo_dielectric_harness",
+      "radiation_preset": "meo_proton_harness_dose",
+      "expected_deposition_contract_id": "geant4-aligned-deposition-record-v1",
+      "expected_process_contract_id": "geant4-aligned-process-history-v1",
+      "expected_radiation_transport_benchmark_contract_id": "radiation-transport-benchmark-v1",
+      "expected_internal_response_coupled_solve_contract_id": "internal-response-coupled-solve-v1"
+    }
+  ]
+}

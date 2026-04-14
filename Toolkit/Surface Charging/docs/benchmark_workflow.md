@@ -27,6 +27,17 @@ Use when we want the advanced SCDAT surface charging framework:
 - field-aware capacitance and local charge diagnostics
 - patch-level PIC calibration
 
+### `SurfacePic` / `SurfacePicHybrid`
+Use when we want live PIC / MCC current sourcing while still staying on the unified surface-kernel
+contracts:
+
+- `SurfacePic`
+  - PIC-primary route
+- `SurfacePicHybrid`
+  - PIC-primary + reference-completion route
+- both routes export the same benchmark-case / simulation-artifact contract family used by the
+  aligned reference gate
+
 ## Execution Modes
 
 ### `ReplayFromReference`
@@ -108,6 +119,12 @@ Compare two CSV files:
 
 ```powershell
 python "Toolkit/Surface Charging/scripts/compare_benchmark.py" actual.csv reference.csv --columns surface_potential_v total_current_density_a_per_m2
+```
+
+Run the formal GEO / LEO / MATLAB reference-family gate:
+
+```powershell
+python scripts/python/check_surface_reference_matrix_gate.py --project-root . --scdat-exe build_codex/bin/SCDAT.exe --matrix scripts/run/surface_reference_matrix.json --output-root build/surface_reference_matrix_gate
 ```
 
 Summarize a benchmark sidecar report:
@@ -266,6 +283,19 @@ The exported unified route now also reports volumetric solver diagnostics:
 - `surface_node_<i>_external_volume_feedback_blend_factor`
 - `surface_node_<i>_external_volume_feedback_mismatch_metric`
 - `surface_node_<i>_external_volume_feedback_applied`
+
+## Current Gate Snapshot
+
+As of `2026-04-11`, the aligned reference-family gate passes for the active matrix in
+`scripts/run/surface_reference_matrix.json`.
+
+That gate now checks:
+
+- metadata contract alignment
+- benchmark-case contract presence
+- simulation-artifact contract presence
+- GEO / LEO / MATLAB current-component metrics
+- final DIDV export via `final_current_derivative_a_per_m2_per_v`
 
 ## A-E Completion Snapshot (2026-04-02)
 

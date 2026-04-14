@@ -1,4 +1,6 @@
 #include "LegacyBenchmarkSupport.h"
+#include "../../Tools/Basic/include/NumericAggregation.h"
+#include "../../Tools/Basic/include/StringTokenUtils.h"
 
 #include <algorithm>
 #include <cctype>
@@ -57,17 +59,6 @@ std::filesystem::path legacyBenchmarkAbsolutePath(const std::filesystem::path& r
     return legacyBenchmarkRepoRoot() / relative_path;
 }
 
-std::string trim(const std::string& value)
-{
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos)
-    {
-        return {};
-    }
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return value.substr(first, last - first + 1);
-}
-
 bool startsWith(const std::string& value, const std::string& prefix)
 {
     return value.rfind(prefix, 0) == 0;
@@ -75,7 +66,7 @@ bool startsWith(const std::string& value, const std::string& prefix)
 
 std::string sanitizedMaterialName(const std::string& raw_name)
 {
-    std::string value = trim(raw_name);
+    std::string value = Basic::trimAscii(raw_name);
     for (char& ch : value)
     {
         if (std::isspace(static_cast<unsigned char>(ch)))
@@ -308,9 +299,9 @@ void applyLegacyEnvironmentToConfig(const LegacyEnvironmentRecord& environment,
     }
 
     config.plasma.electron_density_m3 =
-        std::accumulate(electron_densities_m3.begin(), electron_densities_m3.end(), 0.0);
+        Basic::sumValue(electron_densities_m3);
     config.plasma.ion_density_m3 =
-        std::accumulate(ion_densities_m3.begin(), ion_densities_m3.end(), 0.0);
+        Basic::sumValue(ion_densities_m3);
     config.plasma.electron_temperature_ev =
         weightedAverage(electron_densities_m3, electron_temperatures_ev, 1.0);
     config.plasma.ion_temperature_ev =
@@ -589,7 +580,7 @@ parseLegacyEnvironmentFile(const std::filesystem::path& path)
 
     while (std::getline(input, line))
     {
-        const std::string trimmed = trim(line);
+        const std::string trimmed = Basic::trimAscii(line);
         if (trimmed.empty())
         {
             continue;
@@ -607,7 +598,7 @@ parseLegacyEnvironmentFile(const std::filesystem::path& path)
                     current->case_id =
                         static_cast<int>(std::max(0.0, std::stod(parts[1])));
                     const std::size_t id_pos = trimmed.find(parts[1]);
-                    current->name = trim(trimmed.substr(id_pos + parts[1].size()));
+                    current->name = Basic::trimAscii(trimmed.substr(id_pos + parts[1].size()));
                     expect_thermal_values = false;
                     expect_electron_flux = false;
                     expect_ion_flux = false;
@@ -715,7 +706,7 @@ parseLegacyMaterialTable(const std::filesystem::path& path, std::size_t trailing
     {
         for (std::size_t i = 0; i < lines.size(); ++i)
         {
-            const std::string trimmed = trim(lines[i]);
+            const std::string trimmed = Basic::trimAscii(lines[i]);
             if (trimmed.find(section_marker) != std::string::npos ||
                 (!alternate_section_marker.empty() &&
                  trimmed.find(alternate_section_marker) != std::string::npos))
@@ -730,7 +721,7 @@ parseLegacyMaterialTable(const std::filesystem::path& path, std::size_t trailing
     for (std::size_t line_index = start_index; line_index < lines.size(); ++line_index)
     {
         const std::string& current_line = lines[line_index];
-        const std::string trimmed = trim(current_line);
+        const std::string trimmed = Basic::trimAscii(current_line);
         if (trimmed.rfind("Result ", 0) == 0)
         {
             break;
@@ -851,6 +842,180 @@ double interpolateLegacyBenchmarkPotential(const std::vector<LegacyBenchmarkCurv
     }
 
     return samples.back().potential_v;
+}
+
+template <typename Accessor>
+double interpolateLegacyBenchmarkComponent(
+    const std::vector<LegacyBenchmarkCurveSample>& samples,
+    double time_s,
+    const Accessor& accessor)
+{
+    if (samples.empty())
+    {
+        return 0.0;
+    }
+    if (time_s <= samples.front().time_s)
+    {
+        return accessor(samples.front());
+    }
+    if (time_s >= samples.back().time_s)
+    {
+        return accessor(samples.back());
+    }
+
+    for (std::size_t i = 1; i < samples.size(); ++i)
+    {
+        if (time_s <= samples[i].time_s)
+        {
+            const auto& a = samples[i - 1];
+            const auto& b = samples[i];
+            const double dt = std::max(1.0e-12, b.time_s - a.time_s);
+            const double alpha = std::clamp((time_s - a.time_s) / dt, 0.0, 1.0);
+            return accessor(a) + alpha * (accessor(b) - accessor(a));
+        }
+    }
+
+    return accessor(samples.back());
+}
+
+double legacyBenchmarkTimeAlignmentToleranceS(double overlap_start_s, double overlap_end_s)
+{
+    const double span_s = std::abs(overlap_end_s - overlap_start_s);
+    return std::max(1.0e-12, 1.0e-9 * std::max(1.0, span_s));
+}
+
+bool legacyBenchmarkHasMeaningfulTimeOverlap(const std::vector<LegacyBenchmarkCurveSample>& actual,
+                                             const std::vector<LegacyBenchmarkCurveSample>& reference,
+                                             double overlap_start_s,
+                                             double overlap_end_s)
+{
+    if (actual.empty() || reference.empty())
+    {
+        return false;
+    }
+
+    const double overlap_span_s = overlap_end_s - overlap_start_s;
+    if (!(overlap_span_s > 0.0))
+    {
+        return false;
+    }
+
+    const double actual_span_s = std::max(1.0e-12, actual.back().time_s - actual.front().time_s);
+    const double reference_span_s =
+        std::max(1.0e-12, reference.back().time_s - reference.front().time_s);
+    const double actual_overlap_ratio = overlap_span_s / actual_span_s;
+    const double reference_overlap_ratio = overlap_span_s / reference_span_s;
+
+    return actual_overlap_ratio >= 0.25 && reference_overlap_ratio >= 0.25;
+}
+
+struct LegacyBenchmarkAlignedCoordinate
+{
+    double actual_time_s = 0.0;
+    double reference_time_s = 0.0;
+};
+
+double legacyBenchmarkNormalizedProgress(double time_s, double start_s, double end_s)
+{
+    const double span_s = end_s - start_s;
+    if (std::abs(span_s) <= 1.0e-12)
+    {
+        return 0.0;
+    }
+    return std::clamp((time_s - start_s) / span_s, 0.0, 1.0);
+}
+
+std::vector<LegacyBenchmarkAlignedCoordinate> buildLegacyBenchmarkAlignedCoordinates(
+    const std::vector<LegacyBenchmarkCurveSample>& actual,
+    const std::vector<LegacyBenchmarkCurveSample>& reference)
+{
+    if (actual.empty() || reference.empty())
+    {
+        return {};
+    }
+
+    const double overlap_start_s = std::max(actual.front().time_s, reference.front().time_s);
+    const double overlap_end_s = std::min(actual.back().time_s, reference.back().time_s);
+    const double tolerance_s =
+        legacyBenchmarkTimeAlignmentToleranceS(overlap_start_s, overlap_end_s);
+    if (overlap_start_s <= overlap_end_s + tolerance_s &&
+        legacyBenchmarkHasMeaningfulTimeOverlap(actual, reference, overlap_start_s, overlap_end_s))
+    {
+        std::vector<double> times;
+        times.reserve(actual.size() + reference.size() + 2);
+        const auto append_time = [&](double time_s) {
+            if (time_s < overlap_start_s - tolerance_s || time_s > overlap_end_s + tolerance_s)
+            {
+                return;
+            }
+            times.push_back(std::clamp(time_s, overlap_start_s, overlap_end_s));
+        };
+
+        append_time(overlap_start_s);
+        append_time(overlap_end_s);
+        for (const auto& sample : actual)
+        {
+            append_time(sample.time_s);
+        }
+        for (const auto& sample : reference)
+        {
+            append_time(sample.time_s);
+        }
+
+        std::sort(times.begin(), times.end());
+        std::vector<LegacyBenchmarkAlignedCoordinate> coordinates;
+        coordinates.reserve(times.size());
+        for (const double time_s : times)
+        {
+            if (coordinates.empty() ||
+                std::abs(time_s - coordinates.back().actual_time_s) > tolerance_s)
+            {
+                coordinates.push_back({time_s, time_s});
+            }
+        }
+        return coordinates;
+    }
+
+    const double actual_start_s = actual.front().time_s;
+    const double actual_end_s = actual.back().time_s;
+    const double reference_start_s = reference.front().time_s;
+    const double reference_end_s = reference.back().time_s;
+    constexpr double kNormalizedTolerance = 1.0e-12;
+
+    std::vector<double> normalized_progresses;
+    normalized_progresses.reserve(actual.size() + reference.size() + 2);
+    normalized_progresses.push_back(0.0);
+    normalized_progresses.push_back(1.0);
+    for (const auto& sample : actual)
+    {
+        normalized_progresses.push_back(
+            legacyBenchmarkNormalizedProgress(sample.time_s, actual_start_s, actual_end_s));
+    }
+    for (const auto& sample : reference)
+    {
+        normalized_progresses.push_back(
+            legacyBenchmarkNormalizedProgress(sample.time_s, reference_start_s, reference_end_s));
+    }
+
+    std::sort(normalized_progresses.begin(), normalized_progresses.end());
+    std::vector<LegacyBenchmarkAlignedCoordinate> coordinates;
+    coordinates.reserve(normalized_progresses.size());
+    double last_progress = std::numeric_limits<double>::quiet_NaN();
+    for (const double progress : normalized_progresses)
+    {
+        if (std::isfinite(last_progress) &&
+            std::abs(progress - last_progress) <= kNormalizedTolerance)
+        {
+            continue;
+        }
+        last_progress = progress;
+
+        const double actual_time_s = actual_start_s + progress * (actual_end_s - actual_start_s);
+        const double reference_time_s =
+            reference_start_s + progress * (reference_end_s - reference_start_s);
+        coordinates.push_back({actual_time_s, reference_time_s});
+    }
+    return coordinates;
 }
 
 LegacyBenchmarkCaseDefinition loadLegacyBenchmarkCaseDefinition(SurfaceBenchmarkSource source)
@@ -1131,19 +1296,22 @@ double legacyBenchmarkComponentRmse(
     const std::vector<LegacyBenchmarkCurveSample>& reference,
     const std::function<double(const LegacyBenchmarkCurveSample&)>& accessor)
 {
-    const std::size_t count = std::min(actual.size(), reference.size());
-    if (count == 0)
+    const auto aligned_coordinates =
+        buildLegacyBenchmarkAlignedCoordinates(actual, reference);
+    if (aligned_coordinates.empty())
     {
         return 0.0;
     }
 
     double error_sum = 0.0;
-    for (std::size_t i = 0; i < count; ++i)
+    for (const auto& coordinate : aligned_coordinates)
     {
-        const double delta = accessor(actual[i]) - accessor(reference[i]);
+        const double delta =
+            interpolateLegacyBenchmarkComponent(actual, coordinate.actual_time_s, accessor) -
+            interpolateLegacyBenchmarkComponent(reference, coordinate.reference_time_s, accessor);
         error_sum += delta * delta;
     }
-    return std::sqrt(error_sum / static_cast<double>(count));
+    return std::sqrt(error_sum / static_cast<double>(aligned_coordinates.size()));
 }
 
 double legacyBenchmarkComponentMeanSignedDelta(
@@ -1151,18 +1319,21 @@ double legacyBenchmarkComponentMeanSignedDelta(
     const std::vector<LegacyBenchmarkCurveSample>& reference,
     const std::function<double(const LegacyBenchmarkCurveSample&)>& accessor)
 {
-    const std::size_t count = std::min(actual.size(), reference.size());
-    if (count == 0)
+    const auto aligned_coordinates =
+        buildLegacyBenchmarkAlignedCoordinates(actual, reference);
+    if (aligned_coordinates.empty())
     {
         return 0.0;
     }
 
     double delta_sum = 0.0;
-    for (std::size_t i = 0; i < count; ++i)
+    for (const auto& coordinate : aligned_coordinates)
     {
-        delta_sum += accessor(actual[i]) - accessor(reference[i]);
+        delta_sum +=
+            interpolateLegacyBenchmarkComponent(actual, coordinate.actual_time_s, accessor) -
+            interpolateLegacyBenchmarkComponent(reference, coordinate.reference_time_s, accessor);
     }
-    return delta_sum / static_cast<double>(count);
+    return delta_sum / static_cast<double>(aligned_coordinates.size());
 }
 
 double estimateInitialEFoldingEnergyEv(
@@ -1250,17 +1421,20 @@ PotentialTailMetric legacyBenchmarkNegativeTailRmse(
     const std::function<double(const LegacyBenchmarkCurveSample&)>& accessor)
 {
     PotentialTailMetric metric;
-    const std::size_t count = std::min(actual.size(), reference.size());
-    if (count == 0)
+    const auto aligned_coordinates =
+        buildLegacyBenchmarkAlignedCoordinates(actual, reference);
+    if (aligned_coordinates.empty())
     {
         return metric;
     }
 
     double min_reference_potential_v = std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < count; ++i)
+    for (const auto& coordinate : aligned_coordinates)
     {
         min_reference_potential_v =
-            std::min(min_reference_potential_v, reference[i].potential_v);
+            std::min(min_reference_potential_v,
+                     interpolateLegacyBenchmarkPotential(reference,
+                                                         coordinate.reference_time_s));
     }
     if (!(min_reference_potential_v < 0.0))
     {
@@ -1269,13 +1443,16 @@ PotentialTailMetric legacyBenchmarkNegativeTailRmse(
 
     metric.threshold_v = std::min(-1.0, 0.5 * min_reference_potential_v);
     double error_sum = 0.0;
-    for (std::size_t i = 0; i < count; ++i)
+    for (const auto& coordinate : aligned_coordinates)
     {
-        if (reference[i].potential_v > metric.threshold_v)
+        if (interpolateLegacyBenchmarkPotential(reference, coordinate.reference_time_s) >
+            metric.threshold_v)
         {
             continue;
         }
-        const double delta = accessor(actual[i]) - accessor(reference[i]);
+        const double delta =
+            interpolateLegacyBenchmarkComponent(actual, coordinate.actual_time_s, accessor) -
+            interpolateLegacyBenchmarkComponent(reference, coordinate.reference_time_s, accessor);
         error_sum += delta * delta;
         metric.sample_count += 1;
     }
@@ -1531,25 +1708,30 @@ LegacyBenchmarkMetrics computeLegacyBenchmarkMetrics(
     double equilibrium_tolerance_v)
 {
     LegacyBenchmarkMetrics metrics;
-    const std::size_t count = std::min(actual.size(), reference.size());
-    if (count == 0)
+    const auto aligned_coordinates =
+        buildLegacyBenchmarkAlignedCoordinates(actual, reference);
+    if (aligned_coordinates.empty())
     {
         return metrics;
     }
 
     double error_sum = 0.0;
-    for (std::size_t i = 0; i < count; ++i)
+    for (const auto& coordinate : aligned_coordinates)
     {
-        const double delta = actual[i].potential_v - reference[i].potential_v;
+        const double delta =
+            interpolateLegacyBenchmarkPotential(actual, coordinate.actual_time_s) -
+            interpolateLegacyBenchmarkPotential(reference, coordinate.reference_time_s);
         error_sum += delta * delta;
     }
 
+    const auto& terminal_coordinate = aligned_coordinates.back();
     metrics.valid = true;
-    metrics.compared_sample_count = count;
-    metrics.rmse_v = std::sqrt(error_sum / static_cast<double>(count));
+    metrics.compared_sample_count = aligned_coordinates.size();
+    metrics.rmse_v = std::sqrt(error_sum / static_cast<double>(aligned_coordinates.size()));
     metrics.terminal_potential_delta_v =
-        actual[count - 1].potential_v - reference[count - 1].potential_v;
-    metrics.terminal_time_delta_s = actual[count - 1].time_s - reference[count - 1].time_s;
+        interpolateLegacyBenchmarkPotential(actual, terminal_coordinate.actual_time_s) -
+        interpolateLegacyBenchmarkPotential(reference, terminal_coordinate.reference_time_s);
+    metrics.terminal_time_delta_s = actual.back().time_s - reference.back().time_s;
     metrics.time_to_equilibrium_delta_s =
         firstLegacyEquilibriumTimeS(actual, equilibrium_tolerance_v) -
         firstLegacyEquilibriumTimeS(reference, equilibrium_tolerance_v);

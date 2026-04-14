@@ -1,6 +1,38 @@
 # SCDAT Surface Charging Architecture
 
+## Alignment State
+The runtime is now organized around a neutral-named unified surface kernel:
+
+- `surface distribution`
+- `material interaction`
+- `surface DIDV assembly`
+- `surface-to-circuit mapping`
+- `implicit circuit kernel`
+
+`SCDATUnified`, `SurfacePic`, and `SurfacePicHybrid` now all terminate in that same kernel path.
+`LegacyBenchmark` remains separate as the reference reproduction / replay boundary.
+
 ## Runtime Layers
+
+### `SurfaceRuntimePlan`
+- compiles scenario-time inputs before runtime object construction
+- currently freezes:
+  - normalized `SurfaceChargingConfig`
+  - route / strategy / legacy execution selection
+  - solver policy flags
+  - bridge-enable decisions
+  - spectrum-to-plasma derived moments
+- must not grow step-time mutable state, history containers, or exporter-owned side effects
+
+### `SurfaceTransitionEngine`
+- evaluates step-time transition decisions before entering the main advance pipeline
+- currently resolves:
+  - legacy replay short-circuit
+  - reference-circuit mainline selection
+  - shared surface runtime enablement
+  - shared global coupled solve / live-PIC refresh / particle-transport coupling gates
+  - solver-policy-derived iteration behavior for the coupled runtime
+- should remain a decision layer, not become a second runtime state store
 
 ### `SurfaceScenarioOrchestrator`
 - assembles the runtime route
@@ -10,11 +42,14 @@
 - computes local current decomposition
 - owns benchmark or unified current logic
 - now also exposes patch-level calibration and live PIC diagnostics
+- exports `SurfaceKernelSnapshot` state so runtime routes can hand off distribution/current/DIDV
+  as one aligned kernel input object
 
 ### `SurfaceCircuitModel`
 - owns the body/patch/interface graph
 - supports node and branch metadata
 - supports implicit multi-node advancement
+- consumes explicit kernel-input linearization rather than ad hoc local derivative scattering
 
 ### `SurfaceCapacitanceModel`
 - owns capacitance-per-area logic
@@ -194,4 +229,28 @@ surface for tooling and dashboards:
 ## Benchmark Boundary
 - `LegacyBenchmark` remains the reference reproduction route
 - `SCDATUnified` remains the advanced framework route
+- `SurfacePic` and `SurfacePicHybrid` now share the same benchmark/export contracts as the unified
+  surface-kernel route
 - benchmark replay and execute modes are intentionally separate from unified prediction
+
+## Regression Contracts
+The regression boundary is now explicit rather than implicit:
+
+- `.benchmark_case.json`
+  - machine-readable benchmark-case contract
+  - carries reference datasets and validation metrics
+- `.simulation_artifact.json`
+  - machine-readable runtime artifact contract
+  - carries field / particle / surface metric families
+- `surface_reference_matrix.json`
+  - declares required metadata, benchmark metrics, and artifact metrics for aligned cases
+- `check_surface_reference_matrix_gate.py`
+  - executes the formal GEO / LEO / MATLAB reference-family gate
+
+The aligned benchmark metrics now cover:
+
+- patch/body potential RMSE
+- current-component RMSE families (`jnet`, `je`, `jse`, `jb`, `ji`, `jsi`, `jph`, `jcond`)
+- segmented transient / midrise / plateau metrics where available
+- negative-tail body-current metrics where available
+- final DIDV export via `final_current_derivative_a_per_m2_per_v`

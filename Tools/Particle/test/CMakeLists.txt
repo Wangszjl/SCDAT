@@ -26,3 +26,7 @@ add_executable(HighOrderParticlePusher_test HighOrderParticlePusher_test.cpp)
 target_link_libraries(HighOrderParticlePusher_test PRIVATE SCDAT::Tools::Particle SCDAT::Tools::Geometry GTest::gtest_main)
 gtest_discover_tests(HighOrderParticlePusher_test)
 
+add_executable(SurfaceDistributionFunction_test SurfaceDistributionFunction_test.cpp)
+target_link_libraries(SurfaceDistributionFunction_test PRIVATE SCDAT::Tools::Particle GTest::gtest_main)
+gtest_discover_tests(SurfaceDistributionFunction_test)
+

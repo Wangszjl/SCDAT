@@ -1,5 +1,13 @@
 #include "DensePlasmaSurfaceCharging.h"
 #include "SurfaceFlowCouplingModel.h"
+#include "../../Tools/Basic/include/ArrayMath3.h"
+#include "../../Tools/Coupling/include/SurfaceCurrentLinearizationKernel.h"
+#include "../../Tools/FieldSolver/include/SurfaceBarrierModels.h"
+#include "../../Tools/FieldSolver/include/SurfaceFieldVolumeBridge.h"
+#include "../../Tools/Material/include/SurfaceMaterialModel.h"
+#include "../../Tools/Mesh/include/SurfaceVolumeBridgeTypes.h"
+#include "../../Tools/Particle/include/SurfaceDistributionFunction.h"
+#include "../../Tools/Solver/include/SurfaceSolverFacade.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,8 +31,6 @@ namespace SurfaceCharging
 namespace
 {
 constexpr double kElementaryCharge = 1.602176634e-19;
-constexpr double kBoltzmannEvPerK = 8.617333262145e-5;
-constexpr double kRichardsonConstant = 1.20173e6;
 constexpr double kEpsilon0 = 8.8541878128e-12;
 constexpr double kPi = 3.14159265358979323846;
 
@@ -33,6 +39,31 @@ using Coupling::SurfaceCircuitBranch;
 using Coupling::SurfaceCircuitCoupling;
 using Coupling::SurfaceCircuitLinearization;
 using Coupling::SurfaceCircuitNode;
+using Coupling::SurfaceCurrentLinearizationKernel;
+using Coupling::SurfaceCurrentLinearizationNode;
+using FieldSolver::SecondaryRecollectionScaler;
+using FieldSolver::SurfaceBarrierState;
+using FieldSolver::VariableBarrierScaler;
+using Material::BasicSurfaceMaterialModel;
+using Material::ErosionSurfaceMaterialModel;
+using Material::SurfaceMaterialModelVariant;
+using Particle::BiMaxwellianFluxDistribution;
+using Particle::IsotropicMaxwellianFluxDistribution;
+using Particle::SurfaceDistributionFunction;
+using Particle::SurfaceFluxMoments;
+using Particle::TabulatedSurfaceDistributionFunction;
+using Mesh::ExternalSurfaceProjectionInput;
+using Mesh::ExternalVolumeMeshCellFaceInput;
+using Mesh::ExternalVolumeMeshCellInput;
+using Mesh::ExternalVolumeMeshFaceInput;
+using Mesh::ExternalVolumeMeshNeighborInput;
+using SCDAT::Basic::add3;
+using SCDAT::Basic::dot3;
+using SCDAT::Basic::norm3;
+using SCDAT::Basic::normalize3;
+using SCDAT::Basic::scale3;
+using SCDAT::Basic::squaredNorm3;
+using SCDAT::Basic::subtract3;
 
 bool isReferenceRegime(const SurfaceChargingConfig& config)
 {
@@ -61,6 +92,32 @@ std::string patchNodeName(const std::string& patch_id)
     return "patch:" + patch_id;
 }
 
+Coupling::SurfaceCurrentComponentState makeCouplingComponentState(const SurfaceCurrents& currents)
+{
+    Coupling::SurfaceCurrentComponentState components;
+    components.electron_collection_a = currents.electron_current_a_per_m2;
+    components.ion_collection_a = currents.ion_current_a_per_m2;
+    components.secondary_electron_emission_a = currents.secondary_emission_a_per_m2;
+    components.ion_secondary_electron_emission_a =
+        currents.ion_secondary_emission_a_per_m2;
+    components.backscatter_emission_a = currents.backscatter_emission_a_per_m2;
+    components.photoelectron_emission_a = currents.photo_emission_a_per_m2;
+    components.conduction_a = currents.conduction_current_a_per_m2;
+    return components;
+}
+
+void applyCouplingComponentState(const Coupling::SurfaceCurrentComponentState& components,
+                                 SurfaceCurrents& currents)
+{
+    currents.electron_current_a_per_m2 = components.electron_collection_a;
+    currents.ion_current_a_per_m2 = components.ion_collection_a;
+    currents.secondary_emission_a_per_m2 = components.secondary_electron_emission_a;
+    currents.ion_secondary_emission_a_per_m2 = components.ion_secondary_electron_emission_a;
+    currents.backscatter_emission_a_per_m2 = components.backscatter_emission_a;
+    currents.photo_emission_a_per_m2 = components.photoelectron_emission_a;
+    currents.conduction_current_a_per_m2 = components.conduction_a;
+}
+
 std::string benchmarkSourceName(SurfaceBenchmarkSource source)
 {
     switch (source)
@@ -82,8 +139,32 @@ std::string benchmarkSourceName(SurfaceBenchmarkSource source)
 
 std::string runtimeRouteName(SurfaceRuntimeRoute route)
 {
-    return route == SurfaceRuntimeRoute::LegacyBenchmark ? "LegacyBenchmark"
-                                                         : "SCDATUnified";
+    switch (route)
+    {
+    case SurfaceRuntimeRoute::SurfacePic:
+        return "SurfacePic";
+    case SurfaceRuntimeRoute::SurfacePicHybrid:
+        return "SurfacePicHybrid";
+    case SurfaceRuntimeRoute::LegacyBenchmark:
+        return "LegacyBenchmark";
+    case SurfaceRuntimeRoute::SCDATUnified:
+    default:
+        return "SCDATUnified";
+    }
+}
+
+std::string surfacePicStrategyName(SurfacePicStrategy strategy)
+{
+    switch (strategy)
+    {
+    case SurfacePicStrategy::SurfacePicDirect:
+        return "SurfacePicDirect";
+    case SurfacePicStrategy::SurfacePicHybridReference:
+        return "SurfacePicHybridReference";
+    case SurfacePicStrategy::SurfacePicCalibrated:
+    default:
+        return "SurfacePicCalibrated";
+    }
 }
 
 bool hasStructuredTopologyInput(const SurfaceChargingConfig& config)
@@ -707,126 +788,6 @@ struct PseudoVolumePoissonSolution
     std::size_t matrix_nonzeros = 0;
 };
 
-struct LinearSolveResult
-{
-    std::vector<double> solution;
-    int iterations = 0;
-    bool converged = false;
-    double residual_norm = 0.0;
-};
-
-struct SparseLinearEntry
-{
-    std::size_t column = 0;
-    double value = 0.0;
-};
-
-struct SparseLinearRow
-{
-    double diagonal = 0.0;
-    std::vector<SparseLinearEntry> off_diagonal;
-};
-
-struct ExternalVolumeMeshCellInput
-{
-    std::string cell_id;
-    std::string node_id;
-    std::string boundary_group_id;
-    double node_area_m2 = 0.0;
-    double characteristic_length_m = 0.0;
-    double center_x_m = 0.0;
-    double center_y_m = 0.0;
-    double center_z_m = 0.0;
-    double cell_volume_m3 = 0.0;
-    double initial_potential_v = 0.0;
-    double initial_charge_density_c_per_m3 = 0.0;
-};
-
-struct ExternalVolumeMeshNeighborInput
-{
-    std::string source_cell_id;
-    std::string target_cell_id;
-    double conductance_s = 0.0;
-    double resistance_ohm = 0.0;
-    double shared_face_area_m2 = 0.0;
-    double face_distance_m = 0.0;
-    double permittivity_scale = 1.0;
-    double face_center_x_m = 0.0;
-    double face_center_y_m = 0.0;
-    double face_center_z_m = 0.0;
-};
-
-struct ExternalVolumeMeshFaceInput
-{
-    std::string face_id;
-    std::string boundary_group_id;
-    std::string node_id;
-    double area_m2 = 0.0;
-    double center_x_m = 0.0;
-    double center_y_m = 0.0;
-    double center_z_m = 0.0;
-    double normal_x = 1.0;
-    double normal_y = 0.0;
-    double normal_z = 0.0;
-};
-
-struct ExternalVolumeMeshCellFaceInput
-{
-    std::string cell_id;
-    std::string face_id;
-    std::string role;
-    double projection_weight = 1.0;
-};
-
-struct ExternalSurfaceProjectionInput
-{
-    std::string node_id;
-    std::string cell_id;
-    double surface_to_volume_weight = 1.0;
-    double volume_to_surface_weight = 1.0;
-};
-
-double squaredNorm3(const std::array<double, 3>& value)
-{
-    return value[0] * value[0] + value[1] * value[1] + value[2] * value[2];
-}
-
-double norm3(const std::array<double, 3>& value)
-{
-    return std::sqrt(squaredNorm3(value));
-}
-
-std::array<double, 3> subtract3(const std::array<double, 3>& a, const std::array<double, 3>& b)
-{
-    return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
-}
-
-std::array<double, 3> add3(const std::array<double, 3>& a, const std::array<double, 3>& b)
-{
-    return {a[0] + b[0], a[1] + b[1], a[2] + b[2]};
-}
-
-std::array<double, 3> scale3(const std::array<double, 3>& value, double scale)
-{
-    return {value[0] * scale, value[1] * scale, value[2] * scale};
-}
-
-std::array<double, 3> normalize3(const std::array<double, 3>& value,
-                                 const std::array<double, 3>& fallback)
-{
-    const double magnitude = norm3(value);
-    if (magnitude <= 1.0e-15)
-    {
-        return fallback;
-    }
-    return scale3(value, 1.0 / magnitude);
-}
-
-double dot3(const std::array<double, 3>& a, const std::array<double, 3>& b)
-{
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
 std::array<double, 3> defaultPseudoCellCenter(const SurfaceCircuitModel* circuit_model,
                                               std::size_t node_index)
 {
@@ -1151,193 +1112,6 @@ std::vector<ExternalVolumeMeshCellFaceInput> loadExternalVolumeMeshCellFaces(
         search_pos = object_end + 1;
     }
     return entries;
-}
-
-std::vector<double> solveDenseLinearSystem(std::vector<std::vector<double>> matrix,
-                                           std::vector<double> rhs)
-{
-    const std::size_t n = rhs.size();
-    if (n == 0)
-    {
-        return {};
-    }
-
-    for (std::size_t pivot = 0; pivot < n; ++pivot)
-    {
-        std::size_t best_row = pivot;
-        double best_value = std::abs(matrix[pivot][pivot]);
-        for (std::size_t row = pivot + 1; row < n; ++row)
-        {
-            const double candidate = std::abs(matrix[row][pivot]);
-            if (candidate > best_value)
-            {
-                best_value = candidate;
-                best_row = row;
-            }
-        }
-        if (best_row != pivot)
-        {
-            std::swap(matrix[pivot], matrix[best_row]);
-            std::swap(rhs[pivot], rhs[best_row]);
-        }
-
-        const double diagonal = matrix[pivot][pivot];
-        if (std::abs(diagonal) < 1.0e-20)
-        {
-            continue;
-        }
-
-        for (std::size_t row = pivot + 1; row < n; ++row)
-        {
-            const double factor = matrix[row][pivot] / diagonal;
-            if (std::abs(factor) < 1.0e-20)
-            {
-                continue;
-            }
-            for (std::size_t column = pivot; column < n; ++column)
-            {
-                matrix[row][column] -= factor * matrix[pivot][column];
-            }
-            rhs[row] -= factor * rhs[pivot];
-        }
-    }
-
-    std::vector<double> solution(n, 0.0);
-    for (std::size_t back = n; back-- > 0;)
-    {
-        double value = rhs[back];
-        for (std::size_t column = back + 1; column < n; ++column)
-        {
-            value -= matrix[back][column] * solution[column];
-        }
-        const double diagonal = matrix[back][back];
-        solution[back] = std::abs(diagonal) > 1.0e-20 ? value / diagonal : 0.0;
-    }
-    return solution;
-}
-
-double denseLinearResidualNorm(const std::vector<std::vector<double>>& matrix,
-                               const std::vector<double>& rhs,
-                               const std::vector<double>& solution)
-{
-    if (matrix.size() != rhs.size() || rhs.size() != solution.size())
-    {
-        return 0.0;
-    }
-    double sum = 0.0;
-    for (std::size_t i = 0; i < rhs.size(); ++i)
-    {
-        double residual = rhs[i];
-        for (std::size_t j = 0; j < solution.size(); ++j)
-        {
-            residual -= matrix[i][j] * solution[j];
-        }
-        sum += residual * residual;
-    }
-    return std::sqrt(sum / std::max<std::size_t>(1, rhs.size()));
-}
-
-std::vector<SparseLinearRow> buildSparseLinearRows(const std::vector<std::vector<double>>& matrix,
-                                                   std::size_t* nonzero_count)
-{
-    std::vector<SparseLinearRow> rows(matrix.size());
-    std::size_t nnz = 0;
-    for (std::size_t i = 0; i < matrix.size(); ++i)
-    {
-        rows[i].diagonal = i < matrix[i].size() ? matrix[i][i] : 0.0;
-        for (std::size_t j = 0; j < matrix[i].size(); ++j)
-        {
-            if (j == i)
-            {
-                if (std::abs(matrix[i][j]) > 1.0e-20)
-                {
-                    ++nnz;
-                }
-                continue;
-            }
-            if (std::abs(matrix[i][j]) <= 1.0e-20)
-            {
-                continue;
-            }
-            rows[i].off_diagonal.push_back({j, matrix[i][j]});
-            ++nnz;
-        }
-    }
-    if (nonzero_count != nullptr)
-    {
-        *nonzero_count = nnz;
-    }
-    return rows;
-}
-
-double sparseLinearResidualNorm(const std::vector<SparseLinearRow>& rows,
-                                const std::vector<double>& rhs,
-                                const std::vector<double>& solution)
-{
-    if (rows.size() != rhs.size() || rhs.size() != solution.size())
-    {
-        return 0.0;
-    }
-    double sum = 0.0;
-    for (std::size_t i = 0; i < rhs.size(); ++i)
-    {
-        double residual = rhs[i] - rows[i].diagonal * solution[i];
-        for (const auto& entry : rows[i].off_diagonal)
-        {
-            residual -= entry.value * solution[entry.column];
-        }
-        sum += residual * residual;
-    }
-    return std::sqrt(sum / std::max<std::size_t>(1, rhs.size()));
-}
-
-LinearSolveResult solveIterativeLinearSystem(const std::vector<std::vector<double>>& matrix,
-                                             const std::vector<double>& rhs,
-                                             const std::vector<double>& initial_guess,
-                                             int max_iterations, double tolerance,
-                                             double relaxation)
-{
-    const std::size_t n = rhs.size();
-    if (n == 0)
-    {
-        return {};
-    }
-
-    std::size_t sparse_nnz = 0;
-    const auto sparse_rows = buildSparseLinearRows(matrix, &sparse_nnz);
-    const double effective_tolerance = std::max(1.0e-12, tolerance);
-    const double relaxation_factor = std::clamp(relaxation, 0.2, 1.0);
-    LinearSolveResult result;
-    result.solution = initial_guess.size() == n ? initial_guess : std::vector<double>(n, 0.0);
-    for (int iteration = 0; iteration < std::max(1, max_iterations); ++iteration)
-    {
-        double max_delta = 0.0;
-        for (std::size_t i = 0; i < n; ++i)
-        {
-            const double diagonal = sparse_rows[i].diagonal;
-            if (std::abs(diagonal) < 1.0e-20)
-            {
-                continue;
-            }
-            double sigma = rhs[i];
-            for (const auto& entry : sparse_rows[i].off_diagonal)
-            {
-                sigma -= entry.value * result.solution[entry.column];
-            }
-            const double updated = sigma / diagonal;
-            max_delta = std::max(max_delta, std::abs(updated - result.solution[i]));
-            result.solution[i] =
-                relaxation_factor * updated + (1.0 - relaxation_factor) * result.solution[i];
-        }
-        result.iterations = iteration + 1;
-        if (max_delta <= effective_tolerance)
-        {
-            result.converged = true;
-            break;
-        }
-    }
-    result.residual_norm = sparseLinearResidualNorm(sparse_rows, rhs, result.solution);
-    return result;
 }
 
 PseudoVolumePoissonSolution solvePseudoVolumePoisson(const SurfaceChargingConfig& config,
@@ -1775,18 +1549,23 @@ PseudoVolumePoissonSolution solvePseudoVolumePoisson(const SurfaceChargingConfig
         }
         solution.matrix_nonzeros = matrix_nonzeros;
 
-        const bool auto_prefers_iterative =
-            cell_count >= 6 || !external_cells.empty() || !external_cell_faces.empty();
-        const bool use_iterative_solver =
-            config.volume_linear_solver_policy == VolumeLinearSolverPolicy::IterativeOnly ||
-            (config.volume_linear_solver_policy == VolumeLinearSolverPolicy::Auto &&
-             auto_prefers_iterative);
-        solution.solver_mode = use_iterative_solver ? "iterative" : "dense";
+        Solver::VolumeLinearSolverRoutingInput routing_input;
+        routing_input.system_size = cell_count;
+        routing_input.has_external_cells = !external_cells.empty();
+        routing_input.has_external_cell_faces = !external_cell_faces.empty();
+        routing_input.iterative_only =
+            config.volume_linear_solver_policy == VolumeLinearSolverPolicy::IterativeOnly;
+        routing_input.dense_only =
+            config.volume_linear_solver_policy == VolumeLinearSolverPolicy::DenseOnly;
+        const auto solver_routing = Solver::resolveVolumeLinearSolverRouting(routing_input);
+
+        const bool use_iterative_solver = solver_routing.use_iterative_solver;
+        solution.solver_mode = solver_routing.solver_mode;
         if (use_iterative_solver)
         {
-            auto linear_result = solveIterativeLinearSystem(matrix, rhs, previous_iteration_potentials_v,
-                                                            linear_max_iterations, linear_tolerance,
-                                                            linear_relaxation);
+            auto linear_result = Solver::solveIterativeLinearSystem(
+                matrix, rhs, previous_iteration_potentials_v, linear_max_iterations,
+                linear_tolerance, linear_relaxation);
             solved_potentials_v = std::move(linear_result.solution);
             last_linear_iterations = linear_result.iterations;
             last_linear_residual_norm = linear_result.residual_norm;
@@ -1794,10 +1573,12 @@ PseudoVolumePoissonSolution solvePseudoVolumePoisson(const SurfaceChargingConfig
         }
         else
         {
-            solved_potentials_v = solveDenseLinearSystem(matrix, rhs);
-            last_linear_iterations = solved_potentials_v.empty() ? 0 : 1;
-            last_linear_residual_norm = denseLinearResidualNorm(matrix, rhs, solved_potentials_v);
-            last_linear_converged = !solved_potentials_v.empty();
+            auto linear_result =
+                Solver::solveDenseLinearSystemWithResidual(std::move(matrix), std::move(rhs));
+            solved_potentials_v = std::move(linear_result.solution);
+            last_linear_iterations = linear_result.solved ? 1 : 0;
+            last_linear_residual_norm = linear_result.residual_norm;
+            last_linear_converged = linear_result.solved;
         }
         if (solved_potentials_v.size() != cell_count)
         {
@@ -1928,6 +1709,15 @@ PseudoVolumePoissonSolution solvePseudoVolumePoisson(const SurfaceChargingConfig
     }
 
     return solution;
+}
+
+bool isExplicitLegacyRegressionContract(const SurfaceChargingConfig& config)
+{
+    return config.runtime_route == SurfaceRuntimeRoute::LegacyBenchmark &&
+           config.legacy_input_adapter_kind != SurfaceLegacyInputAdapterKind::None &&
+           config.benchmark_source != SurfaceBenchmarkSource::None &&
+           config.current_algorithm_mode == SurfaceCurrentAlgorithmMode::LegacyRefCompatible &&
+           config.benchmark_mode == SurfaceBenchmarkMode::LegacyRefCompatible;
 }
 
 SurfaceChargingConfig normalizeTopologyConfig(const SurfaceChargingConfig& input)
@@ -2114,6 +1904,38 @@ SurfaceChargingConfig normalizeTopologyConfig(const SurfaceChargingConfig& input
         normalized.default_surface_physics.material = normalized.material;
     }
 
+    if (normalized.runtime_route == SurfaceRuntimeRoute::LegacyBenchmark &&
+        !isExplicitLegacyRegressionContract(normalized))
+    {
+        normalized.runtime_route = SurfaceRuntimeRoute::SCDATUnified;
+        normalized.legacy_input_adapter_kind = SurfaceLegacyInputAdapterKind::None;
+        normalized.current_algorithm_mode =
+            SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+        normalized.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+    }
+
+    if (normalized.runtime_route == SurfaceRuntimeRoute::SurfacePic ||
+        normalized.runtime_route == SurfaceRuntimeRoute::SurfacePicHybrid)
+    {
+        normalized.enable_live_pic_window = true;
+        normalized.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+        normalized.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+        if (normalized.live_pic_collision_cross_section_set_id.empty())
+        {
+            normalized.live_pic_collision_cross_section_set_id = "surface_pic_v1";
+        }
+        if (normalized.runtime_route == SurfaceRuntimeRoute::SurfacePicHybrid ||
+            normalized.surface_pic_strategy != SurfacePicStrategy::SurfacePicDirect)
+        {
+            normalized.enable_pic_calibration = true;
+        }
+    }
+    else if (normalized.runtime_route != SurfaceRuntimeRoute::LegacyBenchmark)
+    {
+        normalized.current_algorithm_mode = SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+        normalized.benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
+    }
+
     return normalized;
 }
 
@@ -2210,684 +2032,141 @@ double safeExp(double exponent)
     return std::exp(std::clamp(exponent, -200.0, 50.0));
 }
 
-double emittedElectronEscapeProbability(double surface_potential_v, double characteristic_energy_ev)
+double roleElectronCollectionScale(ReferenceSurfaceRole role,
+                                   const Material::MaterialProperty& material)
 {
-    if (surface_potential_v <= 0.0)
+    if (role != ReferenceSurfaceRole::Body)
     {
         return 1.0;
     }
-
-    const double escape_energy = std::max(1.0e-3, characteristic_energy_ev);
-    return std::clamp(safeExp(-surface_potential_v / escape_energy), 0.0, 1.0);
+    return std::max(0.0, material.getScalarProperty("body_electron_collection_scale", 1.0));
 }
 
-double computePatchFieldEmission(const SurfaceChargingConfig& config,
-                                 const SurfaceModelRuntimeState& state)
+double roleElectronCollectionCoefficient(ReferenceSurfaceRole role,
+                                         const SurfaceChargingConfig& effective_config,
+                                         const Material::MaterialProperty& material)
 {
-    const double work_function = std::max(0.1, config.material.getWorkFunctionEv());
-    const double sheath_length = std::max(1.0e-6, state.effective_sheath_length_m);
-    const double reference_field_v_per_m =
-        std::abs(state.reference_plasma_potential_v - state.patch_potential_v) / sheath_length;
-    const double local_field_v_per_m =
-        std::max(std::abs(state.normal_electric_field_v_per_m), reference_field_v_per_m);
-    if (local_field_v_per_m <= 1.0e7)
+    const double base_coefficient =
+        std::max(0.0, effective_config.electron_collection_coefficient);
+    if (role != ReferenceSurfaceRole::Body)
     {
-        return 0.0;
+        return base_coefficient;
     }
-
-    const double fn_prefactor = 1.54e-6 * local_field_v_per_m * local_field_v_per_m / work_function;
-    const double fn_exponent =
-        -6.83e9 * std::pow(work_function, 1.5) / std::max(1.0e6, local_field_v_per_m);
-    return fn_prefactor * safeExp(fn_exponent);
+    return std::max(
+        0.0, material.getScalarProperty("body_electron_collection_coefficient", base_coefficient)) *
+           roleElectronCollectionScale(role, material);
 }
 
-double computePatchThermionicEmission(const SurfaceChargingConfig& config,
-                                      const SurfaceModelRuntimeState& state)
+double bodyPhotoEmissionScale(const Material::MaterialProperty& material)
 {
-    const double work_function = std::max(0.1, config.material.getWorkFunctionEv());
-    const double thermal_energy_ev =
-        std::max(1.0e-6, kBoltzmannEvPerK * config.emission.surface_temperature_k);
-    return kRichardsonConstant * config.emission.surface_temperature_k *
-           config.emission.surface_temperature_k * safeExp(-work_function / thermal_energy_ev) *
-           emittedElectronEscapeProbability(state.patch_potential_v,
-                                            std::max(1.0e-3, thermal_energy_ev));
+    return std::max(0.0, material.getScalarProperty("body_photo_emission_scale", 1.0));
 }
 
-double legacyErfApprox(double x)
+double bodyPhotoelectronTemperatureEv(const Material::MaterialProperty& material,
+                                      double fallback_ev)
 {
-    return std::erf(x);
+    return std::max(1.0e-3,
+                    material.getScalarProperty("body_photoelectron_temperature_ev", fallback_ev));
 }
 
-double legacyThermalCurrentDensity(double density_m3, double temperature_ev, double mass_kg)
+void applyBodyMaterialOverrides(const Material::MaterialProperty& source_material,
+                                Material::MaterialProperty& body_material)
 {
-    return kElementaryCharge * std::max(0.0, density_m3) *
-           std::sqrt(std::max(1.0e-6, temperature_ev) * kElementaryCharge /
-                     (2.0 * kPi * std::max(1.0e-30, mass_kg)));
-}
-
-double legacyWhippleYield(double peak_energy_ev, double peak_yield, double incident_energy_ev)
-{
-    if (incident_energy_ev <= 10.0)
-    {
-        return 0.0;
-    }
-    const double q = 2.28 * std::pow(incident_energy_ev / std::max(1.0, peak_energy_ev), 1.35);
-    if (q <= 1.0e-12 || incident_energy_ev <= 0.0)
-    {
-        return 0.0;
-    }
-    return 2.228 * (q - 1.0 + std::exp(-q)) / q * peak_yield *
-           std::pow(std::max(1.0, peak_energy_ev) / incident_energy_ev, 0.35);
-}
-
-double legacySimsYield(double peak_energy_ev, double peak_yield, double exponent_n,
-                       double incident_energy_ev)
-{
-    if (incident_energy_ev <= 10.0)
-    {
-        return 0.0;
-    }
-    const double n = std::max(1.05, exponent_n);
-    double xm = 2.5;
-    for (int i = 1; i < 10001; ++i)
-    {
-        const double x = 0.5 + static_cast<double>(i) * (2.5 - 0.5) / 10000.0;
-        const double y = (1.0 - 1.0 / n) * (std::exp(x) - 1.0);
-        if (std::abs(x - y) <= 1.0e-3)
-        {
-            xm = x;
-            break;
-        }
-    }
-    const double x = xm * std::pow(incident_energy_ev / std::max(1.0, peak_energy_ev), n);
-    if (x <= 1.0e-12 || std::abs(1.0 - std::exp(-xm)) < 1.0e-12)
-    {
-        return 0.0;
-    }
-    return peak_yield / (1.0 - std::exp(-xm)) *
-           std::pow(std::max(1.0, peak_energy_ev) / incident_energy_ev, n - 1.0) * 2.0 *
-           (x + std::exp(-x) - 1.0) / x;
-}
-
-double legacyKatzYield(const Material::MaterialProperty& material, double incident_energy_ev)
-{
-    if (incident_energy_ev <= 1.0e-9)
-    {
-        return 0.0;
-    }
-    const double peak_energy_ev =
-        std::max(1.0, material.getScalarProperty("secondary_yield_peak_energy_ev", 400.0));
-    const double peak_yield = std::max(0.0, material.getSecondaryElectronYield());
-    const double r1 = material.getScalarProperty("katz_r1", 0.85);
-    const double n1 = material.getScalarProperty("katz_n1", 0.35);
-    const double r2 = material.getScalarProperty("katz_r2", 0.12);
-    const double n2 = material.getScalarProperty("katz_n2", 1.05);
-    const double energy_kev = incident_energy_ev * 1.0e-3;
-    const double peak_energy_kev = peak_energy_ev * 1.0e-3;
-    const double range = r1 * std::pow(energy_kev, n1) + r2 * std::pow(energy_kev, n2);
-    const double peak_range =
-        r1 * std::pow(peak_energy_kev, n1) + r2 * std::pow(peak_energy_kev, n2);
-    if (range <= 1.0e-12 || peak_range <= 1.0e-12)
-    {
-        return 0.0;
-    }
-    const double attenuation = std::exp(-std::pow(range / peak_range - 1.0, 2.0));
-    const double rolloff =
-        1.0 / (1.0 + std::pow(incident_energy_ev / std::max(1.0, 3.0 * peak_energy_ev), 0.7));
-    return peak_yield * attenuation * (0.55 + 0.45 * rolloff);
+    body_material.setWorkFunctionEv(
+        std::max(0.0, source_material.getScalarProperty("body_work_function_ev",
+                                                        body_material.getWorkFunctionEv())));
+    body_material.setSecondaryElectronYield(std::max(
+        0.0, source_material.getScalarProperty("body_secondary_electron_yield",
+                                               body_material.getSecondaryElectronYield())));
+    body_material.setScalarProperty(
+        "atomic_number",
+        std::max(0.0, source_material.getScalarProperty(
+                          "body_atomic_number",
+                          body_material.getScalarProperty("atomic_number", 13.0))));
+    body_material.setScalarProperty(
+        "secondary_yield_peak_energy_ev",
+        std::max(1.0, source_material.getScalarProperty(
+                          "body_secondary_yield_peak_energy_ev",
+                          body_material.getScalarProperty("secondary_yield_peak_energy_ev", 300.0))));
+    body_material.setScalarProperty(
+        "secondary_emission_escape_energy_ev",
+        std::max(1.0e-3, source_material.getScalarProperty(
+                               "body_secondary_emission_escape_energy_ev",
+                               body_material.getScalarProperty("secondary_emission_escape_energy_ev",
+                                                               2.0))));
+    body_material.setScalarProperty(
+        "ion_secondary_yield",
+        std::max(0.0, source_material.getScalarProperty(
+                          "body_ion_secondary_yield",
+                          body_material.getScalarProperty("ion_secondary_yield", 0.08))));
+    body_material.setScalarProperty(
+        "ion_secondary_peak_energy_kev",
+        std::max(1.0e-6, source_material.getScalarProperty(
+                             "body_ion_secondary_peak_energy_kev",
+                             body_material.getScalarProperty("ion_secondary_peak_energy_kev", 0.35))));
+    body_material.setScalarProperty(
+        "sims_exponent_n",
+        std::max(1.0, source_material.getScalarProperty(
+                          "body_sims_exponent_n",
+                          body_material.getScalarProperty("sims_exponent_n", 1.6))));
+    body_material.setScalarProperty(
+        "katz_r1",
+        source_material.getScalarProperty("body_katz_r1",
+                                          body_material.getScalarProperty("katz_r1", 80.0)));
+    body_material.setScalarProperty(
+        "katz_n1",
+        source_material.getScalarProperty("body_katz_n1",
+                                          body_material.getScalarProperty("katz_n1", 0.6)));
+    body_material.setScalarProperty(
+        "katz_r2",
+        source_material.getScalarProperty("body_katz_r2",
+                                          body_material.getScalarProperty("katz_r2", 200.0)));
+    body_material.setScalarProperty(
+        "katz_n2",
+        source_material.getScalarProperty("body_katz_n2",
+                                          body_material.getScalarProperty("katz_n2", 1.7)));
 }
 
 double legacySeeYield(const SurfaceChargingConfig& config, const Material::MaterialProperty& material,
                       double incident_energy_ev)
 {
-    const double peak_energy =
-        std::max(1.0, material.getScalarProperty("secondary_yield_peak_energy_ev", 300.0));
-    const double peak_yield = std::max(0.0, material.getSecondaryElectronYield());
+    Material::LegacySecondaryYieldModel model =
+        Material::LegacySecondaryYieldModel::Whipple;
     switch (config.reference_see_model)
     {
     case SecondaryElectronEmissionModel::Whipple:
-        return legacyWhippleYield(peak_energy, peak_yield, incident_energy_ev);
+        model = Material::LegacySecondaryYieldModel::Whipple;
+        break;
     case SecondaryElectronEmissionModel::Sims:
-        return legacySimsYield(peak_energy, peak_yield,
-                               material.getScalarProperty("sims_exponent_n", 1.6),
-                               incident_energy_ev);
+        model = Material::LegacySecondaryYieldModel::Sims;
+        break;
     case SecondaryElectronEmissionModel::Katz:
-        return legacyKatzYield(material, incident_energy_ev);
+        model = Material::LegacySecondaryYieldModel::Katz;
+        break;
     }
-    return 0.0;
+    return Material::evaluateLegacySecondaryElectronYield(
+        material, model, incident_energy_ev,
+        material.getScalarProperty("sims_exponent_n", 1.6));
 }
 
-double legacyIonSecondaryYield(const Material::MaterialProperty& material, double incident_energy_ev)
-{
-    const double peak_energy_kev =
-        std::max(1.0e-6, material.getScalarProperty("ion_secondary_peak_energy_kev", 0.35));
-    const double energy_kev = std::max(0.0, incident_energy_ev * 1.0e-3);
-    const double peak_yield =
-        std::max(0.0, material.getScalarProperty("ion_secondary_yield", 0.08));
-    if (energy_kev <= 0.0)
-    {
-        return 0.0;
-    }
-    if (energy_kev < 0.476)
-    {
-        return 0.5 * std::pow(2.0, -2.0) * peak_yield * std::sqrt(energy_kev) /
-               (1.0 + energy_kev / peak_energy_kev);
-    }
-    if (energy_kev <= 10.0)
-    {
-        const double exponent = -(1.0 / energy_kev - 0.1);
-        return (2.0 - (1.0 / energy_kev - 0.1) / 2.0) * std::pow(2.0, exponent) * peak_yield *
-               std::sqrt(energy_kev) / (1.0 + energy_kev / peak_energy_kev);
-    }
-    return 2.0 * peak_yield * std::sqrt(energy_kev) / (1.0 + energy_kev / peak_energy_kev);
-}
-
-double legacyBackscatterYield(const Material::MaterialProperty& material, double incident_energy_ev)
-{
-    const double z = material.getScalarProperty("atomic_number", 13.0);
-    const double es = incident_energy_ev;
-    double ybe = 0.0;
-    if (es < 50.0)
-    {
-        ybe = 0.0;
-    }
-    else if (es < 1.0e3)
-    {
-        ybe = 0.3338 * std::log(es / 50.0) *
-              (1.0 - std::pow(0.7358, 0.037 * z) + 0.1 * std::exp(-es / 5000.0));
-    }
-    else if (es < 1.0e4)
-    {
-        ybe = 1.0 - std::pow(0.7358, 0.037 * z) + 0.1 * std::exp(-es / 5000.0);
-    }
-    else if (es < 1.0e5)
-    {
-        ybe = 1.0 - std::pow(0.7358, 0.037 * z);
-    }
-    if (ybe <= 0.0 || std::abs(std::log(ybe)) < 1.0e-12)
-    {
-        return 0.0;
-    }
-    return 2.0 * (1.0 - ybe + ybe * std::log(ybe)) / (std::log(ybe) * std::log(ybe));
-}
-
-double legacyRamPatchCurrentDensity(double surface_potential_v, double ion_density_m3,
-                                    double ion_temperature_ev, double ion_mass_amu,
-                                    double projected_flow_speed_m_per_s)
-{
-    const double ni_cm3 = std::max(0.0, ion_density_m3 * 1.0e-6);
-    const double ti_ev = std::max(1.0e-6, ion_temperature_ev);
-    const double wt = 13.84 * std::sqrt(ti_ev / std::max(1.0, ion_mass_amu));
-    const double qd = projected_flow_speed_m_per_s * 1.0e-3 / std::max(1.0e-12, wt);
-    const double qv = std::sqrt(std::abs(surface_potential_v) / ti_ev);
-    double current_na_per_m2 = 0.08011 * ni_cm3 * wt;
-    if (surface_potential_v >= 0.0)
-    {
-        current_na_per_m2 *=
-            0.5642 * std::exp(-(qd - qv) * (qd - qv)) + qd + qd * legacyErfApprox(qd - qv);
-    }
-    else
-    {
-        current_na_per_m2 *= 0.5642 * std::exp(-qd * qd) + qd + qd * legacyErfApprox(qd);
-    }
-    return std::max(0.0, current_na_per_m2) * 1.0e-9;
-}
-
-double legacyRamBodyCurrentDensity(double surface_potential_v, double ion_density_m3,
-                                   double ion_temperature_ev, double ion_mass_amu,
-                                   double flow_speed_m_per_s)
-{
-    const double ni_cm3 = std::max(0.0, ion_density_m3 * 1.0e-6);
-    const double ti_ev = std::max(1.0e-6, ion_temperature_ev);
-    const double wt = 13.84 * std::sqrt(ti_ev / std::max(1.0, ion_mass_amu));
-    const double qd = std::max(1.0e-12, flow_speed_m_per_s * 1.0e-3 / std::max(1.0e-12, wt));
-    const double qv = std::sqrt(std::abs(surface_potential_v) / ti_ev);
-    double current_na_per_m2 = 0.0;
-    if (surface_potential_v >= 0.0)
-    {
-        current_na_per_m2 =
-            0.5642 / qd *
-                ((qv + qd) * std::exp(-(qv - qd) * (qv - qd)) -
-                 (qv - qd) * std::exp(-(qv + qd) * (qv + qd))) +
-            (0.5 / qd + qd - qv * qv / qd) *
-                (legacyErfApprox(qv + qd) - legacyErfApprox(qv - qd));
-        current_na_per_m2 *= 0.02003 * ni_cm3 * wt;
-    }
-    else
-    {
-        current_na_per_m2 = 0.04005 * ni_cm3 * wt *
-                            (0.5642 * std::exp(-qd * qd) +
-                             (qd + 0.5 / qd) * legacyErfApprox(qd));
-        current_na_per_m2 *= 4.0;
-    }
-    return std::max(0.0, current_na_per_m2) * 1.0e-9;
-}
-
-struct LegacyPopulation
-{
-    double density_m3 = 0.0;
-    double temperature_ev = 0.0;
-    double mass_amu = 1.0;
-};
-
-struct LegacyLeoFluxTables
-{
-    std::vector<double> energy_ev;
-    std::vector<double> width_ev;
-    std::vector<double> spectrum_energy_grid_ev;
-    std::vector<double> smoothed_electron_flux;
-    std::vector<double> smoothed_ion_flux;
-    std::vector<double> total_electron_flux;
-    std::vector<double> spectrum_electron_flux;
-    std::vector<double> total_ion_flux;
-    std::vector<double> spectrum_ion_flux;
-    std::vector<std::vector<double>> electron_component_flux;
-    std::vector<std::vector<double>> ion_component_flux;
-    std::vector<LegacyPopulation> electron_populations;
-    std::vector<LegacyPopulation> ion_populations;
-    double average_spectrum_electron_temperature_ev = 0.0;
-    double average_spectrum_ion_temperature_ev = 0.0;
-};
-
-std::vector<LegacyPopulation> collectLegacyElectronPopulations(const SurfaceChargingConfig& config)
-{
-    std::vector<LegacyPopulation> populations;
-    if (config.has_electron_spectrum && !config.electron_spectrum.populations.empty())
-    {
-        for (const auto& population : config.electron_spectrum.populations)
-        {
-            populations.push_back(
-                {population.density_m3, population.temperature_ev, population.mass_amu});
-            if (populations.size() >= 3)
-            {
-                break;
-            }
-        }
-    }
-    if (populations.empty())
-    {
-        populations.push_back(
-            {config.plasma.electron_density_m3, config.plasma.electron_temperature_ev,
-             9.1093837015e-31 / 1.66053906660e-27});
-    }
-    return populations;
-}
-
-std::vector<LegacyPopulation> collectLegacyIonPopulations(const SurfaceChargingConfig& config)
-{
-    std::vector<LegacyPopulation> populations;
-    if (config.has_ion_spectrum && !config.ion_spectrum.populations.empty())
-    {
-        for (const auto& population : config.ion_spectrum.populations)
-        {
-            populations.push_back(
-                {population.density_m3, population.temperature_ev, population.mass_amu});
-            if (populations.size() >= 3)
-            {
-                break;
-            }
-        }
-    }
-    if (populations.empty())
-    {
-        populations.push_back(
-            {config.plasma.ion_density_m3, config.plasma.ion_temperature_ev, config.plasma.ion_mass_amu});
-    }
-    return populations;
-}
-
-double legacyInterpolateSpectrum(const std::vector<double>& x,
-                                 const std::vector<double>& y,
-                                 double target)
-{
-    if (x.empty() || y.empty())
-    {
-        return 0.0;
-    }
-    const std::size_t count = std::min(x.size(), y.size());
-    if (count == 1)
-    {
-        return y.front();
-    }
-    if (count == 2)
-    {
-        const double x0 = x[0];
-        const double x1 = x[1];
-        if (x1 <= x0)
-        {
-            return y[0];
-        }
-        return (y[0] * (target - x1) - y[1] * (target - x0)) / (x0 - x1);
-    }
-
-    std::ptrdiff_t k = 0;
-    std::ptrdiff_t m = 0;
-    if (target <= x[1])
-    {
-        k = 0;
-        m = 2;
-    }
-    else if (target >= x[count - 2])
-    {
-        k = static_cast<std::ptrdiff_t>(count) - 3;
-        m = static_cast<std::ptrdiff_t>(count) - 1;
-    }
-    else
-    {
-        k = 1;
-        m = static_cast<std::ptrdiff_t>(count);
-        while (m - k != 1)
-        {
-            const auto i = (k + m) / 2;
-            if (target < x[static_cast<std::size_t>(i - 1)])
-            {
-                m = i;
-            }
-            else
-            {
-                k = i;
-            }
-        }
-        k -= 1;
-        m -= 1;
-        if (std::abs(target - x[static_cast<std::size_t>(k)]) <
-            std::abs(target - x[static_cast<std::size_t>(m)]))
-        {
-            k -= 1;
-        }
-        else
-        {
-            m += 1;
-        }
-    }
-
-    double value = 0.0;
-    for (auto i = k; i <= m; ++i)
-    {
-        double weight = 1.0;
-        for (auto j = k; j <= m; ++j)
-        {
-            if (j != i)
-            {
-                weight *=
-                    (target - x[static_cast<std::size_t>(j)]) /
-                    (x[static_cast<std::size_t>(i)] - x[static_cast<std::size_t>(j)]);
-            }
-        }
-        value += weight * y[static_cast<std::size_t>(i)];
-    }
-    return value;
-}
-
-std::vector<double> legacySmoothLine3(const std::vector<double>& x, const std::vector<double>& y)
-{
-    const std::size_t count = std::min(x.size(), y.size());
-    if (count <= 2)
-    {
-        return std::vector<double>(y.begin(), y.begin() + static_cast<std::ptrdiff_t>(count));
-    }
-
-    std::vector<double> smoothed(count, 0.0);
-    for (std::size_t i = 0; i < count; ++i)
-    {
-        std::size_t first = 0;
-        if (i == 0)
-        {
-            first = 0;
-        }
-        else if (i >= count - 1)
-        {
-            first = count - 3;
-        }
-        else
-        {
-            first = i - 1;
-        }
-        const std::size_t last = std::min(count - 1, first + 2);
-        const double x0 = x[first];
-        const double x1 = x[first + 1];
-        const double x2 = x[last];
-        const double y0 = y[first];
-        const double y1 = y[first + 1];
-        const double y2 = y[last];
-        const double t0 = 3.0;
-        const double t1 = x0 + x1 + x2;
-        const double t2 = x0 * x0 + x1 * x1 + x2 * x2;
-        const double p1 = y0 + y1 + y2;
-        const double p2 = y0 * x0 + y1 * x1 + y2 * x2;
-        const double det = t0 * t2 - t1 * t1;
-        if (std::abs(det) <= 1.0e-20)
-        {
-            smoothed[i] = y[i];
-            continue;
-        }
-        const double a0 = (p1 * t2 - p2 * t1) / det;
-        const double a1 = (t0 * p2 - t1 * p1) / det;
-        smoothed[i] = a0 + a1 * x[i];
-    }
-    return smoothed;
-}
-
-double legacyElectronComponentFlux(double density_m3, double temperature_ev, double energy_ev)
-{
-    const double density_cm3 = std::max(0.0, density_m3) * 1.0e-6;
-    const double temperature = std::max(1.0e-6, temperature_ev);
-    return 5.325e10 * density_cm3 * energy_ev * std::pow(temperature, -1.5) *
-           std::exp(-energy_ev / temperature);
-}
-
-double legacyIonComponentFlux(double density_m3, double temperature_ev, double mass_amu,
-                              double energy_ev)
-{
-    const double density_cm3 = std::max(0.0, density_m3) * 1.0e-6;
-    const double temperature = std::max(1.0e-6, temperature_ev);
-    return 1.244e9 * density_cm3 * energy_ev * std::pow(temperature, -1.5) *
-           std::exp(-energy_ev / temperature) / std::sqrt(std::max(1.0, mass_amu));
-}
-
-double legacyThermalIonCollectionNaPerM2(const std::vector<LegacyPopulation>& populations,
-                                         double surface_potential_v,
-                                         bool include_potential_barrier)
-{
-    double current_na_per_m2 = 0.0;
-    for (const auto& population : populations)
-    {
-        if (population.density_m3 <= 0.0)
-        {
-            continue;
-        }
-        const double ni_cm3 = population.density_m3 * 1.0e-6;
-        const double temperature = std::max(1.0e-6, population.temperature_ev);
-        double term = 0.6255 * ni_cm3 * std::sqrt(temperature / std::max(1.0, population.mass_amu));
-        if (include_potential_barrier && surface_potential_v > 0.0)
-        {
-            term *= std::exp(-surface_potential_v / temperature);
-        }
-        current_na_per_m2 += term;
-    }
-    return current_na_per_m2;
-}
+using LegacyPopulation = Particle::LegacyPopulation;
+using LegacyLeoFluxTables = Particle::LegacyFluxTables;
 
 LegacyLeoFluxTables buildLegacyLeoFluxTables(const SurfaceChargingConfig& config)
 {
-    constexpr int kLegacyLeoSamples = 1000;
-    LegacyLeoFluxTables tables;
-    tables.electron_populations = collectLegacyElectronPopulations(config);
-    tables.ion_populations = collectLegacyIonPopulations(config);
-
-    double spectrum_min_ev = std::numeric_limits<double>::max();
-    double spectrum_max_ev = 0.0;
-    auto extend_spectrum_range = [&](const std::vector<double>& energies) {
-        for (double energy_ev : energies)
-        {
-            if (energy_ev > 0.0)
-            {
-                spectrum_min_ev = std::min(spectrum_min_ev, energy_ev);
-                spectrum_max_ev = std::max(spectrum_max_ev, energy_ev);
-            }
-        }
-    };
-    extend_spectrum_range(config.electron_spectrum.energy_grid_ev);
-    extend_spectrum_range(config.ion_spectrum.energy_grid_ev);
-
-    double min_thermal_ev = std::numeric_limits<double>::max();
-    double max_thermal_ev = 0.0;
-    auto extend_thermal_range = [&](const std::vector<LegacyPopulation>& populations) {
-        for (const auto& population : populations)
-        {
-            if (population.temperature_ev > 0.0)
-            {
-                min_thermal_ev = std::min(min_thermal_ev, population.temperature_ev);
-                max_thermal_ev = std::max(max_thermal_ev, population.temperature_ev);
-            }
-        }
-    };
-    extend_thermal_range(tables.electron_populations);
-    extend_thermal_range(tables.ion_populations);
-
-    double minimum_energy_ev = std::isfinite(spectrum_min_ev) ? spectrum_min_ev : 0.0;
-    double maximum_energy_ev = spectrum_max_ev;
-    if (std::isfinite(min_thermal_ev))
-    {
-        minimum_energy_ev = minimum_energy_ev > 0.0
-                                ? std::min(minimum_energy_ev, 0.05 * min_thermal_ev)
-                                : 0.05 * min_thermal_ev;
-    }
-    if (max_thermal_ev > 0.0)
-    {
-        maximum_energy_ev = std::max(maximum_energy_ev, 10.0 * max_thermal_ev);
-    }
-    minimum_energy_ev = std::max(1.0e-4, minimum_energy_ev > 0.0 ? minimum_energy_ev : 1.0e-2);
-    maximum_energy_ev = std::max(10.0 * minimum_energy_ev, maximum_energy_ev);
-
-    const double nmin = std::log10(minimum_energy_ev);
-    const double nmax = std::log10(maximum_energy_ev);
-    const double dn = (nmax - nmin) / static_cast<double>(kLegacyLeoSamples);
-
-    tables.energy_ev.reserve(kLegacyLeoSamples);
-    tables.width_ev.reserve(kLegacyLeoSamples);
-    tables.total_electron_flux.reserve(kLegacyLeoSamples);
-    tables.spectrum_electron_flux.reserve(kLegacyLeoSamples);
-    tables.total_ion_flux.reserve(kLegacyLeoSamples);
-    tables.spectrum_ion_flux.reserve(kLegacyLeoSamples);
-    tables.electron_component_flux.assign(tables.electron_populations.size(),
-                                          std::vector<double>{});
-    tables.ion_component_flux.assign(tables.ion_populations.size(), std::vector<double>{});
-
-    double spectrum_electron_energy_moment = 0.0;
-    double spectrum_electron_flux_sum = 0.0;
-    double spectrum_ion_energy_moment = 0.0;
-    double spectrum_ion_flux_sum = 0.0;
-
-    const bool has_electron_spectrum = config.has_electron_spectrum &&
-                                       !config.electron_spectrum.energy_grid_ev.empty() &&
-                                       !config.electron_spectrum.differential_number_flux.empty();
-    const bool has_ion_spectrum = config.has_ion_spectrum &&
-                                  !config.ion_spectrum.energy_grid_ev.empty() &&
-                                  !config.ion_spectrum.differential_number_flux.empty();
-    const double electron_spectrum_min_ev =
-        has_electron_spectrum
-            ? *std::min_element(config.electron_spectrum.energy_grid_ev.begin(),
-                                config.electron_spectrum.energy_grid_ev.end())
-            : 0.0;
-    const double electron_spectrum_max_ev =
-        has_electron_spectrum
-            ? *std::max_element(config.electron_spectrum.energy_grid_ev.begin(),
-                                config.electron_spectrum.energy_grid_ev.end())
-            : 0.0;
-    const double ion_spectrum_min_ev =
-        has_ion_spectrum
-            ? *std::min_element(config.ion_spectrum.energy_grid_ev.begin(),
-                                config.ion_spectrum.energy_grid_ev.end())
-            : 0.0;
-    const double ion_spectrum_max_ev =
-        has_ion_spectrum
-            ? *std::max_element(config.ion_spectrum.energy_grid_ev.begin(),
-                                config.ion_spectrum.energy_grid_ev.end())
-            : 0.0;
-    const std::vector<double> smoothed_electron_flux =
-        has_electron_spectrum
-            ? legacySmoothLine3(config.electron_spectrum.energy_grid_ev,
-                                config.electron_spectrum.differential_number_flux)
-            : std::vector<double>{};
-    const std::vector<double> smoothed_ion_flux =
-        has_ion_spectrum
-            ? legacySmoothLine3(config.ion_spectrum.energy_grid_ev,
-                                config.ion_spectrum.differential_number_flux)
-            : std::vector<double>{};
-    tables.spectrum_energy_grid_ev = config.electron_spectrum.energy_grid_ev;
-    tables.smoothed_electron_flux = smoothed_electron_flux;
-    tables.smoothed_ion_flux = smoothed_ion_flux;
-
-    for (int i = 0; i < kLegacyLeoSamples; ++i)
-    {
-        const double energy_ev = std::pow(10.0, nmin + dn * static_cast<double>(i));
-        const double next_energy_ev = std::pow(10.0, nmin + dn * static_cast<double>(i + 1));
-        const double width_ev = next_energy_ev - energy_ev;
-        tables.energy_ev.push_back(energy_ev);
-        tables.width_ev.push_back(width_ev);
-
-        double electron_component_sum = 0.0;
-        for (std::size_t j = 0; j < tables.electron_populations.size(); ++j)
-        {
-            const auto& population = tables.electron_populations[j];
-            const double value =
-                legacyElectronComponentFlux(population.density_m3, population.temperature_ev, energy_ev);
-            tables.electron_component_flux[j].push_back(value);
-            electron_component_sum += value;
-        }
-
-        double ion_component_sum = 0.0;
-        for (std::size_t j = 0; j < tables.ion_populations.size(); ++j)
-        {
-            const auto& population = tables.ion_populations[j];
-            const double value = legacyIonComponentFlux(population.density_m3, population.temperature_ev,
-                                                        population.mass_amu, energy_ev);
-            tables.ion_component_flux[j].push_back(value);
-            ion_component_sum += value;
-        }
-
-        double spectrum_electron_flux = 0.0;
-        if (has_electron_spectrum && energy_ev >= electron_spectrum_min_ev &&
-            energy_ev <= electron_spectrum_max_ev)
-        {
-            spectrum_electron_flux = std::max(
-                0.0, legacyInterpolateSpectrum(config.electron_spectrum.energy_grid_ev,
-                                               smoothed_electron_flux, energy_ev));
-        }
-
-        double spectrum_ion_flux = 0.0;
-        if (has_ion_spectrum && energy_ev >= ion_spectrum_min_ev && energy_ev <= ion_spectrum_max_ev)
-        {
-            spectrum_ion_flux = std::max(
-                0.0,
-                legacyInterpolateSpectrum(config.ion_spectrum.energy_grid_ev, smoothed_ion_flux,
-                                          energy_ev));
-        }
-
-        tables.total_electron_flux.push_back(spectrum_electron_flux > 0.0 ? spectrum_electron_flux
-                                                                           : electron_component_sum);
-        tables.spectrum_electron_flux.push_back(spectrum_electron_flux);
-        tables.total_ion_flux.push_back(spectrum_ion_flux > 0.0 ? spectrum_ion_flux : ion_component_sum);
-        tables.spectrum_ion_flux.push_back(spectrum_ion_flux);
-
-        spectrum_electron_energy_moment += spectrum_electron_flux * energy_ev * width_ev;
-        spectrum_electron_flux_sum += spectrum_electron_flux * width_ev;
-        spectrum_ion_energy_moment += spectrum_ion_flux * energy_ev * width_ev;
-        spectrum_ion_flux_sum += spectrum_ion_flux * width_ev;
-    }
-
-    if (spectrum_electron_flux_sum > 0.0)
-    {
-        tables.average_spectrum_electron_temperature_ev =
-            2.0 * spectrum_electron_energy_moment / (3.0 * spectrum_electron_flux_sum);
-    }
-    if (spectrum_ion_flux_sum > 0.0)
-    {
-        tables.average_spectrum_ion_temperature_ev =
-            2.0 * spectrum_ion_energy_moment / (3.0 * spectrum_ion_flux_sum);
-    }
-    return tables;
+    Particle::LegacyFluxTableBuildRequest request;
+    request.electron_spectrum = config.electron_spectrum;
+    request.ion_spectrum = config.ion_spectrum;
+    request.has_electron_spectrum = config.has_electron_spectrum;
+    request.has_ion_spectrum = config.has_ion_spectrum;
+    request.fallback_electron_density_m3 = config.plasma.electron_density_m3;
+    request.fallback_electron_temperature_ev = config.plasma.electron_temperature_ev;
+    request.fallback_ion_density_m3 = config.plasma.ion_density_m3;
+    request.fallback_ion_temperature_ev = config.plasma.ion_temperature_ev;
+    request.fallback_ion_mass_amu = config.plasma.ion_mass_amu;
+    request.max_population_count = 3;
+    request.sample_count = 1000;
+    return Particle::buildLegacyFluxTables(request);
 }
 
 SurfaceCurrents evaluateLegacyLeoBodyCurrents(const SurfaceChargingConfig& effective_config,
@@ -2920,9 +2199,10 @@ SurfaceCurrents evaluateLegacyLeoBodyCurrents(const SurfaceChargingConfig& effec
             const double total_electron_flux = tables.total_electron_flux[i];
             const double total_ion_flux = tables.total_ion_flux[i];
             const double see_at_zero = legacySeeYield(effective_config, material, energy_ev);
-            const double backscatter_at_zero = legacyBackscatterYield(material, energy_ev);
+            const double backscatter_at_zero =
+                Material::evaluateLegacyBackscatterYield(material, energy_ev);
             const double ion_secondary_at_zero =
-                legacyIonSecondaryYield(material, energy_ev);
+                Material::evaluateLegacyIonSecondaryElectronYield(material, energy_ev);
 
             xe += total_electron_flux * width_ev;
             xi += total_ion_flux * width_ev;
@@ -2937,7 +2217,8 @@ SurfaceCurrents evaluateLegacyLeoBodyCurrents(const SurfaceChargingConfig& effec
         currents.ion_secondary_emission_a_per_m2 = kPi * kElementaryCharge * xsi;
         currents.backscatter_emission_a_per_m2 = kPi * kElementaryCharge * xb;
         currents.photo_emission_a_per_m2 =
-            0.25 * std::max(0.0, effective_config.body_photo_current_density_a_per_m2);
+            0.25 * bodyPhotoEmissionScale(material) *
+            std::max(0.0, effective_config.body_photo_current_density_a_per_m2);
         currents.ram_ion_current_a_per_m2 = 0.0;
         currents.conduction_current_a_per_m2 = 0.0;
         currents.current_derivative_a_per_m2_per_v = 0.0;
@@ -2959,11 +2240,13 @@ SurfaceCurrents evaluateLegacyLeoBodyCurrents(const SurfaceChargingConfig& effec
         const double see_at_v = legacySeeYield(effective_config, material,
                                                potential_v > 0.0 ? energy_ev + potential_v : energy_ev);
         const double see_at_zero = legacySeeYield(effective_config, material, energy_ev);
-        const double backscatter_at_v =
-            legacyBackscatterYield(material, potential_v > 0.0 ? energy_ev + potential_v : energy_ev);
-        const double backscatter_at_zero = legacyBackscatterYield(material, energy_ev);
+        const double backscatter_at_v = Material::evaluateLegacyBackscatterYield(
+            material, potential_v > 0.0 ? energy_ev + potential_v : energy_ev);
+        const double backscatter_at_zero =
+            Material::evaluateLegacyBackscatterYield(material, energy_ev);
         const double ion_secondary_at_v =
-            legacyIonSecondaryYield(material, potential_v > 0.0 ? energy_ev : energy_ev - potential_v);
+            Material::evaluateLegacyIonSecondaryElectronYield(
+                material, potential_v > 0.0 ? energy_ev : energy_ev - potential_v);
 
         if (potential_v > 0.0)
         {
@@ -3019,9 +2302,10 @@ SurfaceCurrents evaluateLegacyLeoBodyCurrents(const SurfaceChargingConfig& effec
                 shifted_energy_ev <= tables.spectrum_energy_grid_ev.back();
             const double shifted_spectrum_flux =
                 shifted_within_spectrum
-                    ? std::max(0.0, legacyInterpolateSpectrum(tables.spectrum_energy_grid_ev,
-                                                              tables.smoothed_electron_flux,
-                                                              shifted_energy_ev))
+                    ? std::max(0.0, Particle::interpolateLegacySpectrum(
+                                          tables.spectrum_energy_grid_ev,
+                                          tables.smoothed_electron_flux,
+                                          shifted_energy_ev))
                     : 0.0;
 
             xi += spectrum_ion_flux * width_ev;
@@ -3049,23 +2333,70 @@ SurfaceCurrents evaluateLegacyLeoBodyCurrents(const SurfaceChargingConfig& effec
 
     x2_na_per_m2 =
         kLegacyLeoBodyThermalIonCollectionFactor *
-        legacyThermalIonCollectionNaPerM2(tables.ion_populations, potential_v, potential_v > 0.0);
+        FieldSolver::evaluateLegacyThermalIonCollectionNaPerM2(
+            tables.ion_populations, material, potential_v, potential_v > 0.0);
 
-    currents.electron_current_a_per_m2 = -kPi * kElementaryCharge * (x1 + xe);
-    currents.ion_current_a_per_m2 = kPi * kElementaryCharge * xi + x2_na_per_m2 * 1.0e-9;
+    const double electron_collection_current = -kPi * kElementaryCharge * (x1 + xe);
+    const double ion_collection_current = kPi * kElementaryCharge * xi + x2_na_per_m2 * 1.0e-9;
+    const double secondary_emission_base =
+        kPi * kElementaryCharge * xse * kLegacyLeoBodySecondaryEscapeFactor;
+    const double ion_secondary_emission_base = kPi * kElementaryCharge * xsi;
+    const double backscatter_emission_base = kPi * kElementaryCharge * xb;
+    const double body_photoelectron_temperature_ev =
+        bodyPhotoelectronTemperatureEv(material, kTphEv);
+    const double photo_emission_base =
+        0.25 * bodyPhotoEmissionScale(material) *
+        std::max(0.0, effective_config.body_photo_current_density_a_per_m2);
+
+    const auto escapeWithBundle =
+        [&](double secondary_emission, double ion_secondary_emission,
+            double backscatter_emission, double photo_emission,
+            double emission_temperature_ev) {
+            SurfaceBarrierState state;
+            state.local_potential_v = potential_v;
+            state.reference_potential_v = 0.0;
+            state.barrier_potential_v = 0.0;
+            state.normal_electric_field_v_per_m = 0.0;
+            state.emission_temperature_ev = std::max(1.0e-3, emission_temperature_ev);
+
+            FieldSolver::SurfaceEmissionBarrierInputs inputs;
+            inputs.electron_collection_a_per_m2 = electron_collection_current;
+            inputs.ion_collection_a_per_m2 = ion_collection_current;
+            inputs.secondary_emission_a_per_m2 = secondary_emission;
+            inputs.ion_secondary_emission_a_per_m2 = ion_secondary_emission;
+            inputs.backscatter_emission_a_per_m2 = backscatter_emission;
+            inputs.photo_emission_a_per_m2 = photo_emission;
+            inputs.photo_incidence_scale = 1.0;
+            inputs.user_secondary_scale = 1.0;
+            inputs.user_ion_secondary_scale = 1.0;
+            inputs.user_backscatter_scale = 1.0;
+            inputs.user_photo_scale = 1.0;
+            inputs.fallback_secondary_yield = 1.0;
+            inputs.fallback_ion_secondary_yield = 1.0;
+            inputs.fallback_backscatter_yield = 1.0;
+            return FieldSolver::evaluateSurfaceEmissionBarrierBundle(material, state, inputs);
+        };
+
+    const auto secondary_escape =
+        escapeWithBundle(secondary_emission_base, 0.0, 0.0, 0.0, 2.0 * kTseEv);
+    const auto ion_secondary_escape =
+        escapeWithBundle(0.0, ion_secondary_emission_base, 0.0, 0.0, 2.0 * kTsiEv);
+    const auto backscatter_escape =
+        escapeWithBundle(0.0, 0.0, backscatter_emission_base, 0.0, 1.0e12);
+    const auto photo_escape =
+        escapeWithBundle(0.0, 0.0, 0.0, photo_emission_base,
+                         2.0 * body_photoelectron_temperature_ev);
+
+    currents.electron_current_a_per_m2 = electron_collection_current;
+    currents.ion_current_a_per_m2 = ion_collection_current;
     currents.secondary_emission_a_per_m2 =
-        kPi * kElementaryCharge * xse *
-        (potential_v > 0.0 ? std::exp(-potential_v / (2.0 * kTseEv)) : 1.0) *
-        kLegacyLeoBodySecondaryEscapeFactor;
+        secondary_escape.escaped_secondary.escaped_current_a_per_m2;
     currents.ion_secondary_emission_a_per_m2 =
-        kPi * kElementaryCharge * xsi *
-        (potential_v > 0.0 ? std::exp(-potential_v / (2.0 * kTsiEv)) : 1.0);
-    currents.backscatter_emission_a_per_m2 = kPi * kElementaryCharge * xb;
+        ion_secondary_escape.escaped_ion_secondary.escaped_current_a_per_m2;
+    currents.backscatter_emission_a_per_m2 =
+        backscatter_escape.escaped_backscatter.escaped_current_a_per_m2;
     currents.photo_emission_a_per_m2 =
-        potential_v > 0.0
-            ? 0.25 * std::max(0.0, effective_config.body_photo_current_density_a_per_m2) *
-                  std::exp(-potential_v / (2.0 * kTphEv))
-            : 0.25 * std::max(0.0, effective_config.body_photo_current_density_a_per_m2);
+        photo_escape.escaped_photo.escaped_current_a_per_m2;
     currents.ram_ion_current_a_per_m2 = 0.0;
     currents.conduction_current_a_per_m2 = 0.0;
     currents.current_derivative_a_per_m2_per_v = 0.0;
@@ -3076,36 +2407,124 @@ SurfaceCurrents evaluateLegacyLeoBodyCurrents(const SurfaceChargingConfig& effec
     return currents;
 }
 
-double legacySpectrumCharacteristicEnergyEv(const Particle::ResolvedSpectrum& spectrum,
-                                            double fallback_energy_ev)
+SurfaceDistributionMoments buildSurfaceDistributionMoments(const SurfaceChargingConfig& config,
+                                                           const SurfaceModelRuntimeState& state,
+                                                           ReferenceSurfaceRole role)
 {
-    if (spectrum.energy_grid_ev.size() >= 2 &&
-        spectrum.energy_grid_ev.size() == spectrum.differential_number_flux.size())
-    {
-        double weighted_energy = 0.0;
-        double total_flux = 0.0;
-        for (std::size_t i = 1; i < spectrum.energy_grid_ev.size(); ++i)
-        {
-            const double e0 = std::max(0.0, spectrum.energy_grid_ev[i - 1]);
-            const double e1 = std::max(e0, spectrum.energy_grid_ev[i]);
-            const double f0 = std::max(0.0, spectrum.differential_number_flux[i - 1]);
-            const double f1 = std::max(0.0, spectrum.differential_number_flux[i]);
-            const double width = e1 - e0;
-            if (width <= 0.0)
-            {
-                continue;
-            }
-            const double average_flux = 0.5 * (f0 + f1);
-            const double average_energy = 0.5 * (e0 + e1);
-            weighted_energy += average_energy * average_flux * width;
-            total_flux += average_flux * width;
-        }
-        if (total_flux > 0.0)
-        {
-            return weighted_energy / total_flux;
-        }
-    }
-    return std::max(1.0e-6, fallback_energy_ev);
+    SurfaceDistributionMoments moments;
+    moments.model = config.distribution_model;
+    Particle::SurfaceDistributionRoleBuildRequest role_request;
+    role_request.model =
+        config.distribution_model == PlasmaAnalysis::PlasmaDistributionModelKind::MaxwellianProjected
+            ? Particle::SurfaceDistributionModel::MaxwellianProjected
+            : (config.distribution_model == PlasmaAnalysis::PlasmaDistributionModelKind::WakeAnisotropic
+                   ? Particle::SurfaceDistributionModel::WakeAnisotropic
+                   : Particle::SurfaceDistributionModel::MultiPopulationHybrid);
+    role_request.electron_density_m3 = config.plasma.electron_density_m3;
+    role_request.electron_temperature_ev = config.plasma.electron_temperature_ev;
+    role_request.ion_density_m3 = config.plasma.ion_density_m3;
+    role_request.ion_temperature_ev = config.plasma.ion_temperature_ev;
+    role_request.ion_directed_velocity_m_per_s = config.ion_directed_velocity_m_per_s;
+    role_request.electron_spectrum = config.electron_spectrum;
+    role_request.ion_spectrum = config.ion_spectrum;
+    moments.local_reference_shift_v =
+        state.shared_runtime_enabled ? state.shared_particle_transport_reference_shift_v
+                                     : (state.reference_plasma_potential_v -
+                                        state.patch_potential_v);
+    const bool share_patch_distribution =
+        state.shared_runtime_enabled && role == ReferenceSurfaceRole::Patch;
+    const auto flow_projection = resolveSurfaceFlowProjection(
+        config.bulk_flow_velocity_m_per_s, config.flow_alignment_cosine,
+        config.patch_flow_angle_deg);
+    const double projected_speed =
+        role == ReferenceSurfaceRole::Body
+            ? flow_projection.body_projected_speed_m_per_s
+            : (share_patch_distribution
+                   ? config.bulk_flow_velocity_m_per_s * config.flow_alignment_cosine
+                   : flow_projection.patch_projected_speed_m_per_s);
+    role_request.local_reference_shift_v = moments.local_reference_shift_v;
+    role_request.patch_incidence_angle_deg = config.patch_incidence_angle_deg;
+    role_request.bulk_flow_velocity_m_per_s = config.bulk_flow_velocity_m_per_s;
+    role_request.projected_speed_m_per_s = projected_speed;
+    role_request.flow_alignment_cosine = config.flow_alignment_cosine;
+    role_request.normal_electric_field_v_per_m = state.normal_electric_field_v_per_m;
+    role_request.share_patch_distribution = share_patch_distribution;
+    role_request.patch_role = role == ReferenceSurfaceRole::Patch;
+    const auto inputs = Particle::makeSurfaceDistributionRoleInputs(role_request);
+    const auto environment = Particle::makeSurfaceDistributionEnvironment(inputs);
+    const auto bundle = Particle::evaluateSurfaceDistributionEnvironment(environment);
+    const auto& synthesized = bundle.synthesized;
+
+    moments.electron_characteristic_energy_ev = synthesized.electron_characteristic_energy_ev;
+    moments.ion_characteristic_energy_ev = synthesized.ion_characteristic_energy_ev;
+    moments.electron_collection_scale = synthesized.electron_collection_scale;
+    moments.ion_collection_scale = synthesized.ion_collection_scale;
+    moments.photo_incidence_scale = synthesized.photo_incidence_scale;
+    moments.valid = bundle.valid;
+    return moments;
+}
+
+SurfaceMaterialInteractionMoments buildSurfaceMaterialInteractionMoments(
+    const SurfaceChargingConfig& config, const SurfaceModelRuntimeState& state,
+    const Material::MaterialProperty& material, const SurfaceDistributionMoments& distribution,
+    ReferenceSurfaceRole role)
+{
+    const auto evaluateInteractionBundle = [&]() {
+      const auto material_model_variant = Material::resolveSurfaceMaterialModelVariant(material);
+      BasicSurfaceMaterialModel basic_material_model;
+      ErosionSurfaceMaterialModel erosion_material_model;
+        Material::SurfaceInteraction interaction;
+      interaction.setMaterialModel(material_model_variant == SurfaceMaterialModelVariant::Erosion
+                             ? static_cast<const Material::SurfaceMaterialModel*>(
+                                 &erosion_material_model)
+                             : static_cast<const Material::SurfaceMaterialModel*>(
+                                 &basic_material_model));
+
+        const double role_potential =
+            role == ReferenceSurfaceRole::Body ? state.body_potential_v : state.patch_potential_v;
+        Material::SurfaceInteractionRoleInputs inputs;
+        inputs.role = role == ReferenceSurfaceRole::Body
+                          ? Material::SurfaceInteractionRole::Body
+                          : Material::SurfaceInteractionRole::Patch;
+        inputs.electron_incident_energy_ev =
+            distribution.electron_characteristic_energy_ev + std::max(0.0, role_potential);
+        inputs.electron_incident_angle_deg = config.patch_incidence_angle_deg;
+        inputs.ion_incident_energy_ev =
+            distribution.ion_characteristic_energy_ev + std::max(0.0, -role_potential);
+        inputs.ion_incident_angle_deg = config.patch_flow_angle_deg;
+        inputs.surface_temperature_k = config.emission.surface_temperature_k;
+        inputs.surface_potential_v = role_potential;
+        inputs.reference_potential_v = state.reference_plasma_potential_v;
+        inputs.counterelectrode_potential_v = state.body_potential_v;
+        inputs.normal_electric_field_v_per_m = state.normal_electric_field_v_per_m;
+        inputs.patch_photoelectron_temperature_ev =
+            std::max(1.0e-3, config.photoelectron_temperature_ev);
+        inputs.body_photoelectron_temperature_ev =
+            bodyPhotoelectronTemperatureEv(material, config.photoelectron_temperature_ev);
+        inputs.patch_photo_current_density_a_per_m2 =
+            std::max(0.0, config.patch_photo_current_density_a_per_m2);
+        inputs.body_photo_current_density_a_per_m2 =
+            std::max(0.0, config.body_photo_current_density_a_per_m2);
+        inputs.body_photo_emission_scale = bodyPhotoEmissionScale(material);
+        inputs.dielectric_thickness_m = config.dielectric_thickness_m;
+        inputs.exposed_area_m2 = std::max(1.0e-12, state.surface_area_m2);
+        inputs.photo_incidence_scale = distribution.photo_incidence_scale;
+        const auto environment = Material::SurfaceInteraction::makeInteractionEnvironment(inputs);
+        return interaction.evaluateMaterialIndexedBundle(material, environment);
+    };
+
+    const auto bundle = evaluateInteractionBundle();
+    SurfaceMaterialInteractionMoments moments;
+    moments.electron_absorption_scale = std::clamp(
+        std::abs(bundle.electron_response.absorbed_charge_coulomb) / kElementaryCharge, 0.1, 1.0);
+    moments.secondary_emission_scale = bundle.barrier_outputs.secondary_emission_scale;
+    moments.ion_secondary_emission_scale = bundle.barrier_outputs.ion_secondary_emission_scale;
+    moments.backscatter_scale = bundle.barrier_outputs.backscatter_scale;
+    moments.photo_emission_scale = bundle.barrier_outputs.photo_emission_scale;
+    moments.conductivity_scale = material.deriveSurfaceConductivityScaleFactor();
+    moments.capacitance_scale = material.deriveSurfaceCapacitanceScaleFactor();
+    moments.valid = bundle.barrier_outputs.valid;
+    return moments;
 }
 
 std::vector<LegacyPopulation> benchmarkElectronPopulations(const SurfaceChargingConfig& config)
@@ -3153,75 +2572,6 @@ std::vector<LegacyPopulation> benchmarkIonPopulations(const SurfaceChargingConfi
             {config.plasma.ion_density_m3, config.plasma.ion_temperature_ev, config.plasma.ion_mass_amu});
     }
     return populations;
-}
-
-double integrateLegacyMaxwellian(double temperature_ev,
-                                 const std::function<double(double)>& kernel)
-{
-    const double scale = std::max(1.0e-6, temperature_ev);
-    const int samples = 96;
-    const double upper = 24.0 * scale;
-    const double step = upper / static_cast<double>(samples);
-    double sum = 0.0;
-    for (int i = 0; i <= samples; ++i)
-    {
-        const double energy = i * step;
-        const double weight =
-            (i == 0 || i == samples) ? 1.0 : ((i % 2 == 0) ? 2.0 : 4.0);
-        sum += weight * kernel(energy) * energy * std::exp(-energy / scale);
-    }
-    const double integral = step * sum / 3.0;
-    return integral / (scale * scale);
-}
-
-ReferenceCurrentBalanceConfig makeReferenceConfig(const SurfaceChargingConfig& config,
-                                                  const SurfaceModelRuntimeState& state)
-{
-    ReferenceCurrentBalanceConfig reference_config;
-    reference_config.plasma = config.plasma;
-    reference_config.electron_spectrum = config.electron_spectrum;
-    reference_config.ion_spectrum = config.ion_spectrum;
-    reference_config.has_electron_spectrum = config.has_electron_spectrum;
-    reference_config.has_ion_spectrum = config.has_ion_spectrum;
-    reference_config.patch_material = config.material;
-    reference_config.see_model = config.reference_see_model;
-    reference_config.patch_incidence_angle_deg = config.patch_incidence_angle_deg;
-    reference_config.patch_flow_angle_deg = config.patch_flow_angle_deg;
-    reference_config.patch_thickness_m = config.dielectric_thickness_m;
-    reference_config.patch_conductivity_s_per_m = state.effective_conductivity_s_per_m;
-    reference_config.electron_collection_model = config.electron_collection_model;
-    reference_config.electron_collection_coefficient = config.electron_collection_coefficient;
-    reference_config.ion_collection_coefficient = config.ion_collection_coefficient;
-    reference_config.bulk_flow_velocity_m_per_s = config.bulk_flow_velocity_m_per_s;
-    reference_config.flow_alignment_cosine = config.flow_alignment_cosine;
-    reference_config.ion_directed_velocity_m_per_s = config.ion_directed_velocity_m_per_s;
-    reference_config.electron_calibration_factor = state.electron_calibration_factor;
-    reference_config.ion_calibration_factor = state.ion_calibration_factor;
-    reference_config.photoelectron_temperature_ev =
-        std::max(1.0e-3, config.photoelectron_temperature_ev);
-    reference_config.enable_ram_current = config.regime == SurfaceChargingRegime::LeoFlowingPlasma;
-    reference_config.enable_secondary_electron = config.enable_secondary_electron;
-    reference_config.enable_backscatter = config.enable_backscatter;
-    reference_config.enable_photoelectron = config.enable_photoelectron;
-
-    const double derived_photo_current =
-        kElementaryCharge * config.emission.photon_flux_m2_s *
-        std::clamp(config.material.getScalarProperty("photoelectron_yield", 0.0) *
-                       config.emission.enhancement_factor,
-                   0.0, 1.0);
-    reference_config.body_photo_current_density_a_per_m2 =
-        config.body_photo_current_density_a_per_m2 > 0.0 ? config.body_photo_current_density_a_per_m2
-                                                         : derived_photo_current;
-    reference_config.patch_photo_current_density_a_per_m2 =
-        config.patch_photo_current_density_a_per_m2 > 0.0 ? config.patch_photo_current_density_a_per_m2
-                                                          : derived_photo_current;
-
-    reference_config.body_material = config.material;
-    reference_config.body_material.setType(Mesh::MaterialType::CONDUCTOR);
-    reference_config.body_material.setName(config.material.getName() + "_body");
-    reference_config.body_material.setConductivity(
-        std::max(1.0e-6, config.material.getScalarProperty("body_conductivity_s_per_m", 1.0e4)));
-    return reference_config;
 }
 
 class LegacyBenchmarkCurrentModelBase : public SurfaceCurrentModel
@@ -3307,6 +2657,7 @@ class LegacyBenchmarkCurrentModelBase : public SurfaceCurrentModel
     bool recalibrate(const SurfaceModelRuntimeState&, std::size_t) override
     {
         latest_sample_ = PicMccCurrentSample{};
+        latest_kernel_snapshot_ = SurfaceKernelSnapshot{};
         return false;
     }
 
@@ -3339,6 +2690,17 @@ class LegacyBenchmarkCurrentModelBase : public SurfaceCurrentModel
         const SurfaceModelRuntimeState&) const override
     {
         return latest_sample_;
+    }
+
+    const SurfaceKernelSnapshot& latestLivePicKernelSnapshot() const override
+    {
+        return latest_kernel_snapshot_;
+    }
+
+    const SurfaceKernelSnapshot& latestLivePicKernelSnapshot(
+        const SurfaceModelRuntimeState&) const override
+    {
+        return latest_kernel_snapshot_;
     }
 
     std::string algorithmName() const override
@@ -3389,19 +2751,24 @@ class LegacyBenchmarkCurrentModelBase : public SurfaceCurrentModel
     }
 
     double photoCurrent(ReferenceSurfaceRole role, const SurfaceChargingConfig& effective_config,
-                        double potential_v) const
+                        const Material::MaterialProperty& material, double potential_v) const
     {
-        const double base = role == ReferenceSurfaceRole::Body
-                                ? 0.25 * std::max(0.0, effective_config.body_photo_current_density_a_per_m2)
-                                : std::max(0.0, effective_config.patch_photo_current_density_a_per_m2) *
-                                      std::max(0.0, std::cos(effective_config.patch_incidence_angle_deg *
-                                                             kPi / 180.0));
-        if (potential_v > 0.0)
-        {
-            return base * std::exp(-potential_v /
-                                   std::max(1.0e-3, 2.0 * effective_config.photoelectron_temperature_ev));
-        }
-        return base;
+        Material::SurfaceRoleCurrentInputs inputs;
+        inputs.role = role == ReferenceSurfaceRole::Body ? Material::SurfaceCurrentRole::Body
+                                                         : Material::SurfaceCurrentRole::Patch;
+        inputs.patch_incidence_angle_deg = effective_config.patch_incidence_angle_deg;
+        inputs.surface_potential_v = potential_v;
+        inputs.patch_photoelectron_temperature_ev =
+            std::max(1.0e-3, effective_config.photoelectron_temperature_ev);
+        inputs.body_photoelectron_temperature_ev =
+            bodyPhotoelectronTemperatureEv(material, effective_config.photoelectron_temperature_ev);
+        inputs.patch_photo_current_density_a_per_m2 =
+            std::max(0.0, effective_config.patch_photo_current_density_a_per_m2);
+        inputs.body_photo_current_density_a_per_m2 =
+            std::max(0.0, effective_config.body_photo_current_density_a_per_m2);
+        inputs.body_photo_emission_scale = bodyPhotoEmissionScale(material);
+        return Material::evaluateSurfaceRoleCurrentBundle(material, inputs)
+            .photo_currents.photoelectron_emission_a_per_m2;
     }
 
     double conductionCurrent(ReferenceSurfaceRole role, const SurfaceModelRuntimeState& state,
@@ -3411,9 +2778,17 @@ class LegacyBenchmarkCurrentModelBase : public SurfaceCurrentModel
         {
             return 0.0;
         }
-        return std::max(0.0, state.effective_conductivity_s_per_m) *
-               (state.body_potential_v - state.patch_potential_v) /
-               std::max(1.0e-9, effective_config.dielectric_thickness_m);
+        Material::SurfaceRoleCurrentInputs inputs;
+        inputs.role = Material::SurfaceCurrentRole::Patch;
+        inputs.surface_potential_v = state.patch_potential_v;
+        inputs.reference_potential_v = state.reference_plasma_potential_v;
+        inputs.counterelectrode_potential_v = state.body_potential_v;
+        inputs.dielectric_thickness_m = effective_config.dielectric_thickness_m;
+        inputs.effective_conductivity_s_per_m = state.effective_conductivity_s_per_m;
+        inputs.conductivity_scale =
+            std::max(0.0, effective_config.material.deriveSurfaceConductivityScaleFactor());
+        return Material::evaluateSurfaceRoleCurrentBundle(effective_config.material, inputs)
+            .photo_currents.induced_conduction_a_per_m2;
     }
 
     double ramCurrent(ReferenceSurfaceRole role, const SurfaceChargingConfig& effective_config,
@@ -3433,16 +2808,146 @@ class LegacyBenchmarkCurrentModelBase : public SurfaceCurrentModel
             return 0.0;
         }
         return role == ReferenceSurfaceRole::Patch
-                   ? legacyRamPatchCurrentDensity(
+                 ? Material::evaluateLegacyRamPatchCurrentDensity(
                          potential_v, effective_config.plasma.ion_density_m3,
                          effective_config.plasma.ion_temperature_ev,
                          effective_config.plasma.ion_mass_amu,
                          flow_projection.patch_projected_speed_m_per_s)
-                   : legacyRamBodyCurrentDensity(
+                 : Material::evaluateLegacyRamBodyCurrentDensity(
                          potential_v, effective_config.plasma.ion_density_m3,
                          effective_config.plasma.ion_temperature_ev,
                          effective_config.plasma.ion_mass_amu,
                          std::max(0.0, flow_projection.body_projected_speed_m_per_s));
+    }
+
+    SurfaceCurrents assembleSpisEquivalentCurrents(
+        ReferenceSurfaceRole role, const SurfaceChargingConfig& effective_config,
+        const SurfaceModelRuntimeState& state, const SurfaceDistributionMoments& distribution,
+        const SurfaceMaterialInteractionMoments& material_response) const
+    {
+        const auto& material = effective_config.material;
+        const double potential_v =
+            role == ReferenceSurfaceRole::Body ? state.body_potential_v : state.patch_potential_v;
+
+        const auto material_model_variant = Material::resolveSurfaceMaterialModelVariant(material);
+        BasicSurfaceMaterialModel basic_material_model;
+        ErosionSurfaceMaterialModel erosion_material_model;
+        const auto evaluateModelCurrents =
+            [&](const Material::MaterialProperty& eval_material,
+                const Material::SurfaceModelContext& eval_context) {
+                return material_model_variant == SurfaceMaterialModelVariant::Erosion
+                           ? erosion_material_model.evaluateCurrents(eval_material, eval_context)
+                           : basic_material_model.evaluateCurrents(eval_material, eval_context);
+            };
+        Material::SurfaceModelContext electron_context;
+        electron_context.incident_particle = Material::SurfaceIncidentParticle::Electron;
+        electron_context.incident_energy_ev = std::max(
+            1.0e-3, distribution.electron_characteristic_energy_ev + std::max(0.0, potential_v));
+        electron_context.incident_angle_rad = effective_config.patch_incidence_angle_deg * kPi / 180.0;
+        electron_context.surface_potential_v = potential_v;
+        electron_context.reference_potential_v = state.reference_plasma_potential_v;
+        electron_context.normal_electric_field_v_per_m = state.normal_electric_field_v_per_m;
+        electron_context.emission_temperature_ev =
+            role == ReferenceSurfaceRole::Body
+                ? bodyPhotoelectronTemperatureEv(material, effective_config.photoelectron_temperature_ev)
+                : std::max(1.0e-3, effective_config.photoelectron_temperature_ev);
+        electron_context.exposed_area_m2 = std::max(1.0e-12, state.surface_area_m2);
+
+        auto ion_context = electron_context;
+        ion_context.incident_particle = Material::SurfaceIncidentParticle::Ion;
+        ion_context.incident_energy_ev = std::max(
+            1.0e-3, distribution.ion_characteristic_energy_ev + std::max(0.0, -potential_v));
+        ion_context.incident_angle_rad = effective_config.patch_flow_angle_deg * kPi / 180.0;
+
+        auto photo_context = electron_context;
+        photo_context.incident_particle = Material::SurfaceIncidentParticle::Photon;
+        photo_context.source_current_density_a_per_m2 =
+            role == ReferenceSurfaceRole::Body
+                ? 0.25 * bodyPhotoEmissionScale(material) *
+                      std::max(0.0, effective_config.body_photo_current_density_a_per_m2)
+                : std::max(0.0, effective_config.patch_photo_current_density_a_per_m2) *
+                      std::max(0.0, std::cos(effective_config.patch_incidence_angle_deg * kPi / 180.0));
+        photo_context.counterelectrode_potential_v = state.body_potential_v;
+        photo_context.transport_length_m =
+            role == ReferenceSurfaceRole::Patch
+                ? std::max(1.0e-9, effective_config.dielectric_thickness_m)
+                : 0.0;
+        auto conductive_material = material;
+        conductive_material.setSurfaceConductivitySPerM(
+            std::max(0.0, state.effective_conductivity_s_per_m) *
+            std::max(0.0, effective_config.material.deriveSurfaceConductivityScaleFactor()));
+
+        const auto electron_native = evaluateModelCurrents(material, electron_context);
+        const auto ion_native = evaluateModelCurrents(material, ion_context);
+        const auto photo_native = evaluateModelCurrents(conductive_material, photo_context);
+        double ram_current = 0.0;
+        if (effective_config.use_reference_current_balance &&
+            effective_config.regime == SurfaceChargingRegime::LeoFlowingPlasma)
+        {
+            const auto flow_projection = resolveSurfaceFlowProjection(
+                effective_config.bulk_flow_velocity_m_per_s, effective_config.flow_alignment_cosine,
+                effective_config.patch_flow_angle_deg);
+            if (std::max(std::abs(flow_projection.body_projected_speed_m_per_s),
+                         std::abs(flow_projection.patch_projected_speed_m_per_s)) > 0.0)
+            {
+                ram_current =
+                    role == ReferenceSurfaceRole::Patch
+                        ? Material::evaluateLegacyRamPatchCurrentDensity(
+                              potential_v, effective_config.plasma.ion_density_m3,
+                              effective_config.plasma.ion_temperature_ev,
+                              effective_config.plasma.ion_mass_amu,
+                              flow_projection.patch_projected_speed_m_per_s)
+                        : Material::evaluateLegacyRamBodyCurrentDensity(
+                              potential_v, effective_config.plasma.ion_density_m3,
+                              effective_config.plasma.ion_temperature_ev,
+                              effective_config.plasma.ion_mass_amu,
+                              std::max(0.0, flow_projection.body_projected_speed_m_per_s));
+            }
+        }
+
+        SurfaceCurrents currents;
+        currents.electron_current_a_per_m2 =
+            -std::abs(electron_native.electron_collection_a_per_m2) *
+            distribution.electron_collection_scale;
+        currents.ion_current_a_per_m2 =
+            std::abs(ion_native.ion_collection_a_per_m2) *
+            distribution.ion_collection_scale;
+        currents.secondary_emission_a_per_m2 =
+            std::abs(currents.electron_current_a_per_m2) * material_response.secondary_emission_scale;
+        currents.ion_secondary_emission_a_per_m2 =
+            std::abs(currents.ion_current_a_per_m2) * material_response.ion_secondary_emission_scale;
+        currents.backscatter_emission_a_per_m2 =
+            std::abs(currents.electron_current_a_per_m2) * material_response.backscatter_scale;
+        currents.photo_emission_a_per_m2 =
+            photo_native.photoelectron_emission_a_per_m2 * material_response.photo_emission_scale;
+        currents.conduction_current_a_per_m2 =
+            photo_native.induced_conduction_a_per_m2 * material_response.conductivity_scale;
+        currents.ram_ion_current_a_per_m2 = ram_current;
+        if (role == ReferenceSurfaceRole::Patch)
+        {
+            currents.thermionic_emission_a_per_m2 =
+                Material::evaluateSurfaceThermionicEmissionCurrentDensity(
+                    effective_config.material,
+                    effective_config.emission.surface_temperature_k,
+                    state.patch_potential_v);
+            currents.field_emission_a_per_m2 =
+                Material::evaluateSurfaceFieldEmissionCurrentDensity(
+                    effective_config.material, state.patch_potential_v,
+                    state.reference_plasma_potential_v,
+                    state.normal_electric_field_v_per_m,
+                    state.effective_sheath_length_m);
+        }
+        currents.total_current_a_per_m2 = currents.electron_current_a_per_m2 +
+                                          currents.ion_current_a_per_m2 +
+                                          currents.secondary_emission_a_per_m2 +
+                                          currents.ion_secondary_emission_a_per_m2 +
+                                          currents.backscatter_emission_a_per_m2 +
+                                          currents.photo_emission_a_per_m2 +
+                                          currents.thermionic_emission_a_per_m2 +
+                                          currents.field_emission_a_per_m2 +
+                                          currents.conduction_current_a_per_m2 +
+                                          currents.ram_ion_current_a_per_m2;
+        return currents;
     }
 
   private:
@@ -3451,6 +2956,7 @@ class LegacyBenchmarkCurrentModelBase : public SurfaceCurrentModel
     mutable Material::MaterialProperty patch_material_cache_{
         2, Mesh::MaterialType::DIELECTRIC, "patch"};
     PicMccCurrentSample latest_sample_{};
+    SurfaceKernelSnapshot latest_kernel_snapshot_{};
 };
 
 class LegacyCBenchmarkCurrentModel final : public LegacyBenchmarkCurrentModelBase
@@ -3470,6 +2976,8 @@ class LegacyCBenchmarkCurrentModel final : public LegacyBenchmarkCurrentModelBas
         const auto& material = materialFor(role, state);
         const double potential = role == ReferenceSurfaceRole::Body ? state.body_potential_v
                                                                     : state.patch_potential_v;
+        const double electron_collection_coefficient =
+            roleElectronCollectionCoefficient(role, effective_config, material);
 
         if (effective_config.regime == SurfaceChargingRegime::LeoFlowingPlasma)
         {
@@ -3478,153 +2986,142 @@ class LegacyCBenchmarkCurrentModel final : public LegacyBenchmarkCurrentModelBas
                 return evaluateLegacyLeoBodyCurrents(effective_config, material, potential);
             }
 
+            const auto legacy_model =
+                effective_config.reference_see_model == SecondaryElectronEmissionModel::Whipple
+                    ? Material::LegacySecondaryYieldModel::Whipple
+                    : (effective_config.reference_see_model ==
+                               SecondaryElectronEmissionModel::Sims
+                           ? Material::LegacySecondaryYieldModel::Sims
+                           : Material::LegacySecondaryYieldModel::Katz);
+
             SurfaceCurrents currents;
             const auto electron_populations = benchmarkElectronPopulations(effective_config);
             const auto ion_populations = benchmarkIonPopulations(effective_config);
             const double electron_characteristic_ev = std::max(
                 effective_config.plasma.electron_temperature_ev,
-                legacySpectrumCharacteristicEnergyEv(effective_config.electron_spectrum,
-                                                     effective_config.plasma.electron_temperature_ev));
+                Particle::resolvedSpectrumCharacteristicEnergyEv(
+                    effective_config.electron_spectrum,
+                    effective_config.plasma.electron_temperature_ev));
             const double ion_characteristic_ev = std::max(
                 effective_config.plasma.ion_temperature_ev,
-                legacySpectrumCharacteristicEnergyEv(effective_config.ion_spectrum,
-                                                     effective_config.plasma.ion_temperature_ev));
+                Particle::resolvedSpectrumCharacteristicEnergyEv(
+                    effective_config.ion_spectrum,
+                    effective_config.plasma.ion_temperature_ev));
 
             for (const auto& population : electron_populations)
             {
-                const double mass_kg =
-                    std::max(1.0e-6, population.mass_amu) * 1.66053906660e-27;
-                const double base = legacyThermalCurrentDensity(population.density_m3,
-                                                                population.temperature_ev, mass_kg);
-                const double factor =
-                    potential > 0.0
-                        ? 1.0
-                        : std::exp(potential / std::max(1.0e-6, electron_characteristic_ev));
-                const double collection =
-                    -base * std::max(0.0, effective_config.electron_collection_coefficient) * factor;
-                currents.electron_current_a_per_m2 += collection;
-
-                const double see_integral = integrateLegacyMaxwellian(
-                    population.temperature_ev, [&](double energy_ev) {
-                        const double shifted = potential > 0.0 ? energy_ev + potential : energy_ev;
-                        return legacySeeYield(effective_config, material, shifted);
+                const auto response = Material::evaluateLegacyPopulationResponse(
+                    material,
+                    Material::LegacyPopulationResponseInputs{
+                        Material::LegacyCollectionParticle::Electron,
+                        legacy_model,
+                        population.density_m3,
+                        population.temperature_ev,
+                        population.mass_amu,
+                        potential,
+                        electron_characteristic_ev,
+                        ion_characteristic_ev,
+                        electron_collection_coefficient,
+                        effective_config.ion_collection_coefficient,
+                        material.getScalarProperty("sims_exponent_n", 1.6),
                     });
-                const double backscatter_integral = integrateLegacyMaxwellian(
-                    population.temperature_ev, [&](double energy_ev) {
-                        const double shifted = potential > 0.0 ? energy_ev + potential : energy_ev;
-                        return legacyBackscatterYield(material, shifted);
-                    });
-                const double emission_escape =
-                    potential > 0.0
-                        ? std::exp(-potential / std::max(
-                                                   1.0e-3,
-                                                   material.getScalarProperty(
-                                                       "secondary_emission_escape_energy_ev", 2.0)))
-                        : 1.0;
+                currents.electron_current_a_per_m2 += response.collection_current_a_per_m2;
                 currents.secondary_emission_a_per_m2 +=
-                    std::abs(collection) * see_integral * emission_escape;
+                    response.emission.secondary_emission_a_per_m2;
                 currents.backscatter_emission_a_per_m2 +=
-                    std::abs(collection) * backscatter_integral * emission_escape;
+                    response.emission.backscatter_emission_a_per_m2;
             }
 
             for (const auto& population : ion_populations)
             {
-                const double mass_kg =
-                    std::max(1.0e-6, population.mass_amu) * 1.66053906660e-27;
-                const double base = legacyThermalCurrentDensity(population.density_m3,
-                                                                population.temperature_ev, mass_kg);
-                const double factor =
-                    potential > 0.0
-                        ? std::exp(-potential / std::max(1.0e-6, ion_characteristic_ev))
-                        : 1.0;
-                const double collection =
-                    base * std::max(0.0, effective_config.ion_collection_coefficient) * factor;
-                currents.ion_current_a_per_m2 += collection;
-
-                const double ion_secondary_integral = integrateLegacyMaxwellian(
-                    population.temperature_ev, [&](double energy_ev) {
-                        const double shifted =
-                            potential <= 0.0 ? energy_ev - potential : energy_ev;
-                        return legacyIonSecondaryYield(material, shifted);
+                const auto response = Material::evaluateLegacyPopulationResponse(
+                    material,
+                    Material::LegacyPopulationResponseInputs{
+                        Material::LegacyCollectionParticle::Ion,
+                        legacy_model,
+                        population.density_m3,
+                        population.temperature_ev,
+                        population.mass_amu,
+                        potential,
+                        electron_characteristic_ev,
+                        ion_characteristic_ev,
+                        electron_collection_coefficient,
+                        effective_config.ion_collection_coefficient,
+                        material.getScalarProperty("sims_exponent_n", 1.6),
                     });
-                const double emission_escape =
-                    potential > 0.0
-                        ? std::exp(-potential / std::max(
-                                                   1.0e-3,
-                                                   material.getScalarProperty(
-                                                       "secondary_emission_escape_energy_ev", 2.0)))
-                        : 1.0;
+                currents.ion_current_a_per_m2 += response.collection_current_a_per_m2;
                 currents.ion_secondary_emission_a_per_m2 +=
-                    std::abs(collection) * ion_secondary_integral * emission_escape;
+                    response.emission.ion_secondary_emission_a_per_m2;
             }
 
-            currents.photo_emission_a_per_m2 = photoCurrent(role, effective_config, potential);
+            currents.photo_emission_a_per_m2 =
+                photoCurrent(role, effective_config, material, potential);
             currents.conduction_current_a_per_m2 = conductionCurrent(role, state, effective_config);
             currents.ram_ion_current_a_per_m2 = ramCurrent(role, effective_config, potential);
             currents.current_derivative_a_per_m2_per_v = 0.0;
-            currents.total_current_a_per_m2 =
-                currents.electron_current_a_per_m2 + currents.ion_current_a_per_m2 +
-                currents.secondary_emission_a_per_m2 + currents.ion_secondary_emission_a_per_m2 +
-                currents.backscatter_emission_a_per_m2 + currents.photo_emission_a_per_m2 +
-                currents.conduction_current_a_per_m2 + currents.ram_ion_current_a_per_m2;
+            currents.total_current_a_per_m2 = Coupling::aggregateSurfaceCurrentDensity(
+                makeCouplingComponentState(currents), 0.0, 0.0,
+                currents.ram_ion_current_a_per_m2);
             return currents;
         }
 
-        const double electron_mass_kg = 9.1093837015e-31;
-        const double ion_mass_kg =
-            std::max(1.0, effective_config.plasma.ion_mass_amu) * 1.66053906660e-27;
-        const double electron_base = legacyThermalCurrentDensity(
-            effective_config.plasma.electron_density_m3, effective_config.plasma.electron_temperature_ev,
-            electron_mass_kg);
-        const double ion_base = legacyThermalCurrentDensity(
-            effective_config.plasma.ion_density_m3, effective_config.plasma.ion_temperature_ev,
-            ion_mass_kg);
-
-        const double electron_factor =
-            potential > 0.0
-                ? (1.0 + potential / std::max(1.0e-6, effective_config.plasma.electron_temperature_ev))
-                : std::exp(potential /
-                           std::max(1.0e-6, effective_config.plasma.electron_temperature_ev));
-        const double ion_factor =
-            potential > 0.0
-                ? std::exp(-potential / std::max(1.0e-6, effective_config.plasma.ion_temperature_ev))
-                : (1.0 - potential / std::max(1.0e-6, effective_config.plasma.ion_temperature_ev));
-
         SurfaceCurrents currents;
-        currents.electron_current_a_per_m2 =
-            -electron_base * std::max(0.0, effective_config.electron_collection_coefficient) *
-            electron_factor;
-        currents.ion_current_a_per_m2 =
-            ion_base * std::max(0.0, effective_config.ion_collection_coefficient) * ion_factor;
+        const auto legacy_model =
+            effective_config.reference_see_model == SecondaryElectronEmissionModel::Whipple
+                ? Material::LegacySecondaryYieldModel::Whipple
+                : (effective_config.reference_see_model ==
+                           SecondaryElectronEmissionModel::Sims
+                       ? Material::LegacySecondaryYieldModel::Sims
+                       : Material::LegacySecondaryYieldModel::Katz);
+        const double sims_exponent_n = material.getScalarProperty("sims_exponent_n", 1.6);
 
-        const double electron_incident_energy =
-            std::max(1.0e-6, effective_config.plasma.electron_temperature_ev + std::max(0.0, potential));
-        const double ion_incident_energy =
-            std::max(1.0e-6, effective_config.plasma.ion_temperature_ev + std::max(0.0, -potential));
-        const double secondary_escape =
-            potential > 0.0
-                ? std::exp(-potential /
-                           std::max(1.0e-3, material.getScalarProperty("secondary_emission_escape_energy_ev", 2.0)))
-                : 1.0;
-
+        const auto electron_response = Material::evaluateLegacyPopulationResponse(
+            material,
+            Material::LegacyPopulationResponseInputs{
+                Material::LegacyCollectionParticle::Electron,
+                legacy_model,
+                effective_config.plasma.electron_density_m3,
+                effective_config.plasma.electron_temperature_ev,
+                5.48579909065e-4,
+                potential,
+                effective_config.plasma.electron_temperature_ev,
+                effective_config.plasma.ion_temperature_ev,
+                electron_collection_coefficient,
+                effective_config.ion_collection_coefficient,
+                sims_exponent_n,
+            });
+        currents.electron_current_a_per_m2 = electron_response.collection_current_a_per_m2;
         currents.secondary_emission_a_per_m2 =
-            std::abs(currents.electron_current_a_per_m2) *
-            legacySeeYield(effective_config, material, electron_incident_energy) * secondary_escape;
-        currents.ion_secondary_emission_a_per_m2 =
-            std::abs(currents.ion_current_a_per_m2) *
-            legacyIonSecondaryYield(material, ion_incident_energy) * secondary_escape;
+            electron_response.emission.secondary_emission_a_per_m2;
         currents.backscatter_emission_a_per_m2 =
-            std::abs(currents.electron_current_a_per_m2) *
-            legacyBackscatterYield(material, electron_incident_energy) * secondary_escape;
-        currents.photo_emission_a_per_m2 = photoCurrent(role, effective_config, potential);
+            electron_response.emission.backscatter_emission_a_per_m2;
+
+        const auto ion_response = Material::evaluateLegacyPopulationResponse(
+            material,
+            Material::LegacyPopulationResponseInputs{
+                Material::LegacyCollectionParticle::Ion,
+                legacy_model,
+                effective_config.plasma.ion_density_m3,
+                effective_config.plasma.ion_temperature_ev,
+                std::max(1.0, effective_config.plasma.ion_mass_amu),
+                potential,
+                effective_config.plasma.electron_temperature_ev,
+                effective_config.plasma.ion_temperature_ev,
+                electron_collection_coefficient,
+                effective_config.ion_collection_coefficient,
+                sims_exponent_n,
+            });
+        currents.ion_current_a_per_m2 = ion_response.collection_current_a_per_m2;
+        currents.ion_secondary_emission_a_per_m2 =
+            ion_response.emission.ion_secondary_emission_a_per_m2;
+        currents.photo_emission_a_per_m2 =
+            photoCurrent(role, effective_config, material, potential);
         currents.conduction_current_a_per_m2 = conductionCurrent(role, state, effective_config);
         currents.ram_ion_current_a_per_m2 = ramCurrent(role, effective_config, potential);
         currents.current_derivative_a_per_m2_per_v = 0.0;
         currents.total_current_a_per_m2 =
-            currents.electron_current_a_per_m2 + currents.ion_current_a_per_m2 +
-            currents.secondary_emission_a_per_m2 + currents.ion_secondary_emission_a_per_m2 +
-            currents.backscatter_emission_a_per_m2 + currents.photo_emission_a_per_m2 +
-            currents.conduction_current_a_per_m2 + currents.ram_ion_current_a_per_m2;
+            Coupling::aggregateSurfaceCurrentDensity(makeCouplingComponentState(currents), 0.0,
+                                                     0.0, currents.ram_ion_current_a_per_m2);
         return currents;
     }
 };
@@ -3646,95 +3143,83 @@ class LegacyMatlabBenchmarkCurrentModel final : public LegacyBenchmarkCurrentMod
         const auto& material = materialFor(role, state);
         const double potential = role == ReferenceSurfaceRole::Body ? state.body_potential_v
                                                                     : state.patch_potential_v;
+        const double electron_collection_coefficient =
+            roleElectronCollectionCoefficient(role, effective_config, material);
 
         SurfaceCurrents currents;
         const auto electron_populations = benchmarkElectronPopulations(effective_config);
         const auto ion_populations = benchmarkIonPopulations(effective_config);
+        const auto legacy_model =
+            effective_config.reference_see_model == SecondaryElectronEmissionModel::Whipple
+                ? Material::LegacySecondaryYieldModel::Whipple
+                : (effective_config.reference_see_model ==
+                           SecondaryElectronEmissionModel::Sims
+                       ? Material::LegacySecondaryYieldModel::Sims
+                       : Material::LegacySecondaryYieldModel::Katz);
 
         for (const auto& population : electron_populations)
         {
-            const double mass_kg = std::max(1.0e-6, population.mass_amu) * 1.66053906660e-27;
-            const double base =
-                legacyThermalCurrentDensity(population.density_m3, population.temperature_ev, mass_kg);
-            const double factor =
-                potential > 0.0
-                    ? (1.0 + potential / std::max(1.0e-6, population.temperature_ev))
-                    : std::exp(potential / std::max(1.0e-6, population.temperature_ev));
-            const double collection =
-                -base * std::max(0.0, effective_config.electron_collection_coefficient) * factor;
-            currents.electron_current_a_per_m2 += collection;
-
-            const double see_integral = integrateLegacyMaxwellian(
-                population.temperature_ev, [&](double energy_ev) {
-                    const double shifted =
-                        potential > 0.0 ? energy_ev + potential : energy_ev;
-                    return legacySeeYield(effective_config, material, shifted);
+            const auto response = Material::evaluateLegacyPopulationResponse(
+                material,
+                Material::LegacyPopulationResponseInputs{
+                    Material::LegacyCollectionParticle::Electron,
+                    legacy_model,
+                    population.density_m3,
+                    population.temperature_ev,
+                    population.mass_amu,
+                    potential,
+                    population.temperature_ev,
+                    population.temperature_ev,
+                    electron_collection_coefficient,
+                    effective_config.ion_collection_coefficient,
+                    material.getScalarProperty("sims_exponent_n", 1.6),
                 });
-            const double backscatter_integral = integrateLegacyMaxwellian(
-                population.temperature_ev, [&](double energy_ev) {
-                    const double shifted =
-                        potential > 0.0 ? energy_ev + potential : energy_ev;
-                    return legacyBackscatterYield(material, shifted);
-                });
-            const double emission_escape =
-                potential > 0.0
-                    ? std::exp(-potential /
-                               std::max(1.0e-3,
-                                        material.getScalarProperty("secondary_emission_escape_energy_ev", 2.0)))
-                    : 1.0;
+            currents.electron_current_a_per_m2 += response.collection_current_a_per_m2;
             currents.secondary_emission_a_per_m2 +=
-                std::abs(collection) * see_integral * emission_escape;
+                response.emission.secondary_emission_a_per_m2;
             currents.backscatter_emission_a_per_m2 +=
-                std::abs(collection) * backscatter_integral * emission_escape;
+                response.emission.backscatter_emission_a_per_m2;
         }
 
         for (const auto& population : ion_populations)
         {
-            const double mass_kg = std::max(1.0e-6, population.mass_amu) * 1.66053906660e-27;
-            const double base =
-                legacyThermalCurrentDensity(population.density_m3, population.temperature_ev, mass_kg);
-            const double factor =
-                potential > 0.0
-                    ? std::exp(-potential / std::max(1.0e-6, population.temperature_ev))
-                    : (1.0 - potential / std::max(1.0e-6, population.temperature_ev));
-            const double collection =
-                base * std::max(0.0, effective_config.ion_collection_coefficient) * factor;
-            currents.ion_current_a_per_m2 += collection;
-
-            const double ion_secondary_integral = integrateLegacyMaxwellian(
-                population.temperature_ev, [&](double energy_ev) {
-                    const double shifted =
-                        potential <= 0.0 ? energy_ev - potential : energy_ev;
-                    return legacyIonSecondaryYield(material, shifted);
+            const auto response = Material::evaluateLegacyPopulationResponse(
+                material,
+                Material::LegacyPopulationResponseInputs{
+                    Material::LegacyCollectionParticle::Ion,
+                    legacy_model,
+                    population.density_m3,
+                    population.temperature_ev,
+                    population.mass_amu,
+                    potential,
+                    population.temperature_ev,
+                    population.temperature_ev,
+                    electron_collection_coefficient,
+                    effective_config.ion_collection_coefficient,
+                    material.getScalarProperty("sims_exponent_n", 1.6),
                 });
-            const double emission_escape =
-                potential > 0.0
-                    ? std::exp(-potential /
-                               std::max(1.0e-3,
-                                        material.getScalarProperty("secondary_emission_escape_energy_ev", 2.0)))
-                    : 1.0;
+            currents.ion_current_a_per_m2 += response.collection_current_a_per_m2;
             currents.ion_secondary_emission_a_per_m2 +=
-                std::abs(collection) * ion_secondary_integral * emission_escape;
+                response.emission.ion_secondary_emission_a_per_m2;
         }
 
-        currents.photo_emission_a_per_m2 = photoCurrent(role, effective_config, potential);
+        currents.photo_emission_a_per_m2 =
+            photoCurrent(role, effective_config, material, potential);
         currents.conduction_current_a_per_m2 = conductionCurrent(role, state, effective_config);
         currents.ram_ion_current_a_per_m2 = ramCurrent(role, effective_config, potential);
         currents.current_derivative_a_per_m2_per_v = 0.0;
-        currents.total_current_a_per_m2 =
-            currents.electron_current_a_per_m2 + currents.ion_current_a_per_m2 +
-            currents.secondary_emission_a_per_m2 + currents.ion_secondary_emission_a_per_m2 +
-            currents.backscatter_emission_a_per_m2 + currents.photo_emission_a_per_m2 +
-            currents.conduction_current_a_per_m2 + currents.ram_ion_current_a_per_m2;
+        currents.total_current_a_per_m2 = Coupling::aggregateSurfaceCurrentDensity(
+            makeCouplingComponentState(currents), 0.0, 0.0,
+            currents.ram_ion_current_a_per_m2);
         return currents;
     }
 };
 
-class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
+class SpisEquivalentSurfaceCurrentModel final : public SurfaceCurrentModel
 {
   public:
-    ReferenceBackedSurfaceCurrentModel(SurfaceChargingConfig config, SurfaceCurrentAlgorithmMode mode,
-                                       std::string name)
+    SpisEquivalentSurfaceCurrentModel(SurfaceChargingConfig config, SurfaceCurrentAlgorithmMode mode,
+                                      std::string name)
         : config_(std::move(config)), mode_(mode), name_(std::move(name))
     {
     }
@@ -3747,39 +3232,55 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
             return SurfaceCurrents{};
         }
 
+        const SurfaceModelRuntimeState evaluated_state =
+            decorateState(evaluationStateForRole(role, state));
         const SurfaceChargingConfig effective_config =
             role == ReferenceSurfaceRole::Patch ? effectivePatchConfig(config_, state) : config_;
-        ReferenceCurrentBalanceModel reference_model;
-        reference_model.configure(makeReferenceConfig(effective_config, decorateState(state)));
-        const auto terms =
-            reference_model.evaluate(role, state.body_potential_v, state.patch_potential_v);
-
-        SurfaceCurrents currents;
-        currents.electron_current_a_per_m2 = terms.electron_collection_a_per_m2;
-        currents.ion_current_a_per_m2 = terms.ion_collection_a_per_m2;
-        currents.secondary_emission_a_per_m2 = terms.secondary_electron_a_per_m2;
-        currents.ion_secondary_emission_a_per_m2 = terms.ion_secondary_electron_a_per_m2;
-        currents.backscatter_emission_a_per_m2 = terms.backscatter_electron_a_per_m2;
-        currents.photo_emission_a_per_m2 = terms.photoelectron_a_per_m2;
-        currents.conduction_current_a_per_m2 = terms.conduction_a_per_m2;
-        currents.ram_ion_current_a_per_m2 = terms.ram_ion_a_per_m2;
+        const auto distribution =
+            buildSurfaceDistributionMoments(effective_config, evaluated_state, role);
+        const auto material_response = buildSurfaceMaterialInteractionMoments(
+            effective_config, evaluated_state, effective_config.material, distribution, role);
+        const double reference_derivative = computeNativeCurrentDerivative(role, state);
+        const SurfaceCurrents assembled_currents = assembleSpisEquivalentCurrents(
+            role, effective_config, evaluated_state, distribution, material_response);
+        SurfaceKernelSnapshot kernel_snapshot = buildReferenceKernelSnapshot(
+            role, effective_config, evaluated_state, distribution, material_response,
+            assembled_currents,
+            reference_derivative);
+        SurfaceCurrents currents = kernel_snapshot.currents;
         if (role == ReferenceSurfaceRole::Patch)
         {
-            currents.thermionic_emission_a_per_m2 =
-                computePatchThermionicEmission(effective_config, state);
-            currents.field_emission_a_per_m2 = computePatchFieldEmission(effective_config, state);
+            const auto& route_kernel_snapshot =
+                calibrationStateFor(state).latest_kernel_snapshot;
+            const auto adjustment = Coupling::applySurfacePicRouteAdjustment(
+                Coupling::SurfacePicRouteAdjustmentInputs{
+                    hasFormalSurfacePicRoute(),
+                    route_kernel_snapshot.valid,
+                    makeCouplingComponentState(route_kernel_snapshot.currents),
+                    route_kernel_snapshot.currents.current_derivative_a_per_m2_per_v,
+                },
+                makeCouplingComponentState(currents),
+                currents.current_derivative_a_per_m2_per_v);
+
+            if (adjustment.applied)
+            {
+                applyCouplingComponentState(adjustment.components, currents);
+                currents.thermionic_emission_a_per_m2 =
+                    route_kernel_snapshot.currents.thermionic_emission_a_per_m2;
+                currents.field_emission_a_per_m2 =
+                    route_kernel_snapshot.currents.field_emission_a_per_m2;
+                currents.ram_ion_current_a_per_m2 =
+                    route_kernel_snapshot.currents.ram_ion_current_a_per_m2;
+                currents.current_derivative_a_per_m2_per_v = adjustment.total_didv_a_per_v;
+            }
         }
-        currents.current_derivative_a_per_m2_per_v = computeCurrentDerivative(role, state);
-        currents.total_current_a_per_m2 = currents.electron_current_a_per_m2 +
-                                          currents.ion_current_a_per_m2 +
-                                          currents.secondary_emission_a_per_m2 +
-                                          currents.ion_secondary_emission_a_per_m2 +
-                                          currents.backscatter_emission_a_per_m2 +
-                                          currents.photo_emission_a_per_m2 +
-                                          currents.thermionic_emission_a_per_m2 +
-                                          currents.field_emission_a_per_m2 +
-                                          currents.conduction_current_a_per_m2 +
-                                          currents.ram_ion_current_a_per_m2;
+        currents.current_derivative_a_per_m2_per_v =
+            std::isfinite(currents.current_derivative_a_per_m2_per_v)
+                ? currents.current_derivative_a_per_m2_per_v
+                : computeCurrentDerivative(role, state);
+        currents.total_current_a_per_m2 = Coupling::aggregateSurfaceCurrentDensity(
+            makeCouplingComponentState(currents), currents.thermionic_emission_a_per_m2,
+            currents.field_emission_a_per_m2, currents.ram_ion_current_a_per_m2);
         return currents;
     }
 
@@ -3788,35 +3289,35 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
                                      double minimum_potential_v,
                                      double maximum_potential_v) const override
     {
-        const SurfaceChargingConfig effective_config =
-            role == ReferenceSurfaceRole::Patch ? effectivePatchConfig(config_, state) : config_;
-        ReferenceCurrentBalanceModel reference_model;
-        reference_model.configure(makeReferenceConfig(effective_config, decorateState(state)));
-        return reference_model.solveEquilibriumPotential(role, state.body_potential_v,
-                                                         state.patch_potential_v,
-                                                         minimum_potential_v,
-                                                         maximum_potential_v);
+        return solveNativeEquilibriumPotential(role, state, minimum_potential_v,
+                                              maximum_potential_v);
     }
 
     double computeCurrentDerivative(ReferenceSurfaceRole role,
                                     const SurfaceModelRuntimeState& state) const override
     {
+        const SurfaceModelRuntimeState evaluated_state =
+            decorateState(evaluationStateForRole(role, state));
         const auto& calibration = calibrationStateFor(state);
-        if (role == ReferenceSurfaceRole::Patch &&
-            config_.regime == SurfaceChargingRegime::GeoKineticPicLike && calibration.latest_sample.valid &&
-            std::isfinite(calibration.latest_sample.current_derivative_a_per_m2_per_v) &&
-            std::abs(state.patch_potential_v - calibration.latest_sample.sampled_surface_potential_v) <=
+        const bool prefer_live_pic_derivative =
+            config_.runtime_route == SurfaceRuntimeRoute::SurfacePic ||
+            config_.runtime_route == SurfaceRuntimeRoute::SurfacePicHybrid ||
+            config_.regime == SurfaceChargingRegime::GeoKineticPicLike;
+        const double sampled_potential_v =
+            role == ReferenceSurfaceRole::Body ? evaluated_state.body_potential_v
+                                               : evaluated_state.patch_potential_v;
+        if (role == ReferenceSurfaceRole::Patch && prefer_live_pic_derivative &&
+            calibration.latest_kernel_snapshot.valid &&
+            std::isfinite(
+                calibration.latest_kernel_snapshot.currents.current_derivative_a_per_m2_per_v) &&
+            std::abs(sampled_potential_v -
+                     calibration.latest_kernel_snapshot.live_pic_sample.sampled_surface_potential_v) <=
                 std::max(0.1, config_.live_pic_probe_delta_v))
         {
-            return calibration.latest_sample.current_derivative_a_per_m2_per_v;
+            return calibration.latest_kernel_snapshot.currents.current_derivative_a_per_m2_per_v;
         }
 
-        const SurfaceChargingConfig effective_config =
-            role == ReferenceSurfaceRole::Patch ? effectivePatchConfig(config_, state) : config_;
-        ReferenceCurrentBalanceModel reference_model;
-        reference_model.configure(makeReferenceConfig(effective_config, decorateState(state)));
-        return reference_model.computeCurrentDerivative(role, state.body_potential_v,
-                                                        state.patch_potential_v);
+        return computeNativeCurrentDerivative(role, state);
     }
 
     bool recalibrate(const SurfaceModelRuntimeState& state,
@@ -3825,10 +3326,13 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
         if (!config_.enable_pic_calibration && !config_.enable_live_pic_window)
         {
             calibrationStateForWrite(state).latest_sample = PicMccCurrentSample{};
+            calibrationStateForWrite(state).latest_kernel_snapshot = SurfaceKernelSnapshot{};
             return false;
         }
 
         auto& calibration = calibrationStateForWrite(state);
+        const SurfaceModelRuntimeState evaluated_patch_state =
+            evaluationStateForRole(ReferenceSurfaceRole::Patch, state);
 
         const double equilibrium = solveEquilibriumPotential(
             ReferenceSurfaceRole::Patch, state,
@@ -3837,23 +3341,39 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
             std::max(config_.max_abs_potential_v,
                      20.0 * std::max(1.0, config_.plasma.electron_temperature_ev)));
         const double sample_potential =
-            std::clamp(state.patch_potential_v + 0.25 * (equilibrium - state.patch_potential_v),
+            std::clamp(evaluated_patch_state.patch_potential_v +
+                           0.25 * (equilibrium - evaluated_patch_state.patch_potential_v),
                        -config_.max_abs_potential_v, config_.max_abs_potential_v);
 
         bool updated = false;
         if (config_.enable_live_pic_window)
         {
             const SurfaceChargingConfig effective_config = effectivePatchConfig(config_, state);
+            calibration.latest_kernel_snapshot = SurfaceKernelSnapshot{};
             PicMccSurfaceSamplerConfig sampler_config;
-            sampler_config.surface_area_m2 =
-                state.surface_area_m2 > 0.0 ? state.surface_area_m2 : effective_config.surface_area_m2;
+            sampler_config.surface_area_m2 = evaluated_patch_state.surface_area_m2 > 0.0
+                                                 ? evaluated_patch_state.surface_area_m2
+                                                 : effective_config.surface_area_m2;
             sampler_config.gap_distance_m = std::clamp(
-                state.effective_sheath_length_m,
+                evaluated_patch_state.effective_sheath_length_m,
                 std::max(1.0e-5, effective_config.minimum_sheath_length_m),
                 std::min(5.0e-2, std::max(effective_config.minimum_sheath_length_m,
                                           effective_config.maximum_sheath_length_m)));
             sampler_config.surface_potential_v = sample_potential;
-            sampler_config.plasma_reference_potential_v = state.reference_plasma_potential_v;
+            sampler_config.plasma_reference_potential_v =
+                evaluated_patch_state.reference_plasma_potential_v;
+            sampler_config.node_name = evaluated_patch_state.node_name;
+            sampler_config.boundary_group_id =
+                boundaryGroupIdForRuntimeNode(effective_config, evaluated_patch_state.node_name);
+            sampler_config.linked_boundary_face_count =
+                linkedBoundaryFaceCountForGroup(effective_config,
+                                                sampler_config.boundary_group_id);
+            sampler_config.projection_weight_sum =
+                projectionWeightSumForRuntimeNode(effective_config, evaluated_patch_state.node_name);
+            sampler_config.surface_aspect_ratio = std::clamp(
+                1.0 + 0.25 * static_cast<double>(sampler_config.linked_boundary_face_count) +
+                    0.01 * std::abs(effective_config.patch_flow_angle_deg),
+                1.0, 4.0);
             sampler_config.electron_flow_coupling = effective_config.electron_flow_coupling;
             sampler_config.bulk_flow_velocity_m_per_s = effective_config.bulk_flow_velocity_m_per_s;
             sampler_config.flow_alignment_cosine = effective_config.flow_alignment_cosine;
@@ -3864,6 +3384,14 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
                 std::max<std::size_t>(1, effective_config.live_pic_particles_per_element);
             sampler_config.window_steps = std::max<std::size_t>(4, effective_config.live_pic_window_steps);
             sampler_config.enable_mcc = effective_config.enable_live_pic_mcc;
+            sampler_config.collision_cross_section_set_id =
+                effective_config.live_pic_collision_cross_section_set_id;
+            sampler_config.deposition_scheme =
+                effective_config.solver_config.deposition_scheme.empty()
+                    ? "pic_window_cic"
+                    : effective_config.solver_config.deposition_scheme;
+            sampler_config.seed = effective_config.seed;
+            sampler_config.sampling_policy = effective_config.sampling_policy;
             sampler_config.plasma = effective_config.plasma;
             sampler_config.electron_spectrum = effective_config.electron_spectrum;
             sampler_config.ion_spectrum = effective_config.ion_spectrum;
@@ -3876,13 +3404,21 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
             if (calibration.latest_sample.valid)
             {
                 const SurfaceModelRuntimeState sample_state =
-                    decorateState(withPatchPotential(state, sample_potential));
-                ReferenceCurrentBalanceModel reference_model;
-                reference_model.configure(makeReferenceConfig(effective_config, sample_state));
-                const auto reference_terms =
-                    reference_model.evaluate(ReferenceSurfaceRole::Patch, sample_state.body_potential_v,
-                                             sample_state.patch_potential_v);
-                updateFactorsFromReference(reference_terms, calibration);
+                    decorateState(withPatchPotential(evaluated_patch_state, sample_potential));
+                const auto sample_distribution = buildSurfaceDistributionMoments(
+                    effective_config, sample_state, ReferenceSurfaceRole::Patch);
+                const auto sample_material_response = buildSurfaceMaterialInteractionMoments(
+                    effective_config, sample_state, effective_config.material,
+                    sample_distribution, ReferenceSurfaceRole::Patch);
+                SurfaceCurrents native_currents = assembleSpisEquivalentCurrents(
+                    ReferenceSurfaceRole::Patch, effective_config, sample_state,
+                    sample_distribution, sample_material_response);
+                native_currents.current_derivative_a_per_m2_per_v =
+                    calibration.latest_sample.current_derivative_a_per_m2_per_v;
+                calibration.latest_kernel_snapshot = buildPicKernelSnapshot(
+                    effective_config, sample_state, calibration.latest_sample, native_currents,
+                    sample_distribution, sample_material_response);
+                updateFactorsFromCurrents(native_currents, calibration);
                 updated = true;
             }
         }
@@ -3890,30 +3426,35 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
         if (!updated && config_.enable_pic_calibration)
         {
             calibration.latest_sample = PicMccCurrentSample{};
+            calibration.latest_kernel_snapshot = SurfaceKernelSnapshot{};
             const SurfaceChargingConfig effective_config = effectivePatchConfig(config_, state);
             const SurfaceModelRuntimeState sample_state =
-                decorateState(withPatchPotential(state, sample_potential));
-            ReferenceCurrentBalanceModel reference_model;
-            reference_model.configure(makeReferenceConfig(effective_config, sample_state));
-            const auto reference_terms =
-                reference_model.evaluate(ReferenceSurfaceRole::Patch, sample_state.body_potential_v,
-                                         sample_state.patch_potential_v);
+                decorateState(withPatchPotential(evaluated_patch_state, sample_potential));
+            const SurfaceCurrents native_currents = evaluateNativeSurfaceCurrentsAtPotential(
+                ReferenceSurfaceRole::Patch, sample_state, sample_state.patch_potential_v);
             const double electron_scale =
                 estimateElectronFluxPicLike(effective_config, sample_potential, pic_calibration_samples);
             const double ion_scale =
                 estimateIonFluxPicLike(effective_config, sample_potential, pic_calibration_samples);
-            if (std::abs(reference_terms.electron_collection_a_per_m2) > 1.0e-18)
+            const auto factors = Coupling::estimateSurfaceCalibrationFactors(
+                Coupling::SurfaceCalibrationFactorInputs{
+                    electron_scale,
+                    native_currents.electron_current_a_per_m2,
+                    ion_scale,
+                    native_currents.ion_current_a_per_m2,
+                    config_.electron_pic_calibration_min,
+                    config_.electron_pic_calibration_max,
+                    calibration.electron_calibration_factor,
+                    calibration.ion_calibration_factor,
+                });
+            if (std::abs(native_currents.electron_current_a_per_m2) > 1.0e-18)
             {
-                calibration.electron_calibration_factor = std::clamp(
-                    electron_scale / reference_terms.electron_collection_a_per_m2,
-                    config_.electron_pic_calibration_min, config_.electron_pic_calibration_max);
+                calibration.electron_calibration_factor = factors.electron_factor;
                 updated = true;
             }
-            if (std::abs(reference_terms.ion_collection_a_per_m2) > 1.0e-18)
+            if (std::abs(native_currents.ion_current_a_per_m2) > 1.0e-18)
             {
-                calibration.ion_calibration_factor = std::clamp(
-                    ion_scale / reference_terms.ion_collection_a_per_m2,
-                    config_.ion_pic_calibration_min, config_.ion_pic_calibration_max);
+                calibration.ion_calibration_factor = factors.ion_factor;
                 updated = true;
             }
         }
@@ -3925,7 +3466,7 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
 
     double electronCalibrationFactor() const override
     {
-        return calibrationStateForLastKey().electron_calibration_factor;
+        return calibrationStateForLatestAvailablePic().electron_calibration_factor;
     }
 
     double electronCalibrationFactor(const SurfaceModelRuntimeState& state) const override
@@ -3935,7 +3476,7 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
 
     double ionCalibrationFactor() const override
     {
-        return calibrationStateForLastKey().ion_calibration_factor;
+        return calibrationStateForLatestAvailablePic().ion_calibration_factor;
     }
 
     double ionCalibrationFactor(const SurfaceModelRuntimeState& state) const override
@@ -3945,7 +3486,7 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
 
     const PicMccCurrentSample& latestLivePicSample() const override
     {
-        return calibrationStateForLastKey().latest_sample;
+        return calibrationStateForLatestAvailablePic().latest_sample;
     }
 
     const PicMccCurrentSample& latestLivePicSample(
@@ -3954,9 +3495,21 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
         return calibrationStateFor(state).latest_sample;
     }
 
+    const SurfaceKernelSnapshot& latestLivePicKernelSnapshot() const override
+    {
+        return calibrationStateForLatestAvailablePic().latest_kernel_snapshot;
+    }
+
+    const SurfaceKernelSnapshot& latestLivePicKernelSnapshot(
+        const SurfaceModelRuntimeState& state) const override
+    {
+        return calibrationStateFor(state).latest_kernel_snapshot;
+    }
+
     std::string algorithmName() const override
     {
-        return name_;
+        return name_ + ":" + runtimeRouteName(config_.runtime_route) + ":" +
+               surfacePicStrategyName(config_.surface_pic_strategy);
     }
 
     SurfaceCurrentAlgorithmMode algorithmMode() const override
@@ -3970,10 +3523,21 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
         double electron_calibration_factor = 1.0;
         double ion_calibration_factor = 1.0;
         PicMccCurrentSample latest_sample{};
+        SurfaceKernelSnapshot latest_kernel_snapshot{};
     };
 
     std::string stateKey(const SurfaceModelRuntimeState& state) const
     {
+        const bool patch_like_name =
+            !state.node_name.empty() &&
+            state.node_name.rfind("body:", 0) != 0 &&
+            state.node_name != "body";
+        if (config_.surface_pic_runtime_kind ==
+                SurfacePicRuntimeKind::GraphCoupledSharedSurface &&
+            patch_like_name)
+        {
+            return "__shared_surface_patch_runtime__";
+        }
         if (!state.node_name.empty())
         {
             return state.node_name;
@@ -4008,6 +3572,25 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
         return default_calibration_state_;
     }
 
+    const PatchCalibrationState& calibrationStateForLatestAvailablePic() const
+    {
+        const auto& last_state = calibrationStateForLastKey();
+        if (last_state.latest_kernel_snapshot.valid || last_state.latest_sample.valid)
+        {
+            return last_state;
+        }
+
+        for (const auto& entry : patch_calibration_states_)
+        {
+            if (entry.second.latest_kernel_snapshot.valid || entry.second.latest_sample.valid)
+            {
+                return entry.second;
+            }
+        }
+
+        return default_calibration_state_;
+    }
+
     SurfaceModelRuntimeState withPatchPotential(const SurfaceModelRuntimeState& state,
                                                 double patch_potential_v) const
     {
@@ -4015,6 +3598,10 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
         const double old_drop =
             std::abs(state.reference_plasma_potential_v - state.patch_potential_v);
         updated.patch_potential_v = patch_potential_v;
+        if (updated.shared_runtime_enabled)
+        {
+            updated.shared_patch_potential_v = patch_potential_v;
+        }
         const double new_drop =
             std::abs(state.reference_plasma_potential_v - updated.patch_potential_v);
         if (old_drop > 1.0e-9)
@@ -4036,23 +3623,428 @@ class ReferenceBackedSurfaceCurrentModel final : public SurfaceCurrentModel
         return updated;
     }
 
-    void updateFactorsFromReference(const ReferenceCurrentComponents& reference_terms,
-                                    PatchCalibrationState& calibration)
+    SurfaceCurrents assembleSpisEquivalentCurrents(
+        ReferenceSurfaceRole role, const SurfaceChargingConfig& effective_config,
+        const SurfaceModelRuntimeState& state, const SurfaceDistributionMoments& distribution,
+        const SurfaceMaterialInteractionMoments& material_response,
+        const ReferenceCurrentComponents* fallback_terms = nullptr) const
     {
-        if (std::abs(reference_terms.electron_collection_a_per_m2) > 1.0e-18)
+        const auto& material = effective_config.material;
+        const double potential_v =
+            role == ReferenceSurfaceRole::Body ? state.body_potential_v : state.patch_potential_v;
+        Material::SurfaceRoleCurrentInputs current_inputs;
+        current_inputs.role = role == ReferenceSurfaceRole::Body ? Material::SurfaceCurrentRole::Body
+                                                                 : Material::SurfaceCurrentRole::Patch;
+        current_inputs.electron_characteristic_energy_ev =
+            distribution.electron_characteristic_energy_ev;
+        current_inputs.ion_characteristic_energy_ev = distribution.ion_characteristic_energy_ev;
+        current_inputs.patch_incidence_angle_deg = effective_config.patch_incidence_angle_deg;
+        current_inputs.patch_flow_angle_deg = effective_config.patch_flow_angle_deg;
+        current_inputs.surface_potential_v = potential_v;
+        current_inputs.reference_potential_v = state.reference_plasma_potential_v;
+        current_inputs.counterelectrode_potential_v = state.body_potential_v;
+        current_inputs.normal_electric_field_v_per_m = state.normal_electric_field_v_per_m;
+        current_inputs.patch_photoelectron_temperature_ev =
+            std::max(1.0e-3, effective_config.photoelectron_temperature_ev);
+        current_inputs.body_photoelectron_temperature_ev =
+            bodyPhotoelectronTemperatureEv(material, effective_config.photoelectron_temperature_ev);
+        current_inputs.patch_photo_current_density_a_per_m2 =
+            std::max(0.0, effective_config.patch_photo_current_density_a_per_m2);
+        current_inputs.body_photo_current_density_a_per_m2 =
+            std::max(0.0, effective_config.body_photo_current_density_a_per_m2);
+        current_inputs.body_photo_emission_scale = bodyPhotoEmissionScale(material);
+        current_inputs.dielectric_thickness_m = effective_config.dielectric_thickness_m;
+        current_inputs.exposed_area_m2 = std::max(1.0e-12, state.surface_area_m2);
+        current_inputs.effective_conductivity_s_per_m = state.effective_conductivity_s_per_m;
+        current_inputs.conductivity_scale =
+            std::max(0.0, effective_config.material.deriveSurfaceConductivityScaleFactor());
+        const auto native_bundle = Material::evaluateSurfaceRoleCurrentBundle(material, current_inputs);
+        double ram_current = 0.0;
+        if (effective_config.use_reference_current_balance &&
+            effective_config.regime == SurfaceChargingRegime::LeoFlowingPlasma)
         {
-            calibration.electron_calibration_factor = std::clamp(
-                calibration.latest_sample.electron_collection_current_density_a_per_m2 /
-                    reference_terms.electron_collection_a_per_m2,
-                config_.electron_pic_calibration_min, config_.electron_pic_calibration_max);
+            const auto flow_projection = resolveSurfaceFlowProjection(
+                effective_config.bulk_flow_velocity_m_per_s, effective_config.flow_alignment_cosine,
+                effective_config.patch_flow_angle_deg);
+            if (std::max(std::abs(flow_projection.body_projected_speed_m_per_s),
+                         std::abs(flow_projection.patch_projected_speed_m_per_s)) > 0.0)
+            {
+                ram_current =
+                    role == ReferenceSurfaceRole::Patch
+                        ? Material::evaluateLegacyRamPatchCurrentDensity(
+                              potential_v, effective_config.plasma.ion_density_m3,
+                              effective_config.plasma.ion_temperature_ev,
+                              effective_config.plasma.ion_mass_amu,
+                              flow_projection.patch_projected_speed_m_per_s)
+                        : Material::evaluateLegacyRamBodyCurrentDensity(
+                              potential_v, effective_config.plasma.ion_density_m3,
+                              effective_config.plasma.ion_temperature_ev,
+                              effective_config.plasma.ion_mass_amu,
+                              std::max(0.0, flow_projection.body_projected_speed_m_per_s));
+            }
         }
-        if (std::abs(reference_terms.ion_collection_a_per_m2) > 1.0e-18)
+
+        SurfaceCurrents currents;
+        currents.electron_current_a_per_m2 =
+            fallback_terms != nullptr && std::isfinite(fallback_terms->electron_collection_a_per_m2)
+                ? fallback_terms->electron_collection_a_per_m2
+                : -std::abs(native_bundle.electron_currents.electron_collection_a_per_m2) *
+                      distribution.electron_collection_scale;
+        currents.ion_current_a_per_m2 =
+            fallback_terms != nullptr && std::isfinite(fallback_terms->ion_collection_a_per_m2)
+                ? fallback_terms->ion_collection_a_per_m2
+                : std::abs(native_bundle.ion_currents.ion_collection_a_per_m2) *
+                      distribution.ion_collection_scale;
+        currents.secondary_emission_a_per_m2 =
+            std::abs(currents.electron_current_a_per_m2) * material_response.secondary_emission_scale;
+        currents.ion_secondary_emission_a_per_m2 =
+            std::abs(currents.ion_current_a_per_m2) * material_response.ion_secondary_emission_scale;
+        currents.backscatter_emission_a_per_m2 =
+            std::abs(currents.electron_current_a_per_m2) * material_response.backscatter_scale;
+        currents.photo_emission_a_per_m2 =
+            native_bundle.photo_currents.photoelectron_emission_a_per_m2 *
+            material_response.photo_emission_scale;
+        currents.conduction_current_a_per_m2 =
+            native_bundle.photo_currents.induced_conduction_a_per_m2 *
+            material_response.conductivity_scale;
+        currents.ram_ion_current_a_per_m2 =
+            fallback_terms != nullptr && std::isfinite(fallback_terms->ram_ion_a_per_m2)
+                ? fallback_terms->ram_ion_a_per_m2
+                : ram_current;
+        if (role == ReferenceSurfaceRole::Patch)
         {
-            calibration.ion_calibration_factor = std::clamp(
-                calibration.latest_sample.ion_collection_current_density_a_per_m2 /
-                    reference_terms.ion_collection_a_per_m2,
-                config_.ion_pic_calibration_min, config_.ion_pic_calibration_max);
+            currents.thermionic_emission_a_per_m2 =
+                Material::evaluateSurfaceThermionicEmissionCurrentDensity(
+                    effective_config.material,
+                    effective_config.emission.surface_temperature_k,
+                    state.patch_potential_v);
+            currents.field_emission_a_per_m2 =
+                Material::evaluateSurfaceFieldEmissionCurrentDensity(
+                    effective_config.material, state.patch_potential_v,
+                    state.reference_plasma_potential_v,
+                    state.normal_electric_field_v_per_m,
+                    state.effective_sheath_length_m);
         }
+        SurfaceCurrentLinearizationKernel kernel;
+        std::vector<SurfaceCurrentLinearizationNode> nodes(1);
+        auto& components = nodes[0].components;
+        components.electron_collection_a = currents.electron_current_a_per_m2;
+        components.ion_collection_a = currents.ion_current_a_per_m2;
+        components.secondary_electron_emission_a = currents.secondary_emission_a_per_m2;
+        components.ion_secondary_electron_emission_a = currents.ion_secondary_emission_a_per_m2;
+        components.backscatter_emission_a = currents.backscatter_emission_a_per_m2;
+        components.photoelectron_emission_a = currents.photo_emission_a_per_m2;
+        components.conduction_a = currents.conduction_current_a_per_m2;
+        const auto linearized = kernel.assemble(nodes);
+        currents.total_current_a_per_m2 = linearized.total_current_a.front() +
+                                          currents.thermionic_emission_a_per_m2 +
+                                          currents.field_emission_a_per_m2 +
+                                          currents.ram_ion_current_a_per_m2;
+        currents.current_derivative_a_per_m2_per_v =
+            linearized.total_didv_a_per_v.empty()
+                ? 0.0
+                : linearized.total_didv_a_per_v.front();
+        return currents;
+    }
+
+    SurfaceCurrents evaluateNativeSurfaceCurrentsAtPotential(
+        ReferenceSurfaceRole role, const SurfaceModelRuntimeState& base_state,
+        double candidate_potential_v) const
+    {
+        SurfaceModelRuntimeState candidate_state = base_state;
+        if (role == ReferenceSurfaceRole::Body)
+        {
+            candidate_state.body_potential_v = candidate_potential_v;
+        }
+        else
+        {
+            candidate_state = withPatchPotential(candidate_state, candidate_potential_v);
+        }
+
+        const SurfaceModelRuntimeState evaluated_state =
+            decorateState(evaluationStateForRole(role, candidate_state));
+        const SurfaceChargingConfig effective_config =
+            role == ReferenceSurfaceRole::Patch ? effectivePatchConfig(config_, candidate_state) : config_;
+        const auto distribution =
+            buildSurfaceDistributionMoments(effective_config, evaluated_state, role);
+        const auto material_response = buildSurfaceMaterialInteractionMoments(
+            effective_config, evaluated_state, effective_config.material, distribution, role);
+        return assembleSpisEquivalentCurrents(role, effective_config, evaluated_state, distribution,
+                                              material_response);
+    }
+
+    double computeNativeCurrentDerivative(ReferenceSurfaceRole role,
+                                          const SurfaceModelRuntimeState& state) const
+    {
+        const SurfaceModelRuntimeState evaluated_state =
+            decorateState(evaluationStateForRole(role, state));
+        const double sampled_potential_v =
+            role == ReferenceSurfaceRole::Body ? evaluated_state.body_potential_v
+                                               : evaluated_state.patch_potential_v;
+        return Coupling::estimateCenteredDidv(
+            [&](double potential_v) {
+                return evaluateNativeSurfaceCurrentsAtPotential(role, state, potential_v)
+                    .total_current_a_per_m2;
+            },
+            sampled_potential_v);
+    }
+
+    double solveNativeEquilibriumPotential(ReferenceSurfaceRole role,
+                                           const SurfaceModelRuntimeState& state,
+                                           double minimum_potential_v,
+                                           double maximum_potential_v) const
+    {
+        const auto result = Coupling::solveBisectionCurrentRoot(
+            [&](double potential_v) {
+                return evaluateNativeSurfaceCurrentsAtPotential(role, state, potential_v)
+                    .total_current_a_per_m2;
+            },
+            minimum_potential_v, maximum_potential_v);
+        return std::clamp(result.root_x, minimum_potential_v, maximum_potential_v);
+    }
+
+    SurfaceModelRuntimeState evaluationStateForRole(ReferenceSurfaceRole role,
+                                                    const SurfaceModelRuntimeState& state) const
+    {
+        if (role != ReferenceSurfaceRole::Patch || !state.shared_runtime_enabled ||
+            config_.surface_pic_runtime_kind != SurfacePicRuntimeKind::GraphCoupledSharedSurface)
+        {
+            return state;
+        }
+
+        SurfaceModelRuntimeState updated = state;
+        updated.patch_potential_v = state.shared_patch_potential_v;
+        updated.surface_area_m2 =
+            state.shared_patch_area_m2 > 0.0 ? state.shared_patch_area_m2 : state.surface_area_m2;
+        updated.effective_sheath_length_m =
+            std::max(1.0e-6, state.shared_effective_sheath_length_m);
+        if (state.global_sheath_field_solve_active &&
+            std::isfinite(state.global_sheath_field_reference_potential_v))
+        {
+            updated.reference_plasma_potential_v =
+                state.global_sheath_field_reference_potential_v +
+                state.distributed_particle_transport_reference_shift_v;
+            updated.propagated_reference_potential_v = updated.reference_plasma_potential_v;
+            updated.field_solver_reference_potential_v =
+                state.global_sheath_field_reference_potential_v;
+        }
+        else if (std::isfinite(state.shared_reference_potential_v))
+        {
+            updated.reference_plasma_potential_v =
+                state.shared_reference_potential_v +
+                state.distributed_particle_transport_reference_shift_v;
+            updated.propagated_reference_potential_v = updated.reference_plasma_potential_v;
+        }
+        return updated;
+    }
+
+    double localPatchConductionCurrentDensity(const SurfaceModelRuntimeState& state,
+                                              const SurfaceChargingConfig& effective_config) const
+    {
+        return std::max(0.0, state.effective_conductivity_s_per_m) *
+               std::max(0.0, effective_config.material.deriveSurfaceConductivityScaleFactor()) *
+               (state.body_potential_v - state.patch_potential_v) /
+               std::max(1.0e-9, effective_config.dielectric_thickness_m);
+    }
+
+    double localPatchConductionDidvDensity(const SurfaceModelRuntimeState& state,
+                                           const SurfaceChargingConfig& effective_config) const
+    {
+        return -std::max(0.0, state.effective_conductivity_s_per_m) *
+               std::max(0.0, effective_config.material.deriveSurfaceConductivityScaleFactor()) /
+               std::max(1.0e-9, effective_config.dielectric_thickness_m);
+    }
+
+    void updateFactorsFromCurrents(const SurfaceCurrents& native_currents,
+                                   PatchCalibrationState& calibration)
+    {
+        const auto factors = Coupling::estimateSurfaceCalibrationFactors(
+            Coupling::SurfaceCalibrationFactorInputs{
+                calibration.latest_sample.electron_collection_current_density_a_per_m2,
+                native_currents.electron_current_a_per_m2,
+                calibration.latest_sample.ion_collection_current_density_a_per_m2,
+                native_currents.ion_current_a_per_m2,
+                config_.electron_pic_calibration_min,
+                config_.electron_pic_calibration_max,
+                calibration.electron_calibration_factor,
+                calibration.ion_calibration_factor,
+            });
+        calibration.electron_calibration_factor = factors.electron_factor;
+        calibration.ion_calibration_factor = factors.ion_factor;
+    }
+
+    bool hasFormalSurfacePicRoute() const
+    {
+        return config_.runtime_route == SurfaceRuntimeRoute::SurfacePic ||
+               config_.runtime_route == SurfaceRuntimeRoute::SurfacePicHybrid;
+    }
+
+    bool usesHybridSurfacePicCompletion() const
+    {
+        return config_.runtime_route == SurfaceRuntimeRoute::SurfacePicHybrid ||
+               config_.surface_pic_strategy == SurfacePicStrategy::SurfacePicHybridReference;
+    }
+
+    SurfaceKernelSnapshot buildReferenceKernelSnapshot(
+        ReferenceSurfaceRole role, const SurfaceChargingConfig& effective_config,
+        const SurfaceModelRuntimeState& state, const SurfaceDistributionMoments& distribution,
+        const SurfaceMaterialInteractionMoments& material_response,
+        const SurfaceCurrents& assembled_currents, double reference_derivative_a_per_m2_per_v) const
+    {
+        SurfaceKernelSnapshot snapshot;
+        snapshot.source_family = "spis_equivalent_surface_kernel_v1";
+        snapshot.distribution = distribution;
+        snapshot.material_interaction = material_response;
+        snapshot.currents = assembled_currents;
+        if (role == ReferenceSurfaceRole::Patch)
+        {
+            snapshot.currents.thermionic_emission_a_per_m2 =
+                Material::evaluateSurfaceThermionicEmissionCurrentDensity(
+                    effective_config.material,
+                    effective_config.emission.surface_temperature_k,
+                    state.patch_potential_v);
+            snapshot.currents.field_emission_a_per_m2 =
+                Material::evaluateSurfaceFieldEmissionCurrentDensity(
+                    effective_config.material, state.patch_potential_v,
+                    state.reference_plasma_potential_v,
+                    state.normal_electric_field_v_per_m,
+                    state.effective_sheath_length_m);
+        }
+        snapshot.currents.total_current_a_per_m2 = Coupling::aggregateSurfaceCurrentDensity(
+            makeCouplingComponentState(snapshot.currents),
+            snapshot.currents.thermionic_emission_a_per_m2,
+            snapshot.currents.field_emission_a_per_m2,
+            snapshot.currents.ram_ion_current_a_per_m2);
+
+        const double node_area_m2 = std::max(1.0e-12, state.surface_area_m2);
+        const double conduction_didv_density =
+            role == ReferenceSurfaceRole::Patch
+                ? localPatchConductionDidvDensity(state, effective_config)
+                : 0.0;
+        const auto density_linearization = Coupling::linearizeSurfaceCurrentDensity(
+            Coupling::SurfaceCurrentDensityLinearizationInputs{
+                makeCouplingComponentState(snapshot.currents),
+                node_area_m2,
+                reference_derivative_a_per_m2_per_v,
+                conduction_didv_density,
+                snapshot.currents.thermionic_emission_a_per_m2,
+                snapshot.currents.field_emission_a_per_m2,
+                snapshot.currents.ram_ion_current_a_per_m2,
+            });
+        snapshot.didv.node_index = state.node_index;
+        snapshot.didv.node_name = state.node_name;
+        snapshot.didv.node_area_m2 = node_area_m2;
+        snapshot.didv.plasma_current_a = density_linearization.plasma_current_a;
+        snapshot.didv.plasma_didv_a_per_v = density_linearization.plasma_didv_a_per_v;
+        snapshot.didv.conduction_current_a = density_linearization.conduction_current_a;
+        snapshot.didv.conduction_didv_a_per_v = density_linearization.conduction_didv_a_per_v;
+        snapshot.didv.total_current_a = density_linearization.total_current_a;
+        snapshot.didv.total_didv_a_per_v = density_linearization.total_didv_a_per_v;
+        snapshot.currents.current_derivative_a_per_m2_per_v =
+            density_linearization.total_didv_density_a_per_m2_per_v;
+        snapshot.currents.total_current_a_per_m2 =
+            density_linearization.total_current_density_a_per_m2;
+        snapshot.didv.valid = distribution.valid && material_response.valid;
+        snapshot.valid = snapshot.didv.valid;
+        return snapshot;
+    }
+
+    SurfaceKernelSnapshot buildPicKernelSnapshot(
+        const SurfaceChargingConfig& effective_config, const SurfaceModelRuntimeState& state,
+        const PicMccCurrentSample& sample, const SurfaceCurrents& reference_currents,
+        const SurfaceDistributionMoments& reference_distribution,
+        const SurfaceMaterialInteractionMoments& reference_material_response) const
+    {
+        SurfaceKernelSnapshot snapshot;
+        snapshot.source_family = usesHybridSurfacePicCompletion()
+                                     ? "spis_equivalent_surface_pic_hybrid_kernel_v1"
+                                     : "spis_equivalent_surface_pic_kernel_v1";
+        snapshot.live_pic_sample = sample;
+        snapshot.distribution = reference_distribution;
+        snapshot.distribution.valid = sample.valid;
+        const auto distribution_blend = Coupling::blendSurfaceDistributionComponents(
+            Coupling::SurfaceDistributionBlendInputs{
+                reference_currents.electron_current_a_per_m2,
+                reference_currents.ion_current_a_per_m2,
+                sample.electron_collection_current_density_a_per_m2,
+                sample.ion_collection_current_density_a_per_m2,
+                std::max(effective_config.plasma.electron_temperature_ev,
+                         Particle::resolvedSpectrumCharacteristicEnergyEv(
+                             effective_config.electron_spectrum,
+                             effective_config.plasma.electron_temperature_ev)),
+                std::max(effective_config.plasma.ion_temperature_ev,
+                         Particle::resolvedSpectrumCharacteristicEnergyEv(
+                             effective_config.ion_spectrum,
+                             effective_config.plasma.ion_temperature_ev)),
+            });
+        snapshot.distribution.electron_collection_scale =
+            distribution_blend.electron_collection_scale;
+        snapshot.distribution.ion_collection_scale = distribution_blend.ion_collection_scale;
+        snapshot.distribution.electron_characteristic_energy_ev =
+            distribution_blend.electron_characteristic_energy_ev;
+        snapshot.distribution.ion_characteristic_energy_ev =
+            distribution_blend.ion_characteristic_energy_ev;
+
+        snapshot.material_interaction = reference_material_response;
+        const auto emission_blend = Coupling::blendSurfaceEmissionComponents(
+            Coupling::SurfaceEmissionBlendInputs{
+                reference_currents.secondary_emission_a_per_m2,
+                reference_currents.ion_secondary_emission_a_per_m2,
+                reference_currents.backscatter_emission_a_per_m2,
+                sample.emitted_electron_current_density_a_per_m2,
+                usesHybridSurfacePicCompletion(),
+            });
+        if (std::abs(emission_blend.reference_emitted_total_a) > 1.0e-18)
+        {
+            snapshot.material_interaction.secondary_emission_scale = emission_blend.emission_scale;
+            snapshot.material_interaction.ion_secondary_emission_scale =
+                emission_blend.emission_scale;
+            snapshot.material_interaction.backscatter_scale = emission_blend.emission_scale;
+        }
+        snapshot.material_interaction.valid = sample.valid;
+
+        snapshot.currents = reference_currents;
+        snapshot.currents.electron_current_a_per_m2 =
+            sample.electron_collection_current_density_a_per_m2;
+        snapshot.currents.ion_current_a_per_m2 =
+            sample.ion_collection_current_density_a_per_m2;
+        snapshot.currents.secondary_emission_a_per_m2 = emission_blend.secondary_emission_a;
+        snapshot.currents.ion_secondary_emission_a_per_m2 =
+            emission_blend.ion_secondary_emission_a;
+        snapshot.currents.backscatter_emission_a_per_m2 =
+            emission_blend.backscatter_emission_a;
+        snapshot.currents.current_derivative_a_per_m2_per_v =
+            sample.current_derivative_a_per_m2_per_v;
+
+        const double area_m2 = std::max(1.0e-12, state.surface_area_m2);
+        const double conduction_didv_density =
+            localPatchConductionDidvDensity(state, effective_config);
+        const auto density_linearization = Coupling::linearizeSurfaceCurrentDensity(
+            Coupling::SurfaceCurrentDensityLinearizationInputs{
+                makeCouplingComponentState(snapshot.currents),
+                area_m2,
+                sample.current_derivative_a_per_m2_per_v,
+                conduction_didv_density,
+                snapshot.currents.thermionic_emission_a_per_m2,
+                snapshot.currents.field_emission_a_per_m2,
+                snapshot.currents.ram_ion_current_a_per_m2,
+            });
+        snapshot.currents.total_current_a_per_m2 =
+            density_linearization.total_current_density_a_per_m2;
+        snapshot.currents.current_derivative_a_per_m2_per_v =
+            density_linearization.total_didv_density_a_per_m2_per_v;
+        snapshot.didv.node_index = state.node_index;
+        snapshot.didv.node_name = state.node_name;
+        snapshot.didv.node_area_m2 = area_m2;
+        snapshot.didv.plasma_current_a = density_linearization.plasma_current_a;
+        snapshot.didv.plasma_didv_a_per_v = density_linearization.plasma_didv_a_per_v;
+        snapshot.didv.conduction_current_a = density_linearization.conduction_current_a;
+        snapshot.didv.conduction_didv_a_per_v = density_linearization.conduction_didv_a_per_v;
+        snapshot.didv.total_current_a = density_linearization.total_current_a;
+        snapshot.didv.total_didv_a_per_v = density_linearization.total_didv_a_per_v;
+        snapshot.didv.valid = sample.valid;
+        snapshot.valid = sample.valid;
+        return snapshot;
     }
 
     double estimateElectronFluxPicLike(const SurfaceChargingConfig& effective_config,
@@ -4685,7 +4677,7 @@ class VolumeStubVolumetricSolverAdapter final : public SurfaceVolumetricSolverAd
             !config.external_field_solver_result_path.empty() &&
             std::filesystem::exists(config.external_field_solver_result_path);
         const bool use_internal_volume_poisson =
-            config.runtime_route == SurfaceRuntimeRoute::SCDATUnified &&
+            config.runtime_route != SurfaceRuntimeRoute::LegacyBenchmark &&
             (hasStructuredTopologyInput(config) || config.enable_external_volume_solver_bridge ||
              config.enable_external_field_solver_bridge);
         const double current_signature = buildSignature(config, circuit_model, state);
@@ -4800,27 +4792,26 @@ class VolumeStubVolumetricSolverAdapter final : public SurfaceVolumetricSolverAd
         state.field_solver_reference_potential_v = cell.solved_potential_v;
         state.reference_plasma_potential_v = cell.solved_potential_v;
 
-        auto blend_value = [](double base, double target, double alpha) {
-            const double blend = std::clamp(alpha, 0.0, 1.0);
-            return (1.0 - blend) * base + blend * target;
-        };
-
         if (has_external_field_result)
         {
             const double field_bridge_blend = 1.0;
             state.field_solver_reference_potential_v =
-                blend_value(state.field_solver_reference_potential_v, incoming_reference_potential_v,
-                            field_bridge_blend);
+                FieldSolver::blendFieldVolumeScalar(state.field_solver_reference_potential_v,
+                                                    incoming_reference_potential_v,
+                                                    field_bridge_blend);
             state.reference_plasma_potential_v = state.field_solver_reference_potential_v;
             state.normal_electric_field_v_per_m =
-                blend_value(state.normal_electric_field_v_per_m, incoming_normal_field_v_per_m,
-                            field_bridge_blend);
+                FieldSolver::blendFieldVolumeScalar(state.normal_electric_field_v_per_m,
+                                                    incoming_normal_field_v_per_m,
+                                                    field_bridge_blend);
             state.local_charge_density_c_per_m3 =
-                blend_value(state.local_charge_density_c_per_m3, incoming_charge_density_c_per_m3,
-                            field_bridge_blend);
+                FieldSolver::blendFieldVolumeScalar(state.local_charge_density_c_per_m3,
+                                                    incoming_charge_density_c_per_m3,
+                                                    field_bridge_blend);
             state.field_solver_capacitance_scale =
-                std::clamp(blend_value(state.field_solver_capacitance_scale,
-                                       incoming_capacitance_scale, field_bridge_blend),
+                std::clamp(FieldSolver::blendFieldVolumeScalar(state.field_solver_capacitance_scale,
+                                                               incoming_capacitance_scale,
+                                                               field_bridge_blend),
                            0.25, 4.0);
         }
 
@@ -4865,58 +4856,26 @@ class VolumeStubVolumetricSolverAdapter final : public SurfaceVolumetricSolverAd
                 const double scale_tolerance = 0.1;
 
                 double mismatch_metric = 0.0;
-                if (std::isfinite(external.potential_v))
-                {
-                    mismatch_metric = std::max(
-                        mismatch_metric,
-                        std::abs(external.potential_v - cell.solved_potential_v) /
-                            std::max(1.0e-9, potential_tolerance_v));
-                }
-                if (std::isfinite(external.reference_potential_v))
-                {
-                    mismatch_metric = std::max(
-                        mismatch_metric,
-                        std::abs(external.reference_potential_v - cell.solved_potential_v) /
-                            std::max(1.0e-9, potential_tolerance_v));
-                }
-                if (std::isfinite(external.normal_field_v_per_m))
-                {
-                    mismatch_metric = std::max(
-                        mismatch_metric,
-                        std::abs(external.normal_field_v_per_m - cell.normal_field_v_per_m) /
-                            std::max(1.0e-9, field_tolerance_v_per_m));
-                }
-                if (std::isfinite(external.local_charge_density_c_per_m3))
-                {
-                    mismatch_metric = std::max(
-                        mismatch_metric,
-                        std::abs(external.local_charge_density_c_per_m3 -
-                                 cell.reconstructed_charge_density_c_per_m3) /
-                            std::max(1.0e-18, charge_tolerance_c_per_m3));
-                }
-                if (std::isfinite(external.capacitance_scale))
-                {
-                    mismatch_metric = std::max(
-                        mismatch_metric,
-                        std::abs(external.capacitance_scale - state.field_solver_capacitance_scale) /
-                            scale_tolerance);
-                }
+                mismatch_metric = FieldSolver::updateFieldVolumeMismatchMetric(
+                    mismatch_metric, external.potential_v, cell.solved_potential_v,
+                    potential_tolerance_v);
+                mismatch_metric = FieldSolver::updateFieldVolumeMismatchMetric(
+                    mismatch_metric, external.reference_potential_v, cell.solved_potential_v,
+                    potential_tolerance_v);
+                mismatch_metric = FieldSolver::updateFieldVolumeMismatchMetric(
+                    mismatch_metric, external.normal_field_v_per_m, cell.normal_field_v_per_m,
+                    field_tolerance_v_per_m);
+                mismatch_metric = FieldSolver::updateFieldVolumeMismatchMetric(
+                    mismatch_metric, external.local_charge_density_c_per_m3,
+                    cell.reconstructed_charge_density_c_per_m3, charge_tolerance_c_per_m3);
+                mismatch_metric = FieldSolver::updateFieldVolumeMismatchMetric(
+                    mismatch_metric, external.capacitance_scale,
+                    state.field_solver_capacitance_scale, scale_tolerance);
 
-                const double residual_gate =
-                    1.0 / (1.0 + std::abs(cached_solution_.linear_residual_norm) /
-                                     std::max(1.0e-9, potential_tolerance_v));
-                const double delta_gate =
-                    1.0 / (1.0 + std::abs(cached_solution_.max_delta_v) /
-                                     std::max(1.0e-9, potential_tolerance_v));
-                const double convergence_gate = cached_solution_.converged ? 1.0 : 0.4;
-                const double internal_confidence =
-                    convergence_gate * 0.5 * (residual_gate + delta_gate);
-                const double stability_gate = 1.0 / (1.0 + mismatch_metric);
-                const double external_trust = std::clamp(
-                    stability_gate + 0.5 * (1.0 - internal_confidence), 0.05, 1.0);
-                const double external_blend = std::clamp(
-                    std::clamp(config.volume_linear_relaxation, 0.2, 1.0) * external_trust, 0.05,
-                    1.0);
+                const double external_blend = FieldSolver::computeFieldVolumeExternalBlendFactor(
+                    mismatch_metric, cached_solution_.linear_residual_norm,
+                    cached_solution_.max_delta_v, cached_solution_.converged,
+                    potential_tolerance_v, config.volume_linear_relaxation);
 
                 const double target_volume_potential =
                     std::isfinite(external.potential_v) ? external.potential_v : state.volume_potential_v;
@@ -4938,18 +4897,21 @@ class VolumeStubVolumetricSolverAdapter final : public SurfaceVolumetricSolverAd
                         : state.field_solver_capacitance_scale;
 
                 state.volume_potential_v =
-                    blend_value(state.volume_potential_v, target_volume_potential, external_blend);
-                state.field_solver_reference_potential_v = blend_value(
+                    FieldSolver::blendFieldVolumeScalar(state.volume_potential_v,
+                                                        target_volume_potential,
+                                                        external_blend);
+                state.field_solver_reference_potential_v = FieldSolver::blendFieldVolumeScalar(
                     state.field_solver_reference_potential_v, target_reference_potential,
                     external_blend);
                 state.reference_plasma_potential_v = state.field_solver_reference_potential_v;
-                state.normal_electric_field_v_per_m = blend_value(
+                state.normal_electric_field_v_per_m = FieldSolver::blendFieldVolumeScalar(
                     state.normal_electric_field_v_per_m, target_normal_field, external_blend);
-                state.local_charge_density_c_per_m3 = blend_value(
+                state.local_charge_density_c_per_m3 = FieldSolver::blendFieldVolumeScalar(
                     state.local_charge_density_c_per_m3, target_charge_density, external_blend);
                 state.field_solver_capacitance_scale =
-                    std::clamp(blend_value(state.field_solver_capacitance_scale,
-                                           target_capacitance_scale, external_blend),
+                    std::clamp(FieldSolver::blendFieldVolumeScalar(state.field_solver_capacitance_scale,
+                                                                   target_capacitance_scale,
+                                                                   external_blend),
                                0.25, 4.0);
 
                 if (std::isfinite(external.coupling_gain))
@@ -4957,8 +4919,9 @@ class VolumeStubVolumetricSolverAdapter final : public SurfaceVolumetricSolverAd
                     const double target_coupling_gain =
                         std::clamp(external.coupling_gain, 0.0, 1.0);
                     state.volume_mesh_coupling_gain = std::clamp(
-                        blend_value(state.volume_mesh_coupling_gain, target_coupling_gain,
-                                    external_blend),
+                        FieldSolver::blendFieldVolumeScalar(state.volume_mesh_coupling_gain,
+                                                            target_coupling_gain,
+                                                            external_blend),
                         0.0, 1.0);
                 }
                 if (std::isfinite(external.projection_weight_scale))
@@ -4967,8 +4930,9 @@ class VolumeStubVolumetricSolverAdapter final : public SurfaceVolumetricSolverAd
                         std::max(1.0, state.volume_projection_weight_sum *
                                           std::clamp(external.projection_weight_scale, 0.5, 4.0));
                     state.volume_projection_weight_sum = std::max(
-                        1.0, blend_value(state.volume_projection_weight_sum,
-                                         target_projection_weight_sum, external_blend));
+                        1.0, FieldSolver::blendFieldVolumeScalar(state.volume_projection_weight_sum,
+                                                                 target_projection_weight_sum,
+                                                                 external_blend));
                 }
                 if (std::isfinite(external.sheath_length_scale))
                 {
@@ -4979,8 +4943,9 @@ class VolumeStubVolumetricSolverAdapter final : public SurfaceVolumetricSolverAd
                                    std::max(config.minimum_sheath_length_m,
                                             config.maximum_sheath_length_m));
                     state.effective_sheath_length_m = std::clamp(
-                        blend_value(state.effective_sheath_length_m, target_sheath_length_m,
-                                    external_blend),
+                        FieldSolver::blendFieldVolumeScalar(state.effective_sheath_length_m,
+                                                            target_sheath_length_m,
+                                                            external_blend),
                         std::max(1.0e-6, config.minimum_sheath_length_m),
                         std::max(config.minimum_sheath_length_m,
                                  config.maximum_sheath_length_m));
@@ -5305,6 +5270,13 @@ class DenseSurfaceCircuitModel final : public SurfaceCircuitModel
         return coupling_.advanceImplicit(dt, linearization, max_delta_potential_v);
     }
 
+    SurfaceCircuitAdvanceResult advanceImplicit(
+        double dt, const Coupling::SurfaceCircuitKernelInput& kernel_input,
+        double max_delta_potential_v) override
+    {
+        return coupling_.advanceImplicit(dt, kernel_input, max_delta_potential_v);
+    }
+
     std::size_t bodyNodeIndex() const override
     {
         return body_node_index_;
@@ -5560,12 +5532,16 @@ class DefaultSurfaceScenarioOrchestrator final : public SurfaceScenarioOrchestra
             }
             return std::make_unique<LegacyCBenchmarkCurrentModel>(config_);
         }
-        std::string name = "UnifiedReferenceCurrentModel";
-        if (mode == SurfaceCurrentAlgorithmMode::LegacyRefCompatible)
+        std::string name = "SpisEquivalentSurfaceCurrentModel";
+        if (config_.runtime_route == SurfaceRuntimeRoute::SurfacePic)
         {
-            name = "LegacyReferenceCurrentModel";
+            name = "SpisEquivalentSurfacePicCurrentModel";
         }
-        return std::make_unique<ReferenceBackedSurfaceCurrentModel>(config_, mode, name);
+        else if (config_.runtime_route == SurfaceRuntimeRoute::SurfacePicHybrid)
+        {
+            name = "SpisEquivalentSurfacePicHybridCurrentModel";
+        }
+        return std::make_unique<SpisEquivalentSurfaceCurrentModel>(config_, mode, name);
     }
 
     std::unique_ptr<SurfaceVoltageModel> createVoltageModel() const override

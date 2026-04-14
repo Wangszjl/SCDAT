@@ -167,6 +167,7 @@ if(TARGET Tools_Material)
     target_link_libraries(Tools_Material
         PUBLIC
             Tools_Basic
+            Tools_FieldSolver
             Tools_Geometry
             Tools_Mesh
     )
@@ -200,7 +201,6 @@ if(TARGET Tools_FieldSolver)
         PUBLIC
             Tools_Basic
             Tools_Geometry
-            Tools_Material
             Tools_Mesh
             Tools_Solver
     )

@@ -2,10 +2,14 @@
 
 #include "../../Tools/Boundary/include/BoundaryConditions.h"
 #include "../../Tools/Basic/include/Constants.h"
+#include "../../Tools/Solver/include/SurfaceSolverFacade.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <random>
@@ -42,6 +46,20 @@ const char* integratorModeName(ArcIntegratorMode mode)
 bool isVacuumArcDebugEnabled()
 {
     return std::getenv("VACUUM_ARC_DEBUG") != nullptr;
+}
+
+std::string normalizeToken(std::string text)
+{
+    std::string token;
+    token.reserve(text.size());
+    for (const unsigned char ch : text)
+    {
+        if (std::isalnum(ch))
+        {
+            token.push_back(static_cast<char>(std::tolower(ch)));
+        }
+    }
+    return token;
 }
 
 std::size_t boundaryIndex(BoundaryFace face)
@@ -713,6 +731,16 @@ void SurfaceDischargeArcAlgorithm::runCollisionStage(double dt)
     floor_densities.ion_density_m3 = std::max(0.0, config_.collision_ion_density_floor_m3);
     floor_densities.electron_density_m3 =
         std::max(0.0, config_.collision_electron_density_floor_m3);
+    const std::string collision_set_id = config_.collision_cross_section_set_id.empty()
+                                             ? config_.solver_config.collision_set
+                                             : config_.collision_cross_section_set_id;
+    const auto cross_section_set_id =
+        Collision::parseCollisionCrossSectionSetId(collision_set_id)
+            .value_or(Collision::CollisionCrossSectionSetId::BackgroundMccV1);
+    Collision::BackgroundMccRuntimeConfig runtime_config;
+    runtime_config.floor_densities = floor_densities;
+    runtime_config.cross_section_set_id = cross_section_set_id;
+    runtime_config.reinitialize_configuration = reinitialize_configuration;
 
     auto& collision_container = pic_boundary_particle_manager_->getContainer();
     std::vector<Particle::Particle> collision_container_snapshot;
@@ -722,8 +750,7 @@ void SurfaceDischargeArcAlgorithm::runCollisionStage(double dt)
     }
 
     auto step_result = Collision::executeBackgroundMccStep(
-        collision_container, collision_handler_, dt, volume_m3,
-        floor_densities, reinitialize_configuration);
+        collision_container, collision_handler_, dt, volume_m3, runtime_config);
 
     const auto primary_anomaly = detectCollisionStageAnomaly(
         step_result, dt, config_.collision_anomaly_event_rate_limit_per_s,
@@ -748,10 +775,14 @@ void SurfaceDischargeArcAlgorithm::runCollisionStage(double dt)
             std::max(0.0, config_.collision_ion_density_floor_m3);
         conservative_fallback_densities.electron_density_m3 =
             std::max(0.0, config_.collision_electron_density_floor_m3);
+        Collision::BackgroundMccRuntimeConfig fallback_runtime_config;
+        fallback_runtime_config.floor_densities = conservative_fallback_densities;
+        fallback_runtime_config.cross_section_set_id =
+            Collision::CollisionCrossSectionSetId::BackgroundMccV1;
+        fallback_runtime_config.reinitialize_configuration = true;
 
         step_result = Collision::executeBackgroundMccStep(
-            collision_container, collision_handler_, dt, volume_m3,
-            conservative_fallback_densities, true);
+            collision_container, collision_handler_, dt, volume_m3, fallback_runtime_config);
 
         const auto fallback_anomaly =
             detectCollisionStageAnomaly(step_result, dt, std::numeric_limits<double>::infinity(),
@@ -1292,6 +1323,18 @@ void SurfaceDischargeArcAlgorithm::appendHistory()
 bool SurfaceDischargeArcAlgorithm::initialize(const DischargeConfiguration& config)
 {
     config_ = config;
+    neutral_outgassing_reinjection_rng_.seed(config_.seed);
+    if (!config_.solver_config.collision_set.empty())
+    {
+        config_.collision_cross_section_set_id = config_.solver_config.collision_set;
+    }
+    const bool residual_guarded_policy_requested =
+        Solver::isResidualGuardedSolverPolicyToken(config_.solver_config.convergence_policy);
+    if (residual_guarded_policy_requested &&
+        !config_.enable_adaptive_internal_timestep)
+    {
+        config_.enable_adaptive_internal_timestep = true;
+    }
     plasma_channel_model_.setParameters(config_.channel_parameters);
     integrator_.setParameters(config_.integrator_parameters);
     emission_model_.setStrategyType(config_.emission_strategy);
@@ -1620,6 +1663,55 @@ void SurfaceDischargeArcAlgorithm::reset()
 
 bool SurfaceDischargeArcAlgorithm::exportResults(const std::filesystem::path& csv_path) const
 {
+    const auto max_abs_from_history = [](const std::vector<double>& values) {
+        double maximum = 0.0;
+        for (const double value : values)
+        {
+            maximum = std::max(maximum, std::abs(value));
+        }
+        return maximum;
+    };
+    const auto sum_history = [](const std::vector<double>& values) {
+        double sum = 0.0;
+        for (const double value : values)
+        {
+            sum += value;
+        }
+        return sum;
+    };
+    const auto any_triggered = [](const std::vector<double>& values) {
+        for (const double value : values)
+        {
+            if (value >= 0.5)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto ignition_delay_s = [&]() {
+        const std::size_t count = std::min(history_time_.size(), history_current_.size());
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            if (std::abs(history_current_[i]) > 1.0e-12)
+            {
+                return history_time_[i];
+            }
+        }
+        return history_time_.empty() ? 0.0 : history_time_.front();
+    }();
+    const double total_ionization_events = sum_history(history_collision_ionization_events_);
+    const double total_excitation_events = sum_history(history_collision_excitation_events_);
+    const double total_charge_exchange_events =
+        sum_history(history_collision_charge_exchange_events_);
+    const double total_reaction_events =
+        std::max(1.0e-18, total_ionization_events + total_excitation_events +
+                              total_charge_exchange_events);
+    std::filesystem::path benchmark_metrics_path = csv_path;
+    benchmark_metrics_path.replace_extension(".benchmark_metrics.json");
+    std::filesystem::path simulation_artifact_path = csv_path;
+    simulation_artifact_path.replace_extension(".simulation_artifact.json");
+
     Output::ColumnarDataSet data_set;
     data_set.axis_name = "time_s";
     data_set.axis_values = history_time_;
@@ -1708,6 +1800,15 @@ bool SurfaceDischargeArcAlgorithm::exportResults(const std::filesystem::path& cs
     data_set.metadata["alignment_mode"] = alignmentModeName(config_.alignment_mode);
     data_set.metadata["pipeline_contract_id"] = pipelineContractId();
     data_set.metadata["pipeline_stage_order"] = pipelineStageOrder();
+    data_set.metadata["benchmark_contract_family"] = "arcpic_core_metrics_v1";
+    data_set.metadata["benchmark_focus_metrics"] =
+        "ignition_delay,peak_current,channel_conductivity,surface_potential,reaction_split";
+    data_set.metadata["benchmark_metrics_contract_id"] =
+        "vacuum-arc-benchmark-metrics-v1";
+    data_set.metadata["benchmark_metrics_artifact_path"] =
+        benchmark_metrics_path.filename().string();
+    data_set.metadata["collision_diagnostic_contract_id"] =
+        "vacuum-arc-collision-emission-channel-v1";
     data_set.metadata["piccore_boundary_coupling"] =
         piccore_boundary_coupling_initialized_ ? "enabled" : "disabled";
     data_set.metadata["surface_capacitance_f"] = std::to_string(config_.surface_capacitance_f);
@@ -1806,7 +1907,87 @@ bool SurfaceDischargeArcAlgorithm::exportResults(const std::filesystem::path& cs
         config_.enable_stability_rollback ? "true" : "false";
     data_set.metadata["stability_max_rollbacks"] =
         std::to_string(config_.max_stability_rollbacks);
-    return static_cast<bool>(exporter_.exportDataSet(csv_path, data_set));
+    Coupling::Contracts::appendSolverConfigMetadata(data_set.metadata, config_.solver_config, "solver_");
+    data_set.metadata["seed"] = std::to_string(config_.seed);
+    data_set.metadata["sampling_policy"] = config_.sampling_policy;
+    data_set.metadata["simulation_artifact_contract_id"] = "simulation-artifact-v1";
+    data_set.metadata["simulation_artifact_path"] = simulation_artifact_path.filename().string();
+    if (!static_cast<bool>(exporter_.exportDataSet(csv_path, data_set)))
+    {
+        return false;
+    }
+
+    std::ofstream benchmark_output(benchmark_metrics_path, std::ios::out | std::ios::trunc);
+    if (!benchmark_output.is_open())
+    {
+        return false;
+    }
+
+    benchmark_output << std::fixed << std::setprecision(12);
+    benchmark_output << "{\n";
+    benchmark_output << "  \"schema_version\": \"scdat.vacuum_arc.benchmark_metrics.v1\",\n";
+    benchmark_output << "  \"contract_id\": \"vacuum-arc-benchmark-metrics-v1\",\n";
+    benchmark_output << "  \"module\": \"Vacuum Arc\",\n";
+    benchmark_output << "  \"alignment_mode\": \"" << alignmentModeName(config_.alignment_mode)
+                     << "\",\n";
+    benchmark_output << "  \"ignition_delay_s\": " << ignition_delay_s << ",\n";
+    benchmark_output << "  \"peak_current_a\": " << max_abs_from_history(history_current_) << ",\n";
+    benchmark_output << "  \"peak_current_density_a_per_m2\": "
+                     << max_abs_from_history(history_current_density_) << ",\n";
+    benchmark_output << "  \"max_channel_conductivity_s_per_m\": "
+                     << max_abs_from_history(history_conductivity_) << ",\n";
+    benchmark_output << "  \"final_surface_potential_v\": "
+                     << (history_surface_potential_.empty() ? 0.0 : history_surface_potential_.back())
+                     << ",\n";
+    benchmark_output << "  \"max_abs_charge_conservation_error_c\": "
+                     << max_abs_from_history(history_charge_conservation_error_) << ",\n";
+    benchmark_output << "  \"collision_fallback_triggered\": "
+                     << (any_triggered(history_collision_fallback_triggered_) ? "true" : "false")
+                     << ",\n";
+    benchmark_output << "  \"reaction_split\": {\n";
+    benchmark_output << "    \"ionization_fraction\": "
+                     << (total_ionization_events / total_reaction_events) << ",\n";
+    benchmark_output << "    \"excitation_fraction\": "
+                     << (total_excitation_events / total_reaction_events) << ",\n";
+    benchmark_output << "    \"charge_exchange_fraction\": "
+                     << (total_charge_exchange_events / total_reaction_events) << "\n";
+    benchmark_output << "  }\n";
+    benchmark_output << "}\n";
+    if (!static_cast<bool>(benchmark_output))
+    {
+        return false;
+    }
+
+    Coupling::Contracts::SimulationArtifact artifact;
+    artifact.module = "Vacuum Arc";
+    artifact.case_id = alignmentModeName(config_.alignment_mode);
+    artifact.reference_family = "arcpic";
+    artifact.seed = config_.seed;
+    artifact.sampling_policy = config_.sampling_policy;
+    artifact.particle_metrics["collision_events_total"] = total_reaction_events;
+    artifact.particle_metrics["collision_ionization_events_total"] = total_ionization_events;
+    artifact.particle_metrics["collision_excitation_events_total"] = total_excitation_events;
+    artifact.particle_metrics["collision_charge_exchange_events_total"] = total_charge_exchange_events;
+    artifact.surface_metrics["ignition_delay_s"] = ignition_delay_s;
+    artifact.surface_metrics["peak_current_a"] = max_abs_from_history(history_current_);
+    artifact.surface_metrics["peak_current_density_a_per_m2"] =
+        max_abs_from_history(history_current_density_);
+    artifact.surface_metrics["max_channel_conductivity_s_per_m"] =
+        max_abs_from_history(history_conductivity_);
+    artifact.surface_metrics["final_surface_potential_v"] =
+        history_surface_potential_.empty() ? 0.0 : history_surface_potential_.back();
+    artifact.surface_metrics["max_abs_charge_conservation_error_c"] =
+        max_abs_from_history(history_charge_conservation_error_);
+    artifact.metadata["pipeline_contract_id"] = pipelineContractId();
+    artifact.metadata["benchmark_metrics_contract_id"] = "vacuum-arc-benchmark-metrics-v1";
+    artifact.metadata["collision_set"] = config_.collision_cross_section_set_id;
+    std::string artifact_error;
+    if (!Coupling::Contracts::writeSimulationArtifactJson(
+            simulation_artifact_path, artifact, &artifact_error))
+    {
+        return false;
+    }
+    return true;
 }
 
 } // namespace VacuumArc

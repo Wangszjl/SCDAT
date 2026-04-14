@@ -13,11 +13,26 @@
     "maximum_time_step_s": 5.0
   },
   "config": {
-    "runtime_route": "scdat_unified",
-    "current_algorithm_mode": "unified_spis_aligned",
-    "benchmark_mode": "unified_spis_aligned",
+    "runtime_route": "surface_pic_hybrid",
+    "surface_pic_strategy": "surface_pic_hybrid_reference",
+    "surface_pic_runtime": "graph_coupled_shared_surface",
+    "surface_instrument_set": "surface_pic_observer_set",
+    "reference_family": "surface_pic_reference_family",
+    "reference_matrix_case_id": "leo_ram_facing_2000s",
+    "current_algorithm_mode": "unified_kernel_aligned",
+    "benchmark_mode": "unified_kernel_aligned",
     "volume_linear_solver_policy": "auto",
     "reference_see_model": "sims",
+    "coupling_mode": "field_particle_implicit",
+    "deposition_scheme": "pic_window_cic",
+    "collision_set": "surface_pic_v1",
+    "physics_process_set": "surface_process_v1",
+    "convergence_policy": "residual_norm_guarded",
+    "solver_max_iterations": 96,
+    "solver_residual_tolerance": 1.0e-6,
+    "solver_relaxation": 0.72,
+    "seed": 20260408,
+    "sampling_policy": "deterministic",
 
     "surface_area_m2": 0.04,
     "derive_capacitance_from_material": true,
@@ -164,3 +179,4 @@
     ]
   }
 }
+

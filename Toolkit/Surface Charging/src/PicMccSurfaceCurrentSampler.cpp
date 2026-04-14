@@ -1,17 +1,22 @@
 #include "PicMccSurfaceCurrentSampler.h"
 #include "SurfaceFlowCouplingModel.h"
 
+#include "../../Tools/Basic/include/StringTokenUtils.h"
 #include "../../Tools/Boundary/include/BoundaryConditions.h"
 #include "../../Tools/FieldSolver/include/PoissonSolver.h"
 #include "../../Tools/Interactions/Collisions/include/CollisionAlgorithm.h"
+#include "../../Tools/Interactions/Collisions/include/CollisionPicAdapter.h"
 #include "../../Tools/Mesh/include/MeshParsing.h"
 #include "../../Tools/PICcore/include/PICCycle.h"
 #include "../../Tools/Particle/include/ParticleManager.h"
+#include "../../Tools/Particle/include/SurfaceDistributionFunction.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cmath>
-#include <numeric>
 #include <memory>
+#include <numeric>
 #include <random>
 
 namespace SCDAT
@@ -26,6 +31,7 @@ using SCDAT::Collision::CollisionParameters;
 using SCDAT::Collision::CollisionProcessFactory;
 using SCDAT::Collision::MonteCarloCollisionHandler;
 using SCDAT::Collision::ParticleSpecies;
+using SCDAT::Collision::CollisionCrossSectionSetId;
 using SCDAT::Geometry::Point3D;
 using SCDAT::Geometry::Vector3D;
 using SCDAT::Mesh::GeometryDimensions;
@@ -41,6 +47,106 @@ constexpr double kElectronMass = 9.1093837015e-31;
 constexpr double kAtomicMassUnit = 1.66053906660e-27;
 constexpr double kEpsilon0 = 8.8541878128e-12;
 constexpr double kPi = 3.14159265358979323846;
+
+bool useDeterministicSamplingPolicy(const std::string& sampling_policy)
+{
+    const std::string token = Basic::normalizeAlnumToken(sampling_policy);
+    return token.empty() || token == "deterministic" || token == "fixed" ||
+           token == "replay" || token == "reproducible";
+}
+
+unsigned int hashCombine(unsigned int state, unsigned int value)
+{
+    constexpr unsigned int kOffset = 2166136261u;
+    constexpr unsigned int kPrime = 16777619u;
+    state = (state == 0u) ? kOffset : state;
+    state ^= value;
+    state *= kPrime;
+    return state;
+}
+
+unsigned int resolveSamplerSeed(const PicMccSurfaceSamplerConfig& config)
+{
+    if (!useDeterministicSamplingPolicy(config.sampling_policy))
+    {
+        std::random_device rd;
+        return rd();
+    }
+
+    unsigned int seed = config.seed == 0u ? 20260408u : config.seed;
+    seed = hashCombine(seed, static_cast<unsigned int>(config.window_steps));
+    seed = hashCombine(seed, static_cast<unsigned int>(config.z_layers));
+    seed = hashCombine(seed, static_cast<unsigned int>(config.particles_per_element));
+    seed = hashCombine(seed, static_cast<unsigned int>(config.enable_mcc ? 1 : 0));
+    seed = hashCombine(seed, static_cast<unsigned int>(config.linked_boundary_face_count));
+    seed = hashCombine(seed, static_cast<unsigned int>(std::lround(
+                                1000.0 * std::clamp(config.projection_weight_sum, 0.0, 1000.0))));
+    seed = hashCombine(seed, static_cast<unsigned int>(std::lround(
+                                1000.0 * std::clamp(config.surface_aspect_ratio, 0.1, 10.0))));
+    for (const char ch : config.node_name)
+    {
+        seed = hashCombine(seed, static_cast<unsigned int>(static_cast<unsigned char>(ch)));
+    }
+    for (const char ch : config.boundary_group_id)
+    {
+        seed = hashCombine(seed, static_cast<unsigned int>(static_cast<unsigned char>(ch)));
+    }
+    return seed;
+}
+
+double topologySignature(const PicMccSurfaceSamplerConfig& config)
+{
+    double signature = static_cast<double>(config.linked_boundary_face_count);
+    signature += 0.01 * std::clamp(config.projection_weight_sum, 0.0, 1000.0);
+    signature += 0.001 * std::clamp(config.surface_aspect_ratio, 0.1, 10.0);
+    for (const char ch : config.node_name)
+    {
+        signature += static_cast<double>(static_cast<unsigned char>(ch)) * 1.0e-6;
+    }
+    for (const char ch : config.boundary_group_id)
+    {
+        signature += static_cast<double>(static_cast<unsigned char>(ch)) * 1.0e-7;
+    }
+    return signature;
+}
+
+struct DepositionSchemeResolution
+{
+    Particle::TrajectoryChargeDepositionKernel kernel =
+        Particle::TrajectoryChargeDepositionKernel::LinearSegmentCloud;
+    std::size_t segment_count = 10;
+    std::string kernel_name = "linear_segment_cloud";
+};
+
+DepositionSchemeResolution resolveDepositionScheme(const PicMccSurfaceSamplerConfig& config)
+{
+    DepositionSchemeResolution resolved;
+    resolved.segment_count =
+        std::clamp<std::size_t>(std::max<std::size_t>(4, config.window_steps), 1, 64);
+
+    const std::string deposition = Basic::normalizeAlnumToken(config.deposition_scheme);
+    if (deposition == "picwindowngp" || deposition == "ngp" || deposition == "nearest")
+    {
+        resolved.kernel = Particle::TrajectoryChargeDepositionKernel::NearestPoint;
+        resolved.segment_count = 1;
+        resolved.kernel_name = "nearest_point";
+        return resolved;
+    }
+
+    if (deposition == "picwindowtsc" || deposition == "tsc" || deposition == "quadratic" ||
+        deposition == "highorder")
+    {
+        resolved.kernel = Particle::TrajectoryChargeDepositionKernel::QuadratureGauss3;
+        resolved.segment_count =
+            std::clamp<std::size_t>(std::max<std::size_t>(8, config.window_steps), 2, 64);
+        resolved.kernel_name = "quadrature_gauss3";
+        return resolved;
+    }
+
+    resolved.kernel = Particle::TrajectoryChargeDepositionKernel::LinearSegmentCloud;
+    resolved.kernel_name = "linear_segment_cloud";
+    return resolved;
+}
 
 double computeDebyeLength(const PicMccSurfaceSamplerConfig& config)
 {
@@ -71,14 +177,24 @@ std::shared_ptr<VolMesh> createSamplingMesh(const PicMccSurfaceSamplerConfig& co
 {
     GeometryDimensions dims;
     dims.shape = GeometryShape::PLATE;
-    dims.length = std::sqrt(std::max(1.0e-12, config.surface_area_m2));
-    dims.width = dims.length;
+    const double topology_area_scale =
+        std::max(1.0, std::sqrt(std::max(1.0, static_cast<double>(config.linked_boundary_face_count))) *
+                          std::max(1.0, config.projection_weight_sum));
+    const double effective_area_m2 = std::max(1.0e-12, config.surface_area_m2) * topology_area_scale;
+    const double aspect_ratio = std::clamp(config.surface_aspect_ratio, 0.25, 4.0);
+    dims.length = std::sqrt(effective_area_m2 * aspect_ratio);
+    dims.width = std::sqrt(effective_area_m2 / aspect_ratio);
     dims.thickness = std::max(1.0e-6, config.gap_distance_m);
 
     MeshGenerationOptions options;
-    options.nx = 1;
-    options.ny = 1;
-    options.nz = std::max<std::size_t>(4, config.z_layers);
+    options.nx = std::max<std::size_t>(
+        1, static_cast<std::size_t>(std::ceil(std::sqrt(
+               std::max(1.0, static_cast<double>(config.linked_boundary_face_count))))));
+    options.ny = std::max<std::size_t>(
+        1, static_cast<std::size_t>(std::ceil(static_cast<double>(options.nx) /
+                                              std::max(0.5, aspect_ratio))));
+    options.nz = std::max<std::size_t>(
+        4, config.z_layers + std::min<std::size_t>(8, config.linked_boundary_face_count / 2));
     options.tetrahedralize = true;
 
     auto mesh = GeometryMeshGenerator::generateFromDimensions(dims, options);
@@ -117,55 +233,55 @@ Vector3D sampleVelocity(double sigma, double drift_z, bool toward_surface, std::
     return Vector3D(normal(rng), normal(rng), vz);
 }
 
-double spectrumDensity(const Particle::ResolvedSpectrum& spectrum, double fallback_density)
+Point3D samplePointInTriangle(const Point3D& a, const Point3D& b, const Point3D& c,
+                              std::mt19937& rng)
 {
-    double density = 0.0;
-    for (const auto& population : spectrum.populations)
-    {
-        density += std::max(0.0, population.density_m3);
-    }
-    return density > 0.0 ? density : std::max(0.0, fallback_density);
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    const double r1 = std::sqrt(dist(rng));
+    const double r2 = dist(rng);
+
+    const double w0 = 1.0 - r1;
+    const double w1 = r1 * (1.0 - r2);
+    const double w2 = r1 * r2;
+    return Point3D(w0 * a.x() + w1 * b.x() + w2 * c.x(),
+                   w0 * a.y() + w1 * b.y() + w2 * c.y(),
+                   w0 * a.z() + w1 * b.z() + w2 * c.z());
 }
 
-double spectrumAverageMassKg(const Particle::ResolvedSpectrum& spectrum, double fallback_mass_kg)
+Point3D samplePointInTetra(const Point3D& a, const Point3D& b, const Point3D& c,
+                           const Point3D& d, std::mt19937& rng)
 {
-    double numerator = 0.0;
-    double denominator = 0.0;
-    for (const auto& population : spectrum.populations)
-    {
-        numerator += std::max(0.0, population.density_m3) *
-                     std::max(1.0, population.mass_amu) * kAtomicMassUnit;
-        denominator += std::max(0.0, population.density_m3);
-    }
-    return denominator > 0.0 ? numerator / denominator : std::max(1.0e-32, fallback_mass_kg);
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    const double e0 = -std::log(std::max(1.0e-12, dist(rng)));
+    const double e1 = -std::log(std::max(1.0e-12, dist(rng)));
+    const double e2 = -std::log(std::max(1.0e-12, dist(rng)));
+    const double e3 = -std::log(std::max(1.0e-12, dist(rng)));
+    const double s = e0 + e1 + e2 + e3;
+
+    const double w0 = e0 / s;
+    const double w1 = e1 / s;
+    const double w2 = e2 / s;
+    const double w3 = e3 / s;
+    return Point3D(w0 * a.x() + w1 * b.x() + w2 * c.x() + w3 * d.x(),
+                   w0 * a.y() + w1 * b.y() + w2 * c.y() + w3 * d.y(),
+                   w0 * a.z() + w1 * b.z() + w2 * c.z() + w3 * d.z());
 }
 
-double sampleDiscreteSpectrumEnergy(const Particle::ResolvedSpectrum& spectrum, std::mt19937& rng)
+Point3D samplePointInElement(const VolMesh& mesh, std::size_t element_index, std::mt19937& rng)
 {
-    if (spectrum.energy_grid_ev.empty() ||
-        spectrum.energy_grid_ev.size() != spectrum.differential_number_flux.size())
+    const auto& element = mesh.getElement(element_index);
+    const auto& nodes = element->getNodes();
+    if (nodes.size() == 4 && nodes[0] && nodes[1] && nodes[2] && nodes[3])
     {
-        return 1.0;
+        return samplePointInTetra(nodes[0]->getPosition(), nodes[1]->getPosition(),
+                                  nodes[2]->getPosition(), nodes[3]->getPosition(), rng);
     }
-
-    std::vector<double> cumulative(spectrum.differential_number_flux.size(), 0.0);
-    double total = 0.0;
-    for (size_t i = 0; i < spectrum.differential_number_flux.size(); ++i)
+    if (nodes.size() == 3 && nodes[0] && nodes[1] && nodes[2])
     {
-        total += std::max(0.0, spectrum.differential_number_flux[i]);
-        cumulative[i] = total;
+        return samplePointInTriangle(nodes[0]->getPosition(), nodes[1]->getPosition(),
+                                     nodes[2]->getPosition(), rng);
     }
-    if (!(total > 0.0))
-    {
-        return std::max(1.0e-3, spectrum.energy_grid_ev.front());
-    }
-
-    std::uniform_real_distribution<double> u(0.0, total);
-    const double pick = u(rng);
-    const auto it = std::lower_bound(cumulative.begin(), cumulative.end(), pick);
-    const size_t index =
-        static_cast<size_t>(std::distance(cumulative.begin(), it == cumulative.end() ? cumulative.end() - 1 : it));
-    return std::max(1.0e-3, spectrum.energy_grid_ev[index]);
+    return mesh.getRandomPointInElement(element_index);
 }
 
 Vector3D sampleVelocityFromSpectrum(const Particle::ResolvedSpectrum& spectrum,
@@ -203,8 +319,10 @@ Vector3D sampleVelocityFromSpectrum(const Particle::ResolvedSpectrum& spectrum,
     if (!spectrum.energy_grid_ev.empty() &&
         spectrum.energy_grid_ev.size() == spectrum.differential_number_flux.size())
     {
-        const double energy_ev = sampleDiscreteSpectrumEnergy(spectrum, rng);
-        const double mass_kg = spectrumAverageMassKg(spectrum, fallback_mass_kg);
+        const double energy_ev = Particle::sampleResolvedSpectrumEnergyEv(
+            spectrum, rng, fallback_temperature_ev);
+        const double mass_kg =
+            Particle::resolvedSpectrumAverageMassKg(spectrum, fallback_mass_kg);
         const double speed =
             std::sqrt(2.0 * std::max(1.0e-3, energy_ev) * kElementaryCharge / mass_kg);
         const double sigma = speed / std::sqrt(3.0);
@@ -217,9 +335,8 @@ Vector3D sampleVelocityFromSpectrum(const Particle::ResolvedSpectrum& spectrum,
 }
 
 void initializeParticles(SCDAT::Particle::ParticleManager& particle_manager, const VolMesh& mesh,
-                         const PicMccSurfaceSamplerConfig& config)
+                         const PicMccSurfaceSamplerConfig& config, std::mt19937& rng)
 {
-    std::mt19937 rng(20260331);
     const double electron_sigma = std::sqrt(
         std::max(1.0e-3, config.plasma.electron_temperature_ev) * kElementaryCharge / kElectronMass);
     const double ion_mass = std::max(1.0, config.plasma.ion_mass_amu) * kAtomicMassUnit;
@@ -230,10 +347,12 @@ void initializeParticles(SCDAT::Particle::ParticleManager& particle_manager, con
         static_cast<double>(mesh.getElementCount() * std::max<std::size_t>(1, config.particles_per_element));
     const double electron_density =
         config.has_electron_spectrum
-            ? spectrumDensity(config.electron_spectrum, config.plasma.electron_density_m3)
+            ? Particle::resolvedSpectrumDensity(config.electron_spectrum,
+                                               config.plasma.electron_density_m3)
             : config.plasma.electron_density_m3;
     const double ion_density =
-        config.has_ion_spectrum ? spectrumDensity(config.ion_spectrum, config.plasma.ion_density_m3)
+        config.has_ion_spectrum ? Particle::resolvedSpectrumDensity(
+                                      config.ion_spectrum, config.plasma.ion_density_m3)
                                 : config.plasma.ion_density_m3;
     const double electron_weight =
         electron_density * volume / std::max(1.0, macro_particles_per_species);
@@ -265,12 +384,13 @@ void initializeParticles(SCDAT::Particle::ParticleManager& particle_manager, con
                                                 ion_mass, ion_drift_z, true, rng)
                     : sampleVelocity(ion_sigma, ion_drift_z, true, rng);
 
-            particle_manager.createElectron(mesh.getRandomPointInElement(element_index),
+            particle_manager.createElectron(samplePointInElement(mesh, element_index, rng),
                                             electron_velocity, electron_weight);
-            particle_manager.createIon(mesh.getRandomPointInElement(element_index), ion_velocity,
+            particle_manager.createIon(samplePointInElement(mesh, element_index, rng), ion_velocity,
                                        static_cast<int>(std::max(
                                            1.0, config.has_ion_spectrum
-                                                    ? spectrumAverageMassKg(config.ion_spectrum, ion_mass) /
+                                                ? Particle::resolvedSpectrumAverageMassKg(
+                                                    config.ion_spectrum, ion_mass) /
                                                           kAtomicMassUnit
                                                     : config.plasma.ion_mass_amu)),
                                        1, ion_weight);
@@ -326,9 +446,10 @@ void applyCollisionStep(SCDAT::Particle::ParticleManager& particle_manager,
     particle_manager.removeInactiveParticles();
 }
 
-MonteCarloCollisionHandler makeCollisionHandler(const PicMccSurfaceSamplerConfig& config)
+MonteCarloCollisionHandler makeCollisionHandler(const PicMccSurfaceSamplerConfig& config,
+                                                unsigned int seed)
 {
-    MonteCarloCollisionHandler collision_handler(12345);
+    MonteCarloCollisionHandler collision_handler(seed);
     collision_handler.clearCollisionProcesses();
 
     if (!config.enable_mcc || config.plasma.neutral_density_m3 <= 1.0e6)
@@ -336,33 +457,12 @@ MonteCarloCollisionHandler makeCollisionHandler(const PicMccSurfaceSamplerConfig
         return collision_handler;
     }
 
-    CollisionParameters elastic_params;
-    elastic_params.cross_section_max = 2.0e-19;
-
-    CollisionParameters excitation_params;
-    excitation_params.energy_threshold = 11.5;
-    excitation_params.cross_section_max = 2.5e-20;
-    excitation_params.energy_loss = 11.5;
-
-    CollisionParameters ionization_params;
-    ionization_params.energy_threshold = 15.76;
-    ionization_params.cross_section_max = 3.0e-20;
-    ionization_params.energy_loss = 15.76;
-    ionization_params.additional_params["ion_mass_number"] = config.plasma.ion_mass_amu;
-    ionization_params.additional_params["ion_charge_number"] = 1.0;
-
-    collision_handler.addCollisionProcess(
-        "elastic_e_n", CollisionProcessFactory::createElasticProcess(
-                           ParticleSpecies::ELECTRON, ParticleSpecies::NEUTRAL,
-                           config.plasma.neutral_density_m3, elastic_params));
-    collision_handler.addCollisionProcess(
-        "excitation_e_n", CollisionProcessFactory::createExcitationProcess(
-                              ParticleSpecies::ELECTRON, ParticleSpecies::NEUTRAL,
-                              config.plasma.neutral_density_m3, excitation_params));
-    collision_handler.addCollisionProcess(
-        "ionization_e_n", CollisionProcessFactory::createIonizationProcess(
-                              ParticleSpecies::ELECTRON, ParticleSpecies::NEUTRAL,
-                              config.plasma.neutral_density_m3, ionization_params));
+    auto cross_section_set_id =
+        SCDAT::Collision::parseCollisionCrossSectionSetId(config.collision_cross_section_set_id)
+            .value_or(CollisionCrossSectionSetId::SurfacePicV1);
+    SCDAT::Collision::initializeConfiguredCollisionHandler(
+        collision_handler, cross_section_set_id, config.plasma.neutral_density_m3,
+        config.plasma.ion_density_m3, config.plasma.electron_density_m3);
 
     return collision_handler;
 }
@@ -370,8 +470,21 @@ MonteCarloCollisionHandler makeCollisionHandler(const PicMccSurfaceSamplerConfig
 PicMccCurrentSample sampleSingleWindow(const PicMccSurfaceSamplerConfig& config)
 {
     PicMccCurrentSample sample;
+    sample.sampled_node_name = config.node_name;
+    sample.sampled_boundary_group_id = config.boundary_group_id;
+    sample.topology_signature = topologySignature(config);
+    sample.topology_area_scale =
+        std::max(1.0, std::sqrt(std::max(1.0, static_cast<double>(config.linked_boundary_face_count))) *
+                          std::max(1.0, config.projection_weight_sum));
     sample.sampled_surface_potential_v = config.surface_potential_v;
     sample.mcc_enabled = config.enable_mcc && config.plasma.neutral_density_m3 > 1.0e6;
+    sample.sampling_policy_resolved =
+        useDeterministicSamplingPolicy(config.sampling_policy) ? "deterministic" : "stochastic";
+    sample.seed_used = resolveSamplerSeed(config);
+
+    const DepositionSchemeResolution deposition = resolveDepositionScheme(config);
+    sample.deposition_segments = deposition.segment_count;
+    sample.deposition_kernel = deposition.kernel_name;
 
     auto mesh = createSamplingMesh(config);
     if (!mesh)
@@ -380,7 +493,8 @@ PicMccCurrentSample sampleSingleWindow(const PicMccSurfaceSamplerConfig& config)
     }
 
     auto particle_manager = std::make_shared<SCDAT::Particle::ParticleManager>();
-    initializeParticles(*particle_manager, *mesh, config);
+    std::mt19937 rng(sample.seed_used);
+    initializeParticles(*particle_manager, *mesh, config, rng);
 
     auto poisson_solver = std::make_shared<SCDAT::FieldSolver::PoissonSolver>(mesh);
     PICCycle::Parameters cycle_params;
@@ -389,6 +503,8 @@ PicMccCurrentSample sampleSingleWindow(const PicMccSurfaceSamplerConfig& config)
     cycle_params.statistics_frequency = std::max(1, static_cast<int>(config.window_steps / 4));
     cycle_params.charge_conservation = true;
     cycle_params.verbose = false;
+    cycle_params.trajectory_charge_deposition_segments = deposition.segment_count;
+    cycle_params.trajectory_charge_deposition_kernel = deposition.kernel;
 
     PICCycle cycle(cycle_params);
     cycle.setMesh(mesh->getNodes(), mesh->getElements());
@@ -432,7 +548,8 @@ PicMccCurrentSample sampleSingleWindow(const PicMccSurfaceSamplerConfig& config)
     }
 
     applyBoundaryPotentials(cycle, *mesh, config.surface_potential_v, config.plasma_reference_potential_v);
-    MonteCarloCollisionHandler collision_handler = makeCollisionHandler(config);
+    MonteCarloCollisionHandler collision_handler =
+        makeCollisionHandler(config, hashCombine(sample.seed_used, 0x9e3779b9u));
 
     std::size_t executed_steps = 0;
     for (std::size_t step = 0; step < std::max<std::size_t>(1, config.window_steps); ++step)
@@ -512,3 +629,5 @@ PicMccCurrentSample PicMccSurfaceCurrentSampler::sampleWithDerivative(
 } // namespace SurfaceCharging
 } // namespace Toolkit
 } // namespace SCDAT
+
+

@@ -29,6 +29,11 @@ struct SurfaceChargingScenarioPreset
 };
 
 std::vector<std::string> listSurfaceChargingScenarioPresetNames();
+std::vector<std::string> listSurfaceChargingReplayScenarioPresetNames();
+bool tryGetSurfaceChargingMainlineScenarioPreset(const std::string& name,
+                                                 SurfaceChargingScenarioPreset& preset);
+bool tryGetSurfaceChargingReplayScenarioPreset(const std::string& name,
+                                               SurfaceChargingScenarioPreset& preset);
 bool tryGetSurfaceChargingScenarioPreset(const std::string& name,
                                          SurfaceChargingScenarioPreset& preset);
 SurfaceChargingScenarioPreset makeDefaultSurfaceChargingScenarioPreset();

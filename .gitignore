@@ -1,6 +1,15 @@
 build/
 build_codex/
-documentation/
+documentation/*
+!documentation/contracts/
+documentation/contracts/*
+!documentation/contracts/config_schema_v1.json
+!documentation/examples/
+documentation/examples/*
+!documentation/examples/surface_spis_pic_hybrid_example.json
+!documentation/examples/plasma_spis_thruster_example.json
+!documentation/examples/internal_spis_geant4_example.json
+!documentation/toolkit_config_entrypoints_2026-04-07.md
 ref/
 results/
 third_party/

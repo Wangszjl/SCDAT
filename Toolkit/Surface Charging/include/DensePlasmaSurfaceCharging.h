@@ -6,10 +6,13 @@
 
 #include "../../Plasma Analysis/include/FluidAlgorithmConfig.h"
 
+#include "../../Tools/Coupling/include/BenchmarkContracts.h"
 #include "../../Tools/Coupling/include/SurfaceCircuitCoupling.h"
+#include "../../Tools/FieldSolver/include/SurfaceFieldVolumeContracts.h"
 #include "../../Tools/Material/include/MaterialDatabase.h"
 #include "../../Tools/Material/include/SurfaceInteraction.h"
 #include "../../Tools/Output/include/ResultExporter.h"
+#include "../../Tools/Particle/include/SurfaceVolumeDistributionContracts.h"
 #include "../../Tools/Particle/include/ParticleSource.h"
 
 #include <filesystem>
@@ -25,6 +28,8 @@ namespace Toolkit
 namespace SurfaceCharging
 {
 
+struct SurfaceRuntimePlan;
+
 enum class SurfaceChargingRegime
 {
     Generic,
@@ -35,7 +40,7 @@ enum class SurfaceChargingRegime
 
 enum class SurfaceCurrentAlgorithmMode
 {
-    UnifiedSpisAligned,
+    UnifiedKernelAligned,
     LegacyRefCompatible
 };
 
@@ -51,14 +56,42 @@ enum class PotentialReferenceModelKind
 
 enum class SurfaceBenchmarkMode
 {
-    UnifiedSpisAligned,
+    UnifiedKernelAligned,
     LegacyRefCompatible
 };
 
 enum class SurfaceRuntimeRoute
 {
     SCDATUnified,
+    SurfacePic,
+    SurfacePicHybrid,
     LegacyBenchmark
+};
+
+enum class SurfacePicStrategy
+{
+    SurfacePicDirect,
+    SurfacePicCalibrated,
+    SurfacePicHybridReference
+};
+
+enum class SurfaceLegacyInputAdapterKind
+{
+    None,
+    CTextReferenceDeck,
+    MatlabReferenceDeck
+};
+
+enum class SurfacePicRuntimeKind
+{
+    LocalWindowSampler,
+    GraphCoupledSharedSurface
+};
+
+enum class SurfaceInstrumentSetKind
+{
+    MetadataOnly,
+    SurfacePicObserverSet
 };
 
 enum class SurfaceBenchmarkSource
@@ -98,6 +131,31 @@ struct SurfaceCurrents
     double ram_ion_current_a_per_m2 = 0.0;
     double current_derivative_a_per_m2_per_v = 0.0;
     double total_current_a_per_m2 = 0.0;
+};
+
+struct SurfaceDistributionMoments
+{
+    PlasmaAnalysis::PlasmaDistributionModelKind model =
+        PlasmaAnalysis::PlasmaDistributionModelKind::MultiPopulationHybrid;
+    double electron_collection_scale = 1.0;
+    double ion_collection_scale = 1.0;
+    double electron_characteristic_energy_ev = 1.0;
+    double ion_characteristic_energy_ev = 1.0;
+    double photo_incidence_scale = 1.0;
+    double local_reference_shift_v = 0.0;
+    bool valid = false;
+};
+
+struct SurfaceMaterialInteractionMoments
+{
+    double electron_absorption_scale = 1.0;
+    double secondary_emission_scale = 1.0;
+    double ion_secondary_emission_scale = 1.0;
+    double backscatter_scale = 1.0;
+    double photo_emission_scale = 1.0;
+    double conductivity_scale = 1.0;
+    double capacitance_scale = 1.0;
+    bool valid = false;
 };
 
 struct EmissionModelParameters
@@ -255,14 +313,7 @@ struct SurfaceBoundaryMapping
     bool required = true;
 };
 
-struct ExternalFieldSolveNodeResult
-{
-    std::string node_id;
-    double reference_potential_v = 0.0;
-    double normal_field_v_per_m = 0.0;
-    double local_charge_density_c_per_m3 = 0.0;
-    double capacitance_scale = 1.0;
-};
+using ExternalFieldSolveNodeResult = FieldSolver::ExternalFieldSolveNodeResult;
 
 struct ExternalFieldSolveRequest
 {
@@ -279,57 +330,19 @@ struct ExternalFieldSolveResult
     std::vector<ExternalFieldSolveNodeResult> nodes;
 };
 
-struct VolumeMeshCellStub
+struct VolumeMeshCellStub : public Particle::VolumeCellDistributionStubContract
 {
-    std::string cell_id;
-    std::string node_id;
-    std::string boundary_group_id;
-    double pseudo_volume_m3 = 0.0;
-    double reference_potential_v = 0.0;
-    double local_charge_density_c_per_m3 = 0.0;
-    double center_x_m = 0.0;
-    double center_y_m = 0.0;
-    double center_z_m = 0.0;
-    double characteristic_length_m = 0.0;
 };
 
-struct VolumeMeshBoundaryFaceStub
+struct VolumeMeshBoundaryFaceStub : public Particle::VolumeBoundaryFaceStubContract
 {
-    std::string face_id;
-    std::string boundary_group_id;
-    std::string node_id;
-    int external_face_id = -1;
-    double area_m2 = 0.0;
-    double center_x_m = 0.0;
-    double center_y_m = 0.0;
-    double center_z_m = 0.0;
-    double normal_x = 1.0;
-    double normal_y = 0.0;
-    double normal_z = 0.0;
 };
 
-struct SurfaceVolumeProjectionEntry
+struct SurfaceVolumeProjectionEntry : public Particle::SurfaceVolumeProjectionEntryContract
 {
-    std::string node_id;
-    std::string cell_id;
-    std::string boundary_group_id;
-    double weight = 1.0;
-    double volume_to_surface_weight = 1.0;
 };
 
-struct ExternalVolumeSolveCellResult
-{
-    std::string cell_id;
-    std::string boundary_group_id;
-    double potential_v = 0.0;
-    double reference_potential_v = 0.0;
-    double normal_field_v_per_m = 0.0;
-    double local_charge_density_c_per_m3 = 0.0;
-    double capacitance_scale = 1.0;
-    double coupling_gain = 0.0;
-    double projection_weight_scale = 1.0;
-    double sheath_length_scale = 1.0;
-};
+using ExternalVolumeSolveCellResult = FieldSolver::ExternalVolumeSolveCellResult;
 
 struct ExternalVolumeSolveRequest
 {
@@ -347,8 +360,21 @@ struct ExternalVolumeSolveResult
 
 struct SurfaceChargingConfig
 {
+    Coupling::Contracts::SolverConfig solver_config{};
+    unsigned int seed = 20260408u;
+    std::string sampling_policy = "deterministic";
     SurfaceRuntimeRoute runtime_route = SurfaceRuntimeRoute::SCDATUnified;
+    SurfacePicStrategy surface_pic_strategy = SurfacePicStrategy::SurfacePicCalibrated;
+    SurfaceLegacyInputAdapterKind legacy_input_adapter_kind =
+        SurfaceLegacyInputAdapterKind::None;
+    SurfacePicRuntimeKind surface_pic_runtime_kind =
+        SurfacePicRuntimeKind::LocalWindowSampler;
+    SurfaceInstrumentSetKind surface_instrument_set_kind =
+        SurfaceInstrumentSetKind::MetadataOnly;
     SurfaceBenchmarkSource benchmark_source = SurfaceBenchmarkSource::None;
+    std::string reference_family = "native";
+    std::string reference_case_id;
+    std::string reference_matrix_case_id;
     LegacyBenchmarkExecutionMode legacy_benchmark_execution_mode =
         LegacyBenchmarkExecutionMode::ReplayFromReference;
     DefaultSurfacePhysicsConfig default_surface_physics;
@@ -373,12 +399,12 @@ struct SurfaceChargingConfig
     double ion_collection_coefficient = 1.0;
     double ion_directed_velocity_m_per_s = 0.0;
     SurfaceCurrentAlgorithmMode current_algorithm_mode =
-        SurfaceCurrentAlgorithmMode::UnifiedSpisAligned;
+        SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
     SurfaceCapacitanceModelKind capacitance_model_kind =
         SurfaceCapacitanceModelKind::Lumped;
     PotentialReferenceModelKind potential_reference_model_kind =
         PotentialReferenceModelKind::Lumped;
-    SurfaceBenchmarkMode benchmark_mode = SurfaceBenchmarkMode::UnifiedSpisAligned;
+    SurfaceBenchmarkMode benchmark_mode = SurfaceBenchmarkMode::UnifiedKernelAligned;
     bool enable_pic_calibration = false;
     std::size_t pic_calibration_samples = 4096;
     std::size_t pic_recalibration_interval_steps = 0;
@@ -389,6 +415,7 @@ struct SurfaceChargingConfig
     double ion_pic_calibration_max = 2.0;
     bool enable_live_pic_window = false;
     bool enable_live_pic_mcc = true;
+    std::string live_pic_collision_cross_section_set_id = "surface_pic_v1";
     std::size_t live_pic_window_steps = 12;
     std::size_t live_pic_window_layers = 8;
     std::size_t live_pic_particles_per_element = 2;
@@ -416,11 +443,15 @@ struct SurfaceChargingConfig
     double max_abs_current_density_a_per_m2 = 5.0e3;
     std::size_t internal_substeps = 16;
     PlasmaAnalysis::PlasmaParameters plasma;
+    PlasmaAnalysis::PlasmaDistributionModelKind distribution_model =
+        PlasmaAnalysis::PlasmaDistributionModelKind::MultiPopulationHybrid;
     Particle::ResolvedSpectrum electron_spectrum;
     Particle::ResolvedSpectrum ion_spectrum;
     bool has_electron_spectrum = false;
     bool has_ion_spectrum = false;
     Material::MaterialProperty material{2, Mesh::MaterialType::DIELECTRIC, "kapton"};
+    std::filesystem::path material_library_path;
+    std::string imported_material_name;
     EmissionModelParameters emission;
     std::vector<StructureBodyConfig> bodies;
     std::vector<SurfacePatchConfig> patches;
@@ -464,6 +495,12 @@ struct SurfaceChargingStatus
     bool pic_recalibrated = false;
     bool equilibrium_reached = false;
     std::size_t steps_completed = 0;
+    double transition_conductivity_scale = 1.0;
+    double transition_source_flux_scale = 1.0;
+    double transition_simulation_param_scale = 1.0;
+    std::size_t transition_runtime_internal_substeps = 0;
+    double transition_runtime_max_delta_potential_v_per_step = 0.0;
+    double transition_runtime_solver_relaxation_factor = 0.0;
 };
 
 struct SurfaceModelRuntimeState
@@ -505,9 +542,208 @@ struct SurfaceModelRuntimeState
     double external_volume_feedback_applied = 0.0;
     double electron_calibration_factor = 1.0;
     double ion_calibration_factor = 1.0;
+    double shared_patch_potential_v = 0.0;
+    double shared_patch_area_m2 = 0.0;
+    double shared_reference_potential_v = 0.0;
+    double shared_effective_sheath_length_m = 1.0e-3;
+    double shared_particle_transport_charge_c = 0.0;
+    double shared_particle_transport_reference_shift_v = 0.0;
+    bool shared_particle_transport_domain_active = false;
+    bool global_particle_domain_active = false;
+    double global_particle_domain_charge_c = 0.0;
+    double global_particle_domain_charge_conservation_error_c = 0.0;
+    double global_particle_domain_flux_conservation_error_a = 0.0;
+    double global_particle_domain_node_charge_c = 0.0;
+    double global_particle_domain_node_flux_a = 0.0;
+    bool global_sheath_field_solve_active = false;
+    double global_sheath_field_reference_potential_v = 0.0;
+    double global_sheath_field_residual_v_per_m = 0.0;
+    double global_particle_field_coupled_residual_v = 0.0;
+    double global_sheath_field_multi_step_stability_metric_v = 0.0;
+    double distributed_particle_transport_charge_c = 0.0;
+    double distributed_particle_transport_reference_shift_v = 0.0;
+    double distributed_particle_transport_net_flux_a = 0.0;
+    bool distributed_particle_transport_active = false;
+    bool shared_runtime_enabled = false;
     std::size_t node_index = 0;
     std::string node_name;
     const PicMccCurrentSample* live_pic_sample = nullptr;
+};
+
+struct SurfaceDidvState
+{
+    std::size_t node_index = 0;
+    std::string node_name;
+    double node_area_m2 = 0.0;
+    double plasma_current_a = 0.0;
+    double plasma_didv_a_per_v = 0.0;
+    double conduction_current_a = 0.0;
+    double conduction_didv_a_per_v = 0.0;
+    double total_current_a = 0.0;
+    double total_didv_a_per_v = 0.0;
+    bool valid = false;
+};
+
+struct SurfaceKernelSnapshot
+{
+    std::string source_family = "spis_equivalent_surface_kernel_v1";
+    SurfaceDistributionMoments distribution{};
+    SurfaceMaterialInteractionMoments material_interaction{};
+    SurfaceCurrents currents{};
+    SurfaceDidvState didv{};
+    PicMccCurrentSample live_pic_sample{};
+    bool valid = false;
+};
+
+struct SurfaceCircuitReducedNodeGroup
+{
+    std::size_t reduced_node_index = 0;
+    std::string group_id;
+    std::vector<std::size_t> member_node_indices;
+    double total_area_m2 = 0.0;
+};
+
+struct SurfaceCircuitMappingState
+{
+    std::vector<std::size_t> surface_to_circuit_node_index;
+    std::vector<std::vector<std::size_t>> circuit_to_surface_node_indices;
+    std::vector<std::size_t> circuit_to_reduced_node_index;
+    std::vector<SurfaceCircuitReducedNodeGroup> reduced_node_groups;
+    bool valid = false;
+};
+
+struct GlobalParticleDomainNodeState
+{
+    std::size_t node_index = 0;
+    std::string node_name;
+    double area_m2 = 0.0;
+    double patch_potential_v = 0.0;
+    double shared_reference_potential_v = 0.0;
+    double charge_c = 0.0;
+    double reference_shift_v = 0.0;
+    double net_flux_a = 0.0;
+};
+
+struct GlobalParticleDomainEdgeState
+{
+    std::size_t from_node_index = 0;
+    std::size_t to_node_index = 0;
+    std::string from_node_name;
+    std::string to_node_name;
+    double conductance_s = 0.0;
+    double exchange_flux_a = 0.0;
+    double stored_charge_c = 0.0;
+    double target_charge_c = 0.0;
+    double operator_drive_charge_c = 0.0;
+};
+
+struct GlobalParticleDomainState
+{
+    bool active = false;
+    std::string bookkeeping_mode = "uninitialized";
+    double total_charge_c = 0.0;
+    double total_reference_shift_v = 0.0;
+    double total_node_charge_c = 0.0;
+    double total_node_flux_a = 0.0;
+    double charge_conservation_error_c = 0.0;
+    double flux_conservation_error_a = 0.0;
+    double edge_charge_total_abs_c = 0.0;
+    double edge_target_charge_total_abs_c = 0.0;
+    double edge_operator_drive_total_abs_c = 0.0;
+    double edge_conductance_total_s = 0.0;
+    double edge_graph_operator_iterations = 0.0;
+    bool edge_graph_operator_converged = false;
+    double edge_graph_operator_max_balance_residual_c = 0.0;
+    double edge_graph_operator_branch_graph_edge_count = 0.0;
+    double edge_graph_operator_branch_graph_pair_count = 0.0;
+    double edge_graph_operator_effective_pair_count = 0.0;
+    double edge_graph_operator_total_pair_weight_f = 0.0;
+    double edge_graph_operator_total_conductance_weight_f = 0.0;
+    double edge_graph_operator_min_node_preconditioner = 1.0;
+    double edge_graph_operator_max_node_preconditioner = 1.0;
+    std::vector<GlobalParticleDomainNodeState> nodes;
+    std::vector<GlobalParticleDomainEdgeState> edges;
+};
+
+struct GlobalParticleRepositoryNodeState
+{
+    std::size_t node_index = 0;
+    std::string node_name;
+    double area_m2 = 0.0;
+    double patch_potential_v = 0.0;
+    double shared_reference_potential_v = 0.0;
+    double reference_shift_v = 0.0;
+    double reservoir_charge_c = 0.0;
+    double target_reservoir_charge_c = 0.0;
+    double migration_delta_charge_c = 0.0;
+    double edge_feedback_charge_c = 0.0;
+    double conservation_correction_charge_c = 0.0;
+    double net_flux_a = 0.0;
+};
+
+struct GlobalParticleRepositoryEdgeState
+{
+    std::size_t from_node_index = 0;
+    std::size_t to_node_index = 0;
+    std::string from_node_name;
+    std::string to_node_name;
+    double conductance_s = 0.0;
+    double migration_flux_a = 0.0;
+    double migration_charge_c = 0.0;
+    double stored_charge_c = 0.0;
+    double target_charge_c = 0.0;
+    double operator_drive_charge_c = 0.0;
+};
+
+struct GlobalParticleRepositoryState
+{
+    bool active = false;
+    std::string bookkeeping_mode = "uninitialized";
+    std::string lifecycle_mode = "uninitialized";
+    double total_reservoir_charge_c = 0.0;
+    double total_target_reservoir_charge_c = 0.0;
+    double total_migration_delta_abs_charge_c = 0.0;
+    double total_edge_feedback_abs_charge_c = 0.0;
+    double total_conservation_correction_abs_charge_c = 0.0;
+    double total_migration_edge_abs_charge_c = 0.0;
+    double charge_conservation_error_c = 0.0;
+    double migration_charge_conservation_error_c = 0.0;
+    std::vector<GlobalParticleRepositoryNodeState> nodes;
+    std::vector<GlobalParticleRepositoryEdgeState> edges;
+};
+
+struct GlobalSheathFieldNodeState
+{
+    std::size_t node_index = 0;
+    std::string node_name;
+    double area_m2 = 0.0;
+    double patch_potential_v = 0.0;
+    double uncoupled_reference_potential_v = 0.0;
+    double reference_potential_v = 0.0;
+    double sheath_capacitance_f = 0.0;
+    double sheath_charge_c = 0.0;
+    double normal_electric_field_v_per_m = 0.0;
+    double local_charge_density_c_per_m3 = 0.0;
+    double particle_charge_c = 0.0;
+    double particle_flux_a = 0.0;
+};
+
+struct GlobalSheathFieldSolveState
+{
+    bool active = false;
+    std::string solve_mode = "uninitialized";
+    double global_patch_potential_v = 0.0;
+    double global_reference_potential_v = 0.0;
+    double effective_sheath_length_m = 1.0e-3;
+    double global_normal_electric_field_v_per_m = 0.0;
+    double global_local_charge_density_c_per_m3 = 0.0;
+    double field_residual_v_per_m = 0.0;
+    double particle_field_coupled_residual_v = 0.0;
+    double multi_step_stability_metric_v = 0.0;
+    double linear_residual_norm_v = 0.0;
+    double matrix_row_count = 0.0;
+    double matrix_nonzeros = 0.0;
+    std::vector<GlobalSheathFieldNodeState> nodes;
 };
 
 class SurfaceCurrentModel
@@ -531,6 +767,9 @@ class SurfaceCurrentModel
     virtual double ionCalibrationFactor(const SurfaceModelRuntimeState& state) const = 0;
     virtual const PicMccCurrentSample& latestLivePicSample() const = 0;
     virtual const PicMccCurrentSample& latestLivePicSample(
+        const SurfaceModelRuntimeState& state) const = 0;
+    virtual const SurfaceKernelSnapshot& latestLivePicKernelSnapshot() const = 0;
+    virtual const SurfaceKernelSnapshot& latestLivePicKernelSnapshot(
         const SurfaceModelRuntimeState& state) const = 0;
     virtual std::string algorithmName() const = 0;
     virtual SurfaceCurrentAlgorithmMode algorithmMode() const = 0;
@@ -679,6 +918,9 @@ class SurfaceCircuitModel
     virtual Coupling::SurfaceCircuitAdvanceResult advanceImplicit(
         double dt, const Coupling::SurfaceCircuitLinearization& linearization,
         double max_delta_potential_v) = 0;
+    virtual Coupling::SurfaceCircuitAdvanceResult advanceImplicit(
+        double dt, const Coupling::SurfaceCircuitKernelInput& kernel_input,
+        double max_delta_potential_v) = 0;
     virtual std::size_t bodyNodeIndex() const = 0;
     virtual std::size_t primaryPatchNodeIndex() const = 0;
     virtual std::size_t primaryPatchToBodyBranchIndex() const = 0;
@@ -735,6 +977,7 @@ class DensePlasmaSurfaceCharging
 {
   public:
     bool initialize(const SurfaceChargingConfig& config);
+    bool initialize(const SurfaceRuntimePlan& runtime_plan);
     bool advance(double dt);
     const SurfaceChargingStatus& getStatus() const { return status_; }
     const std::string& lastErrorMessage() const { return last_error_message_; }
@@ -766,10 +1009,49 @@ class DensePlasmaSurfaceCharging
                                                const std::string& node_name = std::string{}) const;
     double computeCapacitancePerArea() const;
     double computeCapacitancePerArea(const SurfaceModelRuntimeState& state) const;
+    double computeBodyNodeCapacitanceF(const SurfaceModelRuntimeState& state) const;
     double computeEffectiveSheathLength() const;
     double computeEffectiveConductivity(double surface_potential_v) const;
     double computeEffectiveConductivity(double surface_potential_v,
                                         const Material::MaterialProperty& material) const;
+    bool useSharedSurfacePicRuntime() const;
+    double computeSharedSurfacePatchPotentialV() const;
+    double computeSharedSurfacePatchAreaM2() const;
+    double computeSharedSurfacePatchPotentialSpreadV() const;
+    double computeSharedSurfaceEffectiveSheathLengthM(double base_sheath_length_m) const;
+    double computeSharedSurfaceReferencePotentialV(double base_reference_potential_v,
+                                                  double local_patch_potential_v) const;
+    double computeSharedSurfaceGlobalSolveWeight() const;
+    bool useSharedSurfaceGlobalCoupledSolve() const;
+    std::size_t computeSharedSurfaceGlobalCoupledIterationLimit() const;
+    double computeSharedSurfaceGlobalCoupledToleranceV() const;
+    bool useSharedSurfaceLivePicCoupledRefresh() const;
+    double computeSharedSurfaceLivePicCoupledRefreshThresholdV() const;
+    bool useSharedSurfaceParticleTransportCoupling() const;
+    double computeSharedSurfaceParticleTransportConductanceSPerM2(
+        double shared_live_pic_net_current_density_a_per_m2,
+        double shared_live_pic_derivative_a_per_m2_per_v) const;
+    void advanceSharedSurfaceParticleTransportState(
+        double dt, const PicMccCurrentSample& shared_live_pic_sample, double shared_patch_area_m2,
+        double shared_effective_sheath_length_m);
+    double computeSharedSurfaceParticleTransportReferenceShiftV(
+        double shared_patch_area_m2, double shared_effective_sheath_length_m) const;
+    void updateSharedSurfaceDistributedParticleTransportState(
+        const std::vector<double>& node_potentials_v, double dt, double shared_patch_area_m2,
+        double shared_effective_sheath_length_m,
+        double shared_transport_conductance_s_per_m2);
+    double sharedSurfaceDistributedParticleTransportChargeC(std::size_t node_index) const;
+    double computeSharedSurfaceGlobalParticleDomainChargeConservationErrorC() const;
+    double computeSharedSurfaceGlobalParticleDomainFluxConservationErrorA() const;
+    double computeSharedSurfaceGlobalParticleDomainEdgeChargeTotalAbsC() const;
+    double computeSharedSurfaceDistributedParticleTransportReferenceShiftV(
+        std::size_t node_index, double node_area_m2, double shared_effective_sheath_length_m) const;
+    double computeSharedSurfaceGlobalSheathFieldResidualVPerM(
+        const SurfaceModelRuntimeState& state) const;
+    double computeSharedSurfaceGlobalParticleFieldCoupledResidualV(
+        const SurfaceModelRuntimeState& state) const;
+    double computeSharedSurfaceGlobalSheathFieldMultiStepStabilityMetricV() const;
+    double computeTransitionSourceFluxScale() const;
     double computeLeakageCurrentDensity(double surface_potential_v) const;
     double computeNetCurrentDensity(double surface_potential_v) const;
     double computeRadiationInducedConductivity() const;
@@ -782,12 +1064,66 @@ class DensePlasmaSurfaceCharging
     double estimateElectronFluxPicLike(double surface_potential_v, std::size_t samples) const;
     double estimateIonFluxPicLike(double surface_potential_v, std::size_t samples) const;
     double estimateCurrentDerivative(double surface_potential_v) const;
-    double advancePotentialImplicit(double surface_potential_v, double dt) const;
+    double advancePotentialImplicit(double surface_potential_v, double capacitance_per_area_f_per_m2,
+                                    double dt) const;
     void appendSurfaceNodeDiagnostics(const std::vector<double>& branch_currents_a,
                                       double effective_sheath_length_m);
+    void syncSharedTransportCachesFromOwnedGlobalParticleDomainState();
+    void populateOwnedGlobalParticleDomainStateFromTransportBuffers(
+        const std::vector<double>& node_potentials_v,
+        const std::vector<double>& transport_node_charge_c,
+        const std::vector<double>& transport_node_net_flux_a,
+        const std::vector<std::vector<double>>& transport_edge_charge_matrix_c,
+        const std::vector<std::vector<double>>& transport_edge_target_charge_matrix_c,
+        const std::vector<std::vector<double>>& transport_edge_operator_drive_matrix_c,
+        const std::vector<std::vector<double>>& transport_exchange_flux_matrix_a,
+        const std::vector<std::vector<double>>& transport_conductance_matrix_s);
+    void populateOwnedGlobalParticleRepositoryStateFromTransportBuffers(
+        const std::vector<double>& node_potentials_v,
+        const std::vector<double>& transport_node_charge_c,
+        const std::vector<double>& transport_node_net_flux_a,
+        const std::vector<double>& target_node_charge_c,
+        const std::vector<double>& node_migration_delta_charge_c,
+        const std::vector<double>& node_edge_feedback_charge_c,
+        const std::vector<double>& node_conservation_correction_charge_c,
+        const std::vector<std::vector<double>>& transport_edge_charge_matrix_c,
+        const std::vector<std::vector<double>>& transport_edge_target_charge_matrix_c,
+        const std::vector<std::vector<double>>& transport_edge_operator_drive_matrix_c,
+        const std::vector<std::vector<double>>& transport_exchange_flux_matrix_a,
+        const std::vector<std::vector<double>>& transport_conductance_matrix_s,
+        double dt);
+    void updateOwnedGlobalParticleDomainState(const std::vector<double>& node_potentials_v);
+    void rebuildOwnedGlobalParticleDomainEdges();
+    void solveOwnedGlobalSheathFieldSystem(const std::vector<double>& node_potentials_v,
+                                           double shared_effective_sheath_length_m,
+                                           double dt);
+    void appendOwnedGlobalCoupledLinearization(
+        const std::vector<double>& node_potentials_v, double dt,
+        Coupling::SurfaceCircuitLinearization& linearization,
+        std::size_t& current_matrix_coupling_offdiag_entries,
+        std::size_t& particle_transport_offdiag_entries,
+        double& particle_transport_total_conductance_s,
+        double& particle_transport_conservation_error_a_per_v) const;
+    void refreshGlobalKernelStates(const std::vector<SurfaceModelRuntimeState>& runtime_states);
+    const GlobalParticleDomainNodeState* findGlobalParticleDomainNodeState(
+        std::size_t node_index) const;
+    const GlobalSheathFieldNodeState* findGlobalSheathFieldNodeState(
+        std::size_t node_index) const;
+    double currentSharedSurfaceParticleTransportChargeC() const;
+    double currentSharedSurfaceParticleTransportReferenceShiftV() const;
+    SurfaceDidvState assembleSurfaceDidvState(ReferenceSurfaceRole role,
+                                              const SurfaceModelRuntimeState& runtime_state,
+                                              const SurfaceCurrents& currents) const;
+    SurfaceCircuitMappingState buildSurfaceCircuitMappingState() const;
 
     SurfaceChargingConfig config_;
     SurfaceChargingStatus status_;
+    double transition_conductivity_scale_ = 1.0;
+    double transition_source_flux_scale_ = 1.0;
+    double transition_simulation_param_scale_ = 1.0;
+    std::size_t transition_runtime_internal_substeps_ = 1;
+    double transition_runtime_max_delta_potential_v_per_step_ = 0.0;
+    double transition_runtime_solver_relaxation_factor_ = 1.0;
     ChargeAccumulationModel accumulation_model_;
     Material::SurfaceInteraction surface_interaction_;
     Output::ResultExporter exporter_;
@@ -820,6 +1156,29 @@ class DensePlasmaSurfaceCharging
     std::vector<double> history_capacitance_;
     std::vector<double> history_effective_conductivity_;
     std::vector<double> history_effective_sheath_length_;
+    std::vector<double> history_shared_surface_patch_potential_;
+    std::vector<double> history_shared_surface_patch_area_;
+    std::vector<double> history_shared_surface_reference_potential_;
+    std::vector<double> history_shared_surface_effective_sheath_length_;
+    std::vector<double> history_shared_surface_sheath_charge_;
+    std::vector<double> history_shared_surface_runtime_enabled_;
+    std::vector<double> history_shared_surface_pre_global_solve_patch_potential_spread_;
+    std::vector<double> history_shared_surface_patch_potential_spread_reduction_v_;
+    std::vector<double> history_shared_surface_patch_potential_spread_reduction_ratio_;
+    std::vector<double> history_shared_surface_current_matrix_coupling_active_;
+    std::vector<double> history_shared_surface_current_matrix_coupling_offdiag_entries_;
+    std::vector<double> history_shared_surface_global_coupled_solve_active_;
+    std::vector<double> history_shared_surface_global_coupled_solve_iterations_;
+    std::vector<double> history_shared_surface_global_coupled_solve_converged_;
+    std::vector<double> history_shared_surface_global_coupled_solve_max_delta_v_;
+    std::vector<double> history_shared_surface_live_pic_coupled_refresh_active_;
+    std::vector<double> history_shared_surface_live_pic_coupled_refresh_count_;
+    std::vector<double> history_shared_surface_particle_transport_coupling_active_;
+    std::vector<double> history_shared_surface_particle_transport_offdiag_entries_;
+    std::vector<double> history_shared_surface_particle_transport_total_conductance_s_;
+    std::vector<double> history_shared_surface_particle_transport_conservation_error_a_per_v_;
+    std::vector<double> history_shared_surface_particle_transport_charge_c_;
+    std::vector<double> history_shared_surface_particle_transport_reference_shift_v_;
     std::vector<double> history_normal_electric_field_;
     std::vector<double> history_local_charge_density_;
     std::vector<double> history_adaptive_time_step_;
@@ -841,10 +1200,19 @@ class DensePlasmaSurfaceCharging
     std::vector<std::vector<double>> history_surface_node_conduction_currents_;
     std::vector<std::vector<double>> history_surface_node_ram_currents_;
     std::vector<std::vector<double>> history_surface_node_current_derivatives_;
+    std::vector<std::vector<double>> history_surface_node_effective_sheath_lengths_;
     std::vector<std::vector<double>> history_surface_node_normal_electric_fields_;
     std::vector<std::vector<double>> history_surface_node_local_charge_densities_;
     std::vector<std::vector<double>> history_surface_node_propagated_reference_potentials_;
     std::vector<std::vector<double>> history_surface_node_field_solver_reference_potentials_;
+    std::vector<std::vector<double>> history_surface_node_shared_runtime_enabled_;
+    std::vector<std::vector<double>> history_surface_node_shared_patch_potentials_;
+    std::vector<std::vector<double>> history_surface_node_shared_patch_areas_;
+    std::vector<std::vector<double>> history_surface_node_shared_reference_potentials_;
+    std::vector<std::vector<double>> history_surface_node_shared_sheath_charges_;
+    std::vector<std::vector<double>> history_surface_node_distributed_particle_transport_charges_;
+    std::vector<std::vector<double>> history_surface_node_distributed_particle_transport_reference_shifts_;
+    std::vector<std::vector<double>> history_surface_node_distributed_particle_transport_net_fluxes_;
     std::vector<std::vector<double>> history_surface_node_graph_capacitance_diagonals_;
     std::vector<std::vector<double>> history_surface_node_graph_capacitance_row_sums_;
     std::vector<std::vector<double>> history_surface_node_field_solver_coupling_gains_;
@@ -901,6 +1269,30 @@ class DensePlasmaSurfaceCharging
     std::vector<LegacyBenchmarkReplayRow> legacy_benchmark_replay_;
     std::vector<LegacyBenchmarkReplayRow> legacy_benchmark_body_curve_;
     std::size_t legacy_benchmark_replay_index_ = 0;
+    GlobalParticleDomainState global_particle_domain_state_;
+    GlobalParticleRepositoryState global_particle_repository_state_;
+    GlobalSheathFieldSolveState global_sheath_field_solve_state_;
+    double shared_particle_transport_charge_c_ = 0.0;
+    double shared_particle_transport_reference_shift_v_ = 0.0;
+    std::vector<double> shared_particle_transport_node_charge_c_;
+    std::vector<double> shared_particle_transport_node_net_flux_a_;
+    std::vector<std::vector<double>> shared_particle_transport_edge_charge_matrix_c_;
+    std::vector<std::vector<double>> shared_particle_transport_edge_target_charge_matrix_c_;
+    std::vector<std::vector<double>> shared_particle_transport_edge_operator_drive_matrix_c_;
+    std::vector<std::vector<double>> shared_particle_transport_exchange_flux_matrix_a_;
+    std::vector<std::vector<double>> global_particle_transport_conductance_matrix_s_;
+    std::vector<std::vector<double>> global_sheath_field_reference_response_matrix_;
+    std::vector<double> global_sheath_field_previous_node_charge_c_;
+    double shared_particle_transport_edge_graph_operator_iterations_last_ = 0.0;
+    double shared_particle_transport_edge_graph_operator_converged_last_ = 0.0;
+    double shared_particle_transport_edge_graph_operator_max_balance_residual_c_last_ = 0.0;
+    double shared_particle_transport_edge_graph_operator_branch_graph_edge_count_last_ = 0.0;
+    double shared_particle_transport_edge_graph_operator_branch_graph_pair_count_last_ = 0.0;
+    double shared_particle_transport_edge_graph_operator_effective_pair_count_last_ = 0.0;
+    double shared_particle_transport_edge_graph_operator_total_pair_weight_f_last_ = 0.0;
+    double shared_particle_transport_edge_graph_operator_total_conductance_weight_f_last_ = 0.0;
+    double shared_particle_transport_edge_graph_operator_min_node_preconditioner_last_ = 1.0;
+    double shared_particle_transport_edge_graph_operator_max_node_preconditioner_last_ = 1.0;
     mutable double field_volume_adaptive_relaxation_ = 0.65;
     mutable bool field_volume_adaptive_relaxation_initialized_ = false;
     mutable std::string last_error_message_;

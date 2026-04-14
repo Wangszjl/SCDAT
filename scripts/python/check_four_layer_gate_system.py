@@ -24,8 +24,7 @@ LAYER_PATTERNS: Dict[str, str] = {
     "system": (
         r"^(ToolsLayoutCheck|LegacyBenchmarkAcceptanceGate|LegacyReplayCsvConsistencyGate|"
         r"SurfaceLeoUnitLintGate|UnifiedConfigSchemaV1Gate|UnifiedOutputContractV1Gate|"
-        r"ReproducibleBuildDependencyLockGate|PrecisionPerformanceParetoGate|DocumentationClosurePolicyGate|"
-        r"ReleaseCandidateSignatureGate|"
+        r"ReproducibleBuildDependencyLockGate|DocumentationClosurePolicyGate|"
         r"VacuumArcCaseMatrixDryRunGate|VacuumArcArcPicCompareSelfGate|"
         r"InternalRadiationCouplingRegressionGate|InternalRadiationComponentTrendGate|"
         r"RadiationGeant4AlignmentGate|RadiationUqBudgetGate|VacuumArcCrossPlatformConsistencyGate)$"

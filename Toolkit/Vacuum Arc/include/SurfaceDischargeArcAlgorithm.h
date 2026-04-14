@@ -12,6 +12,7 @@
 #include "SurfaceArcCoupling.h"
 #include "TownsendAvalancheModel.h"
 
+#include "../../Tools/Coupling/include/BenchmarkContracts.h"
 #include "../../Tools/FieldSolver/include/PoissonSolver.h"
 #include "../../Tools/Interactions/Collisions/include/CollisionPicAdapter.h"
 #include "../../Tools/Mesh/include/MeshParsing.h"
@@ -58,6 +59,9 @@ enum class SurfaceCircuitLoadModel : std::uint8_t
 
 struct DischargeConfiguration
 {
+    Coupling::Contracts::SolverConfig solver_config{};
+    unsigned int seed = 20260408u;
+    std::string sampling_policy = "deterministic";
     double gap_distance_m = 5.0e-4;
     double applied_field_v_per_m = 2.5e7;
     double surface_potential_v = 0.0;

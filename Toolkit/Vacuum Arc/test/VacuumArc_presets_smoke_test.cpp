@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -76,6 +78,14 @@ bool hasColumn(const SCDAT::Output::ColumnarDataSet& data_set, const std::string
 {
     const auto it = data_set.scalar_series.find(key);
     return it != data_set.scalar_series.end() && !it->second.empty();
+}
+
+std::string readTextFile(const std::filesystem::path& path)
+{
+    std::ifstream input(path);
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
 }
 
 double percentileAbsValue(const SCDAT::Output::ColumnarDataSet& data_set, const std::string& key,
@@ -554,10 +564,43 @@ TEST(VacuumArcPresetSmokeTest, CollisionStageStructuredReactionFeedbackIsFiniteA
 
     EXPECT_TRUE(hasColumn(data_set, "collision_ionization_fraction_step"));
     EXPECT_TRUE(hasColumn(data_set, "collision_excitation_fraction_step"));
-    EXPECT_TRUE(hasColumn(data_set, "collision_charge_exchange_fraction_step"));
-    EXPECT_TRUE(hasColumn(data_set, "collision_reaction_weighted_emission_feedback_step"));
-    EXPECT_TRUE(hasColumn(data_set, "collision_reaction_weighted_channel_feedback_step"));
-}
+      EXPECT_TRUE(hasColumn(data_set, "collision_charge_exchange_fraction_step"));
+      EXPECT_TRUE(hasColumn(data_set, "collision_reaction_weighted_emission_feedback_step"));
+      EXPECT_TRUE(hasColumn(data_set, "collision_reaction_weighted_channel_feedback_step"));
+
+      const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+      EXPECT_NE(
+          sidecar.find("\"collision_diagnostic_contract_id\": \"vacuum-arc-collision-emission-channel-v1\""),
+          std::string::npos);
+      EXPECT_NE(
+          sidecar.find("\"benchmark_metrics_contract_id\": \"vacuum-arc-benchmark-metrics-v1\""),
+          std::string::npos);
+      EXPECT_NE(
+          sidecar.find("\"simulation_artifact_contract_id\": \"simulation-artifact-v1\""),
+          std::string::npos);
+
+      auto benchmark_metrics_path = csv_path;
+      benchmark_metrics_path.replace_extension(".benchmark_metrics.json");
+      ASSERT_TRUE(std::filesystem::exists(benchmark_metrics_path));
+      const auto benchmark_sidecar = readTextFile(benchmark_metrics_path);
+      EXPECT_NE(
+          benchmark_sidecar.find("\"schema_version\": \"scdat.vacuum_arc.benchmark_metrics.v1\""),
+          std::string::npos);
+      EXPECT_NE(
+          benchmark_sidecar.find("\"contract_id\": \"vacuum-arc-benchmark-metrics-v1\""),
+          std::string::npos);
+
+      auto simulation_artifact_path = csv_path;
+      simulation_artifact_path.replace_extension(".simulation_artifact.json");
+      ASSERT_TRUE(std::filesystem::exists(simulation_artifact_path));
+      const auto simulation_artifact = readTextFile(simulation_artifact_path);
+      EXPECT_NE(
+          simulation_artifact.find("\"schema_version\": \"scdat.simulation_artifact.v1\""),
+          std::string::npos);
+      EXPECT_NE(
+          simulation_artifact.find("\"contract_id\": \"simulation-artifact-v1\""),
+          std::string::npos);
+  }
 
 TEST(VacuumArcPresetSmokeTest, CollisionStageFallbackCanBeTriggeredByRateLimit)
 {
@@ -1029,10 +1072,10 @@ TEST(VacuumArcPresetSmokeTest, ArcPicBenchmarkGateTargetCasesCoverCoreMetrics)
 
     for (const auto& case_name : target_cases)
     {
-        const auto aligned_data = run_case_with_mode(case_name, ArcPicAlignmentMode::ArcPicAligned,
-                                                     "aligned");
-        const auto legacy_data = run_case_with_mode(case_name, ArcPicAlignmentMode::LegacyBaseline,
-                                                    "legacy");
+          const auto aligned_data = run_case_with_mode(case_name, ArcPicAlignmentMode::ArcPicAligned,
+                                                       "aligned");
+          const auto legacy_data = run_case_with_mode(case_name, ArcPicAlignmentMode::LegacyBaseline,
+                                                      "legacy");
 
         for (const auto* data_set : {&aligned_data, &legacy_data})
         {
@@ -1090,14 +1133,14 @@ TEST(VacuumArcPresetSmokeTest, ArcPicBenchmarkGateTargetCasesCoverCoreMetrics)
         const double legacy_peak_current = maxAbsValue(legacy_data, "discharge_current_a");
         const double aligned_peak_density = maxAbsValue(aligned_data, "current_density_a_per_m2");
         const double legacy_peak_density = maxAbsValue(legacy_data, "current_density_a_per_m2");
-        const double aligned_final_potential = lastValue(aligned_data, "surface_potential_v");
-        const double legacy_final_potential = lastValue(legacy_data, "surface_potential_v");
+          const double aligned_final_potential = lastValue(aligned_data, "surface_potential_v");
+          const double legacy_final_potential = lastValue(legacy_data, "surface_potential_v");
 
         const double current_delta_ratio =
             std::abs(aligned_peak_current - legacy_peak_current) /
             std::max(1.0e-12, std::abs(aligned_peak_current));
-        const double density_delta_ratio =
-            std::abs(aligned_peak_density - legacy_peak_density) /
+          const double density_delta_ratio =
+              std::abs(aligned_peak_density - legacy_peak_density) /
             std::max(1.0e-12, std::abs(aligned_peak_density));
 
         EXPECT_LE(current_delta_ratio, 0.75);

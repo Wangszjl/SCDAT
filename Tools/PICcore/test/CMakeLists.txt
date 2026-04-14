@@ -16,6 +16,7 @@ include(GoogleTest)
 
 set(PICCORE_TEST_TARGETS
     PICCycleBoundary_test
+    PICcoreCollisionRuntime_test
 )
 
 foreach(test_target IN LISTS PICCORE_TEST_TARGETS)
@@ -25,6 +26,7 @@ foreach(test_target IN LISTS PICCORE_TEST_TARGETS)
             SCDAT::Tools::Boundary
             SCDAT::Tools::FieldSolver
             SCDAT::Tools::Geometry
+            SCDAT::Tools::Interactions
             SCDAT::Tools::Mesh
             SCDAT::Tools::PICcore
             SCDAT::Tools::Particle

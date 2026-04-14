@@ -5,6 +5,7 @@
 #include "DischargeChannelModel.h"
 #include "ParticleTransportModel.h"
 
+#include "../../Tools/Coupling/include/BenchmarkContracts.h"
 #include "../../Tools/Output/include/ResultExporter.h"
 
 #include <filesystem>
@@ -25,21 +26,80 @@ enum class InternalChargingSourceMode
   Radiation
 };
 
+enum class InternalMaterialStackModelKind
+{
+    SpisLayeredStack = 0,
+    SpisHarnessBundle = 1,
+    SpisBacksheetStack = 2,
+};
+
+enum class InternalGeometryModelKind
+{
+    LayerStack1D = 0,
+    ShieldedLayerStack1D = 1,
+};
+
+enum class InternalPrimarySourceModelKind
+{
+    PresetMonoEnergeticFlux = 0,
+    RadiationDriveCoupled = 1,
+};
+
+enum class InternalPhysicsProcessListKind
+{
+    Geant4EmStandardLike = 0,
+    Geant4ShieldingLike = 1,
+};
+
+enum class InternalEnergyDepositionModelKind
+{
+    ContinuousSlabDeposition = 0,
+    Geant4StepRecorderLike = 1,
+};
+
+enum class InternalChargeResponseModelKind
+{
+    SpisLayeredDielectric = 0,
+    RadiationInducedConductivityRelaxation = 1,
+};
+
 struct InternalChargingRadiationDrive
 {
   double incident_current_density_a_per_m2 = 0.0;
   double incident_energy_ev = 0.0;
   double incident_charge_state_abs = 1.0;
+  std::string deposition_record_contract_id = "aggregate-dose-drive-v1";
+  std::string process_history_contract_id = "aggregate-process-history-v1";
+  std::string provenance_source = "internal_preset";
+  std::string process_dispatch_mode = "aggregate";
+  bool secondary_provenance_available = false;
+  std::string deposition_history_path;
+  std::string process_history_path;
 };
 
 struct InternalChargingConfiguration
 {
+  Coupling::Contracts::SolverConfig solver_config{};
+  unsigned int seed = 20260408u;
+  std::string sampling_policy = "deterministic";
     std::size_t layers = 16;
     double thickness_m = 2.0e-3;
     double area_m2 = 1.0e-2;
     double incident_current_density_a_per_m2 = 2.0e-8;
     double incident_energy_ev = 5.0e3;
   InternalChargingSourceMode source_mode = InternalChargingSourceMode::Preset;
+    bool enable_spis_style_organization = true;
+    InternalMaterialStackModelKind material_stack_model =
+        InternalMaterialStackModelKind::SpisLayeredStack;
+    InternalGeometryModelKind geometry_model = InternalGeometryModelKind::LayerStack1D;
+    InternalPrimarySourceModelKind primary_source_model =
+        InternalPrimarySourceModelKind::PresetMonoEnergeticFlux;
+    InternalPhysicsProcessListKind physics_process_list =
+        InternalPhysicsProcessListKind::Geant4ShieldingLike;
+    InternalEnergyDepositionModelKind energy_deposition_model =
+        InternalEnergyDepositionModelKind::Geant4StepRecorderLike;
+    InternalChargeResponseModelKind charge_response_model =
+        InternalChargeResponseModelKind::RadiationInducedConductivityRelaxation;
     std::string material_name = "kapton";
     double incident_charge_state_abs = 1.0;
 

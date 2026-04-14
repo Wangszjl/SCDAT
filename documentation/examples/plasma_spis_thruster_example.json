@@ -1,0 +1,23 @@
+{
+  "schema_version": "v1",
+  "module": "plasma",
+  "base_preset": "hall_thruster_plume",
+  "name": "plasma_spis_thruster_example",
+  "run": {
+    "steps": 6,
+    "output_csv": "results/plasma_spis_thruster_example.csv"
+  },
+  "config": {
+    "enable_spis_style_organization": true,
+    "environment_model": "spis_thruster_plume",
+    "distribution_model": "multi_population_hybrid",
+    "reaction_registry": "spis_dense_plasma",
+    "diagnostic_set": "full_physics_diagnostics",
+    "advanced_closure": {
+      "enable_non_equilibrium_closure": true,
+      "enable_turbulence_closure": true,
+      "non_equilibrium_model": "collisional_thermalization",
+      "turbulence_model": "mixing_length_eddy_diffusivity"
+    }
+  }
+}

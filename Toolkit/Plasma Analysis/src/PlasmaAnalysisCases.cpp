@@ -14,6 +14,10 @@ namespace
 FluidAlgorithmConfig makeCcpArgonConfig()
 {
     FluidAlgorithmConfig config;
+    config.environment_model = PlasmaEnvironmentModelKind::SpisCcpReference;
+    config.distribution_model = PlasmaDistributionModelKind::MaxwellianProjected;
+    config.reaction_registry = PlasmaReactionRegistryKind::SpisCore;
+    config.diagnostic_set = PlasmaDiagnosticSetKind::SpisCoreDiagnostics;
     config.domain_size = Geometry::Vector3D(2.0e-3, 2.0e-3, 2.0e-2);
     config.resolution = Geometry::Vector3D(8.0, 8.0, 48.0);
     config.time_step_s = 5.0e-10;
@@ -32,6 +36,10 @@ FluidAlgorithmConfig makeCcpArgonConfig()
 FluidAlgorithmConfig makeLeoWakeConfig()
 {
     FluidAlgorithmConfig config;
+    config.environment_model = PlasmaEnvironmentModelKind::SpisOrbitalWake;
+    config.distribution_model = PlasmaDistributionModelKind::WakeAnisotropic;
+    config.reaction_registry = PlasmaReactionRegistryKind::SpisCore;
+    config.diagnostic_set = PlasmaDiagnosticSetKind::SheathMultiscaleDiagnostics;
     config.domain_size = Geometry::Vector3D(0.1, 0.1, 0.6);
     config.resolution = Geometry::Vector3D(6.0, 6.0, 40.0);
     config.time_step_s = 2.0e-7;
@@ -50,6 +58,10 @@ FluidAlgorithmConfig makeLeoWakeConfig()
 FluidAlgorithmConfig makeThrusterPlumeConfig()
 {
     FluidAlgorithmConfig config;
+    config.environment_model = PlasmaEnvironmentModelKind::SpisThrusterPlume;
+    config.distribution_model = PlasmaDistributionModelKind::MultiPopulationHybrid;
+    config.reaction_registry = PlasmaReactionRegistryKind::SpisDensePlasma;
+    config.diagnostic_set = PlasmaDiagnosticSetKind::FullPhysicsDiagnostics;
     config.domain_size = Geometry::Vector3D(2.0e-2, 2.0e-2, 0.12);
     config.resolution = Geometry::Vector3D(8.0, 8.0, 36.0);
     config.time_step_s = 2.5e-8;

@@ -9,6 +9,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 using SCDAT::Toolkit::InternalCharging::InternalChargingRadiationDrive;
 using SCDAT::Toolkit::InternalCharging::InternalChargingScenarioPreset;
@@ -23,6 +26,14 @@ using SCDAT::Toolkit::Radiation::RadiationScenarioPreset;
 
 namespace
 {
+
+std::string readTextFile(const std::filesystem::path& path)
+{
+    std::ifstream input(path);
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
 
 double mapDepositedEnergyToCurrentDensity(double deposited_energy_j_per_m2, double dt,
                                           double mean_energy_ev,
@@ -98,6 +109,11 @@ TEST(InternalChargingRadiationCouplingSmokeTest, OnlineOneWayCouplingDrivesInter
         InternalChargingRadiationDrive drive;
         drive.incident_energy_ev = std::max(1.0, radiation_preset.config.mean_energy_ev);
         drive.incident_charge_state_abs = 1.0;
+        drive.deposition_record_contract_id = "geant4-aligned-deposition-record-v1";
+        drive.process_history_contract_id = "geant4-aligned-process-history-v1";
+        drive.provenance_source = "radiation_smoke_test";
+        drive.process_dispatch_mode = "aggregate_tagged_dispatch";
+        drive.secondary_provenance_available = false;
         drive.incident_current_density_a_per_m2 =
             mapDepositedEnergyToCurrentDensity(deposited_energy_delta_j_per_m2, dt,
                                                drive.incident_energy_ev,
@@ -125,6 +141,127 @@ TEST(InternalChargingRadiationCouplingSmokeTest, OnlineOneWayCouplingDrivesInter
     EXPECT_TRUE(std::all_of(status.electric_field_v_per_m.begin(),
                             status.electric_field_v_per_m.end(),
                             [](double value) { return std::isfinite(value); }));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "internal_radiation_provenance_smoke.csv";
+    ASSERT_TRUE(internal_algorithm.exportResults(csv_path));
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find("\"deposition_record_contract_id\": \"geant4-aligned-deposition-record-v1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"process_history_contract_id\": \"geant4-aligned-process-history-v1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"drive_provenance_source\": \"radiation_smoke_test\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"internal_consumes_deposition_history\": \"true\""),
+              std::string::npos);
+}
+
+TEST(InternalChargingRadiationCouplingSmokeTest, InternalExportCarriesRadiationArtifactPaths)
+{
+    InternalChargingScenarioPreset internal_preset;
+    RadiationScenarioPreset radiation_preset;
+    ASSERT_TRUE(SCDAT::Toolkit::InternalCharging::tryGetInternalChargingScenarioPreset(
+        "geo_electron_belt", internal_preset));
+    ASSERT_TRUE(
+        SCDAT::Toolkit::Radiation::tryGetRadiationScenarioPreset("geo_electron_belt_dose", radiation_preset));
+
+    radiation_preset.config.enable_monte_carlo_transport = true;
+    radiation_preset.config.monte_carlo_histories_per_step = 16;
+    radiation_preset.config.monte_carlo_max_steps_per_track = 24;
+    radiation_preset.steps = 2;
+
+    RadiationDoseAlgorithm radiation_algorithm;
+    ASSERT_TRUE(radiation_algorithm.initialize(radiation_preset.config));
+    for (std::size_t i = 0; i < radiation_preset.steps; ++i)
+    {
+        ASSERT_TRUE(radiation_algorithm.advance(radiation_preset.time_step_s));
+    }
+
+    const auto radiation_csv =
+        std::filesystem::temp_directory_path() / "radiation_internal_artifact_paths.csv";
+    ASSERT_TRUE(radiation_algorithm.exportResults(radiation_csv));
+
+    auto deposition_history_path = radiation_csv;
+    deposition_history_path.replace_extension();
+    deposition_history_path += ".deposition_history.json";
+    auto process_history_path = radiation_csv;
+    process_history_path.replace_extension();
+    process_history_path += ".process_history.json";
+    ASSERT_TRUE(std::filesystem::exists(deposition_history_path));
+    ASSERT_TRUE(std::filesystem::exists(process_history_path));
+
+    internal_preset.config.source_mode = InternalChargingSourceMode::Radiation;
+    SpacecraftInternalChargingAlgorithm internal_algorithm;
+    ASSERT_TRUE(internal_algorithm.initialize(internal_preset.config));
+
+    InternalChargingRadiationDrive drive;
+    drive.incident_energy_ev = std::max(1.0, radiation_preset.config.mean_energy_ev);
+    drive.incident_charge_state_abs = 1.0;
+    drive.incident_current_density_a_per_m2 = 1.0e-9;
+    drive.deposition_record_contract_id = "geant4-aligned-deposition-record-v1";
+    drive.process_history_contract_id = "geant4-aligned-process-history-v1";
+    drive.provenance_source = "radiation_artifact_smoke_test";
+    drive.process_dispatch_mode = "track_tagged_dispatch";
+    drive.secondary_provenance_available = true;
+    drive.deposition_history_path = deposition_history_path.string();
+    drive.process_history_path = process_history_path.string();
+    internal_algorithm.setRadiationDrive(drive);
+
+    ASSERT_TRUE(internal_algorithm.advance(internal_preset.time_step_s));
+    const auto internal_csv =
+        std::filesystem::temp_directory_path() / "internal_artifact_path_smoke.csv";
+    ASSERT_TRUE(internal_algorithm.exportResults(internal_csv));
+    const auto sidecar = readTextFile(internal_csv.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find(deposition_history_path.filename().string()),
+              std::string::npos);
+    EXPECT_NE(sidecar.find(process_history_path.filename().string()),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"internal_drive_provenance_contract_id\": \"internal-radiation-drive-provenance-v1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"internal_response_coupled_solve_contract_id\": \"internal-response-coupled-solve-v1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"internal_response_coupled_solve_artifact_path\":"),
+              std::string::npos);
+
+    auto provenance_summary_path = internal_csv;
+    provenance_summary_path.replace_extension();
+    provenance_summary_path += ".drive_provenance_summary.json";
+    auto layer_alignment_path = internal_csv;
+    layer_alignment_path.replace_extension();
+    layer_alignment_path += ".drive_layer_alignment.csv";
+    auto coupled_solve_path = internal_csv;
+    coupled_solve_path.replace_extension();
+    coupled_solve_path += ".internal_response_coupled_solve.json";
+    ASSERT_TRUE(std::filesystem::exists(provenance_summary_path));
+    ASSERT_TRUE(std::filesystem::exists(layer_alignment_path));
+    ASSERT_TRUE(std::filesystem::exists(coupled_solve_path));
+    const auto provenance_summary = readTextFile(provenance_summary_path);
+    EXPECT_NE(provenance_summary.find("\"schema\": \"scdat.internal_radiation_drive_provenance.v1\""),
+              std::string::npos);
+    EXPECT_NE(provenance_summary.find("\"contract_id\": \"internal-radiation-drive-provenance-v1\""),
+              std::string::npos);
+    EXPECT_NE(provenance_summary.find("\"dispatch_mode\": \"track_tagged_dispatch\""),
+              std::string::npos);
+    EXPECT_NE(provenance_summary.find(deposition_history_path.filename().string()),
+              std::string::npos);
+    EXPECT_NE(provenance_summary.find(process_history_path.filename().string()),
+              std::string::npos);
+
+    const auto coupled_solve = readTextFile(coupled_solve_path);
+    EXPECT_NE(coupled_solve.find("\"schema_version\": \"scdat.internal_response_coupled_solve.v1\""),
+              std::string::npos);
+    EXPECT_NE(coupled_solve.find("\"contract_id\": \"internal-response-coupled-solve-v1\""),
+              std::string::npos);
+
+    std::ifstream alignment_input(layer_alignment_path);
+    ASSERT_TRUE(alignment_input.is_open());
+    std::string alignment_header;
+    ASSERT_TRUE(std::getline(alignment_input, alignment_header));
+    EXPECT_NE(alignment_header.find("internal_layer_index"), std::string::npos);
+    EXPECT_NE(alignment_header.find("radiation_layer_index"), std::string::npos);
+    EXPECT_NE(alignment_header.find("normalized_depth_offset"), std::string::npos);
+    std::string alignment_row;
+    EXPECT_TRUE(static_cast<bool>(std::getline(alignment_input, alignment_row)));
 }
 
 TEST(InternalChargingRadiationCouplingSmokeTest, IterativeSubstepCouplingProvidesConvergenceHistory)

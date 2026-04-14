@@ -1,0 +1,23 @@
+{
+  "schema_version": "v1",
+  "module": "internal",
+  "base_preset": "geo_electron_belt",
+  "name": "internal_spis_geant4_example",
+  "run": {
+    "steps": 6,
+    "output_csv": "results/internal_spis_geant4_example.csv"
+  },
+  "config": {
+    "enable_spis_style_organization": true,
+    "source_mode": "preset",
+    "material_stack_model": "spis_layered_stack",
+    "geometry_model": "shielded_layer_stack_1d",
+    "primary_source_model": "preset_monoenergetic_flux",
+    "physics_process_list": "geant4_shielding_like",
+    "energy_deposition_model": "geant4_step_recorder_like",
+    "charge_response_model": "radiation_induced_conductivity_relaxation",
+    "layers": 24,
+    "thickness_m": 4.0e-3,
+    "area_m2": 5.0e-2
+  }
+}

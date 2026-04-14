@@ -3,6 +3,7 @@
 #include "DensePlasmaSurfaceCharging.h"
 
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -154,6 +155,10 @@ SurfaceChargingConfig applyLegacyBenchmarkExecutionConfig(
     LegacyBenchmarkCaseDefinition* resolved_definition = nullptr);
 double firstLegacyEquilibriumTimeS(const std::vector<LegacyBenchmarkCurveSample>& curve,
                                    double equilibrium_tolerance_v = 1.0e-2);
+double legacyBenchmarkComponentRmse(
+    const std::vector<LegacyBenchmarkCurveSample>& actual,
+    const std::vector<LegacyBenchmarkCurveSample>& reference,
+    const std::function<double(const LegacyBenchmarkCurveSample&)>& accessor);
 LegacyBenchmarkMetrics computeLegacyBenchmarkMetrics(
     const std::vector<LegacyBenchmarkCurveSample>& actual,
     const std::vector<LegacyBenchmarkCurveSample>& reference,

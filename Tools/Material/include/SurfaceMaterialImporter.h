@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../../Basic/include/VoidResult.h"
-#include "SPISMaterialLoader.h"
+#include "SurfaceMaterialLoader.h"
 
 #include <filesystem>
 
@@ -10,14 +10,15 @@ namespace SCDAT
 namespace Material
 {
 
-class SPISMaterialImporter
+class SurfaceMaterialImporter
 {
   public:
     VoidResult importPath(const std::filesystem::path& path, MaterialDatabase& database) const;
 
   private:
-    SPISMaterialLoader loader_;
+    SurfaceMaterialLoader loader_;
 };
 
 } // namespace Material
 } // namespace SCDAT
+

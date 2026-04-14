@@ -1,0 +1,43 @@
+{
+  "schema_version": "v1",
+  "module": "internal",
+  "base_preset": "geo_electron_belt",
+  "name": "internal_config_full_example",
+  "run": {
+    "time_step_s": 1.0e-3,
+    "steps": 20,
+    "output_csv": "results/internal_config_full_example.csv"
+  },
+  "config": {
+    "layers": 24,
+    "thickness_m": 4.0e-3,
+    "area_m2": 5.0e-2,
+    "incident_current_density_a_per_m2": 1.5e-10,
+    "incident_energy_ev": 8.5e4,
+    "incident_charge_state_abs": 1.0,
+    "source_mode": "preset",
+    "enable_spis_style_organization": true,
+    "material_name": "kapton",
+    "material_stack_model": "spis_layered_stack",
+    "geometry_model": "shielded_layer_stack_1d",
+    "primary_source_model": "preset_monoenergetic_flux",
+    "physics_process_list": "geant4_shielding_like",
+    "energy_deposition_model": "geant4_step_recorder_like",
+    "charge_response_model": "radiation_induced_conductivity_relaxation",
+    "coupling_mode": "radiation_internal_picard",
+    "deposition_scheme": "geant4_step",
+    "collision_set": "none",
+    "physics_process_set": "geant4_shielding",
+    "convergence_policy": "residual_norm_guarded",
+    "solver_max_iterations": 48,
+    "solver_residual_tolerance": 1.0e-7,
+    "solver_relaxation": 0.9,
+    "seed": 20260408,
+    "sampling_policy": "deterministic",
+    "radiation_conductivity_charge_gain_s_per_m_per_c_per_m3": 2.0e-10,
+    "radiation_conductivity_dose_gain_s_per_m_per_gy": 4.0e-13,
+    "radiation_conductivity_dose_rate_gain_s2_per_m_per_gy": 2.0e-16,
+    "min_effective_conductivity_s_per_m": 1.0e-16,
+    "max_effective_conductivity_s_per_m": 1.0e-9
+  }
+}

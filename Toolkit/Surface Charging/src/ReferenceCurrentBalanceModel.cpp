@@ -1,10 +1,11 @@
 #include "ReferenceCurrentBalanceModel.h"
 #include "SurfaceFlowCouplingModel.h"
+#include "../../Tools/FieldSolver/include/SurfaceBarrierModels.h"
+#include "../../Tools/Material/include/SurfaceMaterialModel.h"
+#include "../../Tools/Particle/include/SurfaceDistributionFunction.h"
 
 #include <algorithm>
 #include <cmath>
-#include <functional>
-
 namespace SCDAT
 {
 namespace Toolkit
@@ -23,6 +24,31 @@ double clampPositive(double value, double minimum)
     return std::max(value, minimum);
 }
 
+double bodyElectronCollectionScale(const Material::MaterialProperty& material)
+{
+    return clampPositive(material.getScalarProperty("body_electron_collection_scale", 1.0), 0.0);
+}
+
+double resolveBodyElectronCollectionCoefficient(double base_coefficient,
+                                                const Material::MaterialProperty& material)
+{
+    return clampPositive(
+        material.getScalarProperty("body_electron_collection_coefficient", base_coefficient), 0.0) *
+           bodyElectronCollectionScale(material);
+}
+
+double bodyPhotoEmissionScale(const Material::MaterialProperty& material)
+{
+    return clampPositive(material.getScalarProperty("body_photo_emission_scale", 1.0), 0.0);
+}
+
+double bodyPhotoelectronTemperatureEv(const Material::MaterialProperty& material,
+                                      double fallback_ev)
+{
+    return clampPositive(
+        material.getScalarProperty("body_photoelectron_temperature_ev", fallback_ev), 1.0e-3);
+}
+
 double safeExp(double exponent)
 {
     return std::exp(std::clamp(exponent, -200.0, 60.0));
@@ -35,123 +61,11 @@ double thermalCurrentDensity(double density_m3, double temperature_ev, double ma
            std::sqrt(temperature_j / (2.0 * kPi * std::max(1.0e-32, mass_kg)));
 }
 
-double integrateGammaLike(double temperature_ev, const std::function<double(double)>& fn)
-{
-    constexpr int kSteps = 128;
-    constexpr double kUpper = 32.0;
-    const double thermal_ev = clampPositive(temperature_ev, 1.0e-6);
-    const double dy = kUpper / static_cast<double>(kSteps);
-    double integral = 0.0;
-    for (int i = 0; i < kSteps; ++i)
-    {
-        const double y = (static_cast<double>(i) + 0.5) * dy;
-        integral += fn(thermal_ev * y) * y * std::exp(-y);
-    }
-    return integral * dy;
-}
-
-bool useDiscreteSpectrum(const Particle::ResolvedSpectrum& spectrum)
-{
-    switch (spectrum.model)
-    {
-    case Particle::SpatialSamplingModel::KAPPA:
-    case Particle::SpatialSamplingModel::POWER_LAW:
-    case Particle::SpatialSamplingModel::TABULATED:
-        return !spectrum.energy_grid_ev.empty() &&
-               spectrum.energy_grid_ev.size() == spectrum.differential_number_flux.size();
-    default:
-        return spectrum.populations.empty() && !spectrum.energy_grid_ev.empty() &&
-               spectrum.energy_grid_ev.size() == spectrum.differential_number_flux.size();
-    }
-}
-
-double integrateDiscreteFlux(const Particle::ResolvedSpectrum& spectrum,
-                             const std::function<double(double, double)>& fn)
-{
-    if (spectrum.energy_grid_ev.size() < 2 ||
-        spectrum.energy_grid_ev.size() != spectrum.differential_number_flux.size())
-    {
-        return 0.0;
-    }
-
-    double integral = 0.0;
-    for (size_t i = 1; i < spectrum.energy_grid_ev.size(); ++i)
-    {
-        const double e0 = std::max(0.0, spectrum.energy_grid_ev[i - 1]);
-        const double e1 = std::max(e0, spectrum.energy_grid_ev[i]);
-        const double f0 = std::max(0.0, spectrum.differential_number_flux[i - 1]);
-        const double f1 = std::max(0.0, spectrum.differential_number_flux[i]);
-        const double width = e1 - e0;
-        if (width <= 0.0)
-        {
-            continue;
-        }
-        integral += 0.5 * (fn(e0, f0) + fn(e1, f1)) * width;
-    }
-    return integral;
-}
-
-double averageDiscreteEnergy(const Particle::ResolvedSpectrum& spectrum)
-{
-    const double denom = integrateDiscreteFlux(
-        spectrum, [](double, double flux) { return flux; });
-    if (!(denom > 0.0))
-    {
-        return 1.0;
-    }
-    const double numer = integrateDiscreteFlux(
-        spectrum, [](double energy_ev, double flux) { return energy_ev * flux; });
-    return numer / denom;
-}
-
-double spectrumTemperatureScaleEv(const Particle::ResolvedSpectrum& spectrum, double fallback_ev)
-{
-    double weighted_temperature = 0.0;
-    double total_density = 0.0;
-    for (const auto& population : spectrum.populations)
-    {
-        weighted_temperature += population.density_m3 * population.temperature_ev;
-        total_density += population.density_m3;
-    }
-    if (total_density > 0.0)
-    {
-        return weighted_temperature / total_density;
-    }
-    if (!spectrum.energy_grid_ev.empty())
-    {
-        return averageDiscreteEnergy(spectrum);
-    }
-    return clampPositive(fallback_ev, 1.0);
-}
-
-double spectrumDensity(const Particle::ResolvedSpectrum& spectrum, double fallback_density)
-{
-    double density = 0.0;
-    for (const auto& population : spectrum.populations)
-    {
-        density += std::max(0.0, population.density_m3);
-    }
-    return density > 0.0 ? density : std::max(0.0, fallback_density);
-}
-
-double spectrumIonMassAmu(const Particle::ResolvedSpectrum& spectrum, double fallback_mass_amu)
-{
-    double numerator = 0.0;
-    double denominator = 0.0;
-    for (const auto& population : spectrum.populations)
-    {
-        numerator += std::max(0.0, population.density_m3) *
-                     clampPositive(population.mass_amu, 1.0);
-        denominator += std::max(0.0, population.density_m3);
-    }
-    return denominator > 0.0 ? numerator / denominator : clampPositive(fallback_mass_amu, 1.0);
-}
-
 template <typename PopulationFn, typename FluxFn>
 double evaluateSpectrum(const Particle::ResolvedSpectrum& spectrum, PopulationFn population_fn,
                         FluxFn flux_fn)
 {
-    if (useDiscreteSpectrum(spectrum))
+    if (Particle::usesResolvedSpectrumDiscreteFlux(spectrum))
     {
         return flux_fn(spectrum);
     }
@@ -183,132 +97,27 @@ double ReferenceCurrentBalanceModel::erfApprox(double x)
     return std::erf(x);
 }
 
-double ReferenceCurrentBalanceModel::whippleYield(double peak_energy_ev, double peak_yield,
-                                                  double incident_energy_ev,
-                                                  double surface_potential_v)
+double ReferenceCurrentBalanceModel::ionSecondaryYield(
+    const Material::MaterialProperty& material, double incident_energy_ev,
+    double surface_potential_v)
 {
-    const double shifted_energy = incident_energy_ev + surface_potential_v;
-    if (shifted_energy <= 1.0e-6)
-    {
-        return 0.0;
-    }
-    const double q = 2.28 * std::pow(shifted_energy / clampPositive(peak_energy_ev, 1.0), 1.35);
-    if (q <= 1.0e-12)
-    {
-        return 0.0;
-    }
-    return 1.114 * (1.0 - std::exp(-q)) * peak_yield *
-           std::pow(clampPositive(peak_energy_ev, 1.0) / shifted_energy, 0.35);
+    return Material::evaluateLegacyIonSecondaryElectronYield(
+        material, std::max(0.0, incident_energy_ev - surface_potential_v));
 }
 
-double ReferenceCurrentBalanceModel::simsYield(double peak_energy_ev, double peak_yield,
-                                               double exponent_n, double incident_energy_ev,
-                                               double surface_potential_v)
+double ReferenceCurrentBalanceModel::backscatterYield(
+    const Material::MaterialProperty& material, double incident_energy_ev,
+    double surface_potential_v)
 {
-    const double shifted_energy = incident_energy_ev + surface_potential_v;
-    if (shifted_energy <= 1.0e-6)
-    {
-        return 0.0;
-    }
-    const double n = clampPositive(exponent_n, 1.05);
-    double xm = 1.0;
-    for (int iteration = 0; iteration < 32; ++iteration)
-    {
-        const double residual = xm - (1.0 - 1.0 / n) * (std::exp(xm) - 1.0);
-        const double derivative = 1.0 - (1.0 - 1.0 / n) * std::exp(xm);
-        if (std::abs(derivative) < 1.0e-10)
-        {
-            break;
-        }
-        xm = std::clamp(xm - residual / derivative, 0.1, 5.0);
-        if (std::abs(residual) < 1.0e-6)
-        {
-            break;
-        }
-    }
-    const double x = xm * std::pow(shifted_energy / clampPositive(peak_energy_ev, 1.0), n);
-    if (x <= 1.0e-12 || std::abs(1.0 - std::exp(-xm)) < 1.0e-12)
-    {
-        return 0.0;
-    }
-    return peak_yield / (1.0 - std::exp(-xm)) *
-           std::pow(clampPositive(peak_energy_ev, 1.0) / shifted_energy, n - 1.0) * 2.0 *
-           (x + std::exp(-x) - 1.0) / x;
+    return Material::evaluateLegacyBackscatterYield(
+        material, std::max(0.0, incident_energy_ev + surface_potential_v));
 }
 
-double ReferenceCurrentBalanceModel::katzYield(const Material::MaterialProperty& material,
-                                               double incident_energy_ev,
-                                               double surface_potential_v)
+double ReferenceCurrentBalanceModel::bodyPhotoCurrentDensity(double base_photo_current_density_a_per_m2,
+                                                             double emission_scale)
 {
-    const double shifted_energy = incident_energy_ev + surface_potential_v;
-    if (shifted_energy <= 1.0e-6)
-    {
-        return 0.0;
-    }
-    const double peak_energy_ev =
-        clampPositive(material.getScalarProperty("secondary_yield_peak_energy_ev", 400.0), 1.0);
-    const double peak_yield = clampPositive(material.getSecondaryElectronYield(), 0.0);
-    const double r1 = material.getScalarProperty("katz_r1", 0.85);
-    const double n1 = material.getScalarProperty("katz_n1", 0.35);
-    const double r2 = material.getScalarProperty("katz_r2", 0.12);
-    const double n2 = material.getScalarProperty("katz_n2", 1.05);
-    const double energy_kev = shifted_energy * 1.0e-3;
-    const double peak_energy_kev = peak_energy_ev * 1.0e-3;
-    const double range = r1 * std::pow(energy_kev, n1) + r2 * std::pow(energy_kev, n2);
-    const double peak_range =
-        r1 * std::pow(peak_energy_kev, n1) + r2 * std::pow(peak_energy_kev, n2);
-    if (range <= 1.0e-12 || peak_range <= 1.0e-12)
-    {
-        return 0.0;
-    }
-    const double attenuation = std::exp(-std::pow(range / peak_range - 1.0, 2.0));
-    const double high_energy_rolloff =
-        1.0 / (1.0 + std::pow(shifted_energy / clampPositive(3.0 * peak_energy_ev, 1.0), 0.7));
-    return peak_yield * attenuation * (0.55 + 0.45 * high_energy_rolloff);
-}
-
-double ReferenceCurrentBalanceModel::ionSecondaryYield(double peak_energy_kev, double peak_yield,
-                                                       double incident_energy_ev,
-                                                       double surface_potential_v)
-{
-    const double incident_energy_kev =
-        std::max(0.0, (incident_energy_ev - surface_potential_v) * 1.0e-3);
-    if (incident_energy_kev <= 0.0)
-    {
-        return 0.0;
-    }
-    return peak_yield * std::sqrt(incident_energy_kev) *
-           (1.0 + 1.0 / clampPositive(peak_energy_kev, 1.0e-6)) /
-           (1.0 + incident_energy_kev / clampPositive(peak_energy_kev, 1.0e-6));
-}
-
-double ReferenceCurrentBalanceModel::backscatterYield(double incident_energy_ev,
-                                                      double surface_potential_v,
-                                                      double atomic_number)
-{
-    const double shifted_energy = incident_energy_ev + surface_potential_v;
-    double ybe = 0.0;
-    if (shifted_energy >= 50.0 && shifted_energy < 1.0e3)
-    {
-        ybe = 0.3338 * std::log(shifted_energy / 50.0) *
-              (1.0 - std::pow(0.7358, 0.037 * atomic_number) +
-               0.1 * std::exp(-shifted_energy / 50.0));
-    }
-    else if (shifted_energy >= 1.0e3 && shifted_energy < 1.0e4)
-    {
-        ybe = 1.0 - std::pow(0.7358, 0.037 * atomic_number) +
-              0.1 * std::exp(-shifted_energy / 5000.0);
-    }
-    else if (shifted_energy >= 1.0e4 && shifted_energy < 1.0e5)
-    {
-        ybe = 1.0 - std::pow(0.7358, 0.037 * atomic_number);
-    }
-    return std::max(0.0, ybe);
-}
-
-double ReferenceCurrentBalanceModel::bodyPhotoCurrentDensity(double base_photo_current_density_a_per_m2)
-{
-    return 0.25 * std::max(0.0, base_photo_current_density_a_per_m2);
+    return 0.25 * clampPositive(emission_scale, 0.0) *
+           std::max(0.0, base_photo_current_density_a_per_m2);
 }
 
 double ReferenceCurrentBalanceModel::patchPhotoCurrentDensity(
@@ -330,12 +139,58 @@ double ReferenceCurrentBalanceModel::conductionCurrentDensity(double body_potent
 double ReferenceCurrentBalanceModel::emissionEscapeProbability(double surface_potential_v,
                                                                double characteristic_energy_ev) const
 {
+    FieldSolver::SurfaceBarrierState state;
+    state.local_potential_v = surface_potential_v;
+    state.reference_potential_v = 0.0;
+    state.barrier_potential_v = 0.0;
+    state.normal_electric_field_v_per_m = 0.0;
+    state.emission_temperature_ev = clampPositive(characteristic_energy_ev, 1.0e-3);
+
+    FieldSolver::VariableBarrierScaler scaler;
+    const auto evaluation = scaler.evaluate(config_.patch_material, state, 1.0);
+    return evaluation.valid ? std::clamp(evaluation.scaling, 0.0, 1.0) : 0.0;
+}
+
+double ReferenceCurrentBalanceModel::positivePotentialIonBarrierScale(
+    const Material::MaterialProperty& material, double surface_potential_v,
+    double characteristic_energy_ev) const
+{
     if (surface_potential_v <= 0.0)
     {
         return 1.0;
     }
-    return std::clamp(
-        safeExp(-surface_potential_v / clampPositive(characteristic_energy_ev, 1.0e-3)), 0.0, 1.0);
+
+    FieldSolver::SurfaceBarrierState state;
+    state.local_potential_v = surface_potential_v;
+    state.reference_potential_v = 0.0;
+    state.barrier_potential_v = 0.0;
+    state.normal_electric_field_v_per_m = 0.0;
+    state.emission_temperature_ev = clampPositive(characteristic_energy_ev, 1.0e-3);
+
+    FieldSolver::VariableBarrierScaler scaler;
+    const auto evaluation = scaler.evaluate(material, state, 1.0);
+    return evaluation.valid ? std::clamp(evaluation.scaling, 0.0, 1.0) : 0.0;
+}
+
+double ReferenceCurrentBalanceModel::ionSecondaryRecollectionScale(
+    const Material::MaterialProperty& material, double surface_potential_v,
+    double characteristic_energy_ev) const
+{
+    if (surface_potential_v <= 0.0)
+    {
+        return 1.0;
+    }
+
+    FieldSolver::SurfaceBarrierState state;
+    state.local_potential_v = surface_potential_v;
+    state.reference_potential_v = 0.0;
+    state.barrier_potential_v = 0.0;
+    state.normal_electric_field_v_per_m = 0.0;
+    state.emission_temperature_ev = clampPositive(characteristic_energy_ev, 1.0e-3);
+
+    FieldSolver::SecondaryRecollectionScaler scaler;
+    const auto evaluation = scaler.evaluate(material, state, 1.0);
+    return evaluation.valid ? std::clamp(evaluation.scaling, 0.0, 1.0) : 0.0;
 }
 
 double ReferenceCurrentBalanceModel::rolePotential(ReferenceSurfaceRole role, double body_potential_v,
@@ -348,21 +203,23 @@ double ReferenceCurrentBalanceModel::computeSeeYield(const Material::MaterialPro
                                                      double incident_energy_ev,
                                                      double surface_potential_v) const
 {
-    const double peak_energy =
-        clampPositive(material.getScalarProperty("secondary_yield_peak_energy_ev", 300.0), 1.0);
-    const double peak_yield = clampPositive(material.getSecondaryElectronYield(), 0.0);
+    Material::LegacySecondaryYieldModel model =
+        Material::LegacySecondaryYieldModel::Whipple;
     switch (config_.see_model)
     {
     case SecondaryElectronEmissionModel::Whipple:
-        return whippleYield(peak_energy, peak_yield, incident_energy_ev, surface_potential_v);
+        model = Material::LegacySecondaryYieldModel::Whipple;
+        break;
     case SecondaryElectronEmissionModel::Sims:
-        return simsYield(peak_energy, peak_yield,
-                         material.getScalarProperty("sims_exponent_n", 1.6), incident_energy_ev,
-                         surface_potential_v);
+        model = Material::LegacySecondaryYieldModel::Sims;
+        break;
     case SecondaryElectronEmissionModel::Katz:
-        return katzYield(material, incident_energy_ev, surface_potential_v);
+        model = Material::LegacySecondaryYieldModel::Katz;
+        break;
     }
-    return 0.0;
+    return Material::evaluateLegacySecondaryElectronYield(
+        material, model, std::max(0.0, incident_energy_ev + surface_potential_v),
+        material.getScalarProperty("sims_exponent_n", 1.6));
 }
 
 double ReferenceCurrentBalanceModel::ramBodyCurrentDensity(double surface_potential_v,
@@ -425,7 +282,8 @@ double ReferenceCurrentBalanceModel::ramPatchCurrentDensity(double surface_poten
     return std::max(0.0, current_na_per_m2) * 1.0e-9;
 }
 
-double ReferenceCurrentBalanceModel::computeElectronCollection(double surface_potential_v) const
+double ReferenceCurrentBalanceModel::computeElectronCollection(double surface_potential_v,
+                                                              double collection_coefficient) const
 {
     const auto& collection_model =
         selectSurfaceElectronCollectionModel(config_.electron_collection_model);
@@ -435,16 +293,17 @@ double ReferenceCurrentBalanceModel::computeElectronCollection(double surface_po
             clampPositive(population.mass_amu, 1.0e-6) * kAtomicMassUnit);
         const double factor =
             collection_model.populationFactor(surface_potential_v, population.temperature_ev);
-        return -base_flux * clampPositive(config_.electron_collection_coefficient, 0.0) *
+        return -base_flux * clampPositive(collection_coefficient, 0.0) *
                clampPositive(config_.electron_calibration_factor, 0.1) * factor;
     };
     const auto flux_current = [&](const Particle::ResolvedSpectrum& spectrum) {
-        const double mean_energy_ev = averageDiscreteEnergy(spectrum);
-        const double current = integrateDiscreteFlux(spectrum, [&](double energy_ev, double flux) {
+        const double mean_energy_ev = Particle::resolvedSpectrumAverageEnergyEv(spectrum, 1.0);
+        const double current = Particle::integrateResolvedSpectrumFlux(
+            spectrum, [&](double energy_ev, double flux) {
             return flux * collection_model.fluxCollectionWeight(surface_potential_v, energy_ev,
                                                                 mean_energy_ev);
         });
-        return -kElementaryCharge * clampPositive(config_.electron_collection_coefficient, 0.0) *
+        return -kElementaryCharge * clampPositive(collection_coefficient, 0.0) *
                clampPositive(config_.electron_calibration_factor, 0.1) * current;
     };
     if (config_.has_electron_spectrum)
@@ -455,27 +314,29 @@ double ReferenceCurrentBalanceModel::computeElectronCollection(double surface_po
         config_.plasma.electron_density_m3, config_.plasma.electron_temperature_ev, kElectronMass);
     const double factor = collection_model.populationFactor(
         surface_potential_v, config_.plasma.electron_temperature_ev);
-    return -base_flux * clampPositive(config_.electron_collection_coefficient, 0.0) *
+    return -base_flux * clampPositive(collection_coefficient, 0.0) *
            clampPositive(config_.electron_calibration_factor, 0.1) * factor;
 }
 
-double ReferenceCurrentBalanceModel::computeIonCollection(double surface_potential_v) const
+double ReferenceCurrentBalanceModel::computeIonCollection(double surface_potential_v,
+                                                          const Material::MaterialProperty& material) const
 {
     const auto population_current = [&](const Particle::SpectrumPopulation& population) {
         const double base_flux = thermalCurrentDensity(
             population.density_m3, population.temperature_ev,
             clampPositive(population.mass_amu, 1.0e-6) * kAtomicMassUnit);
         const double factor = surface_potential_v >= 0.0
-                                  ? safeExp(-surface_potential_v /
-                                            clampPositive(population.temperature_ev, 1.0e-3))
+                                  ? positivePotentialIonBarrierScale(
+                                        material, surface_potential_v, population.temperature_ev)
                                   : (1.0 - surface_potential_v /
                                                clampPositive(population.temperature_ev, 1.0e-3));
         return base_flux * clampPositive(config_.ion_collection_coefficient, 0.0) *
                clampPositive(config_.ion_calibration_factor, 0.1) * factor;
     };
     const auto flux_current = [&](const Particle::ResolvedSpectrum& spectrum) {
-        const double mean_energy_ev = averageDiscreteEnergy(spectrum);
-        const double current = integrateDiscreteFlux(spectrum, [&](double energy_ev, double flux) {
+        const double mean_energy_ev = Particle::resolvedSpectrumAverageEnergyEv(spectrum, 1.0);
+        const double current = Particle::integrateResolvedSpectrumFlux(
+            spectrum, [&](double energy_ev, double flux) {
             if (surface_potential_v > 0.0 && energy_ev - surface_potential_v <= 0.0)
             {
                 return 0.0;
@@ -497,8 +358,8 @@ double ReferenceCurrentBalanceModel::computeIonCollection(double surface_potenti
     const double base_flux = thermalCurrentDensity(
         config_.plasma.ion_density_m3, config_.plasma.ion_temperature_ev, ion_mass);
     const double factor = surface_potential_v >= 0.0
-                              ? safeExp(-surface_potential_v /
-                                        clampPositive(config_.plasma.ion_temperature_ev, 1.0e-3))
+                              ? positivePotentialIonBarrierScale(
+                                    material, surface_potential_v, config_.plasma.ion_temperature_ev)
                               : (1.0 - surface_potential_v /
                                            clampPositive(config_.plasma.ion_temperature_ev, 1.0e-3));
     return base_flux * clampPositive(config_.ion_collection_coefficient, 0.0) *
@@ -520,54 +381,64 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
     const double potential = rolePotential(role, body_potential_v, patch_potential_v);
     const auto& collection_model =
         selectSurfaceElectronCollectionModel(config_.electron_collection_model);
-    components.electron_collection_a_per_m2 = computeElectronCollection(potential);
-    components.ion_collection_a_per_m2 = computeIonCollection(potential);
+    const double electron_collection_coefficient =
+        role == ReferenceSurfaceRole::Body
+            ? resolveBodyElectronCollectionCoefficient(
+                  clampPositive(config_.electron_collection_coefficient, 0.0), material)
+            : clampPositive(config_.electron_collection_coefficient, 0.0);
+    const double photo_emission_scale =
+        role == ReferenceSurfaceRole::Body ? bodyPhotoEmissionScale(material) : 1.0;
+    const double photoelectron_temperature_ev =
+        role == ReferenceSurfaceRole::Body
+            ? bodyPhotoelectronTemperatureEv(material, config_.photoelectron_temperature_ev)
+            : clampPositive(config_.photoelectron_temperature_ev, 1.0e-3);
+    components.electron_collection_a_per_m2 =
+        computeElectronCollection(potential, electron_collection_coefficient);
+    components.ion_collection_a_per_m2 = computeIonCollection(potential, material);
 
     const double secondary_escape = emissionEscapeProbability(
         potential, material.getScalarProperty("secondary_emission_escape_energy_ev", 2.0));
     const double photo_escape = config_.use_photoelectron_suppression
                                     ? emissionEscapeProbability(potential,
-                                                                config_.photoelectron_temperature_ev)
+                                                                photoelectron_temperature_ev)
                                     : 1.0;
 
     const auto electron_secondary_from_pop = [&](const Particle::SpectrumPopulation& population) {
-        const double average_yield = integrateGammaLike(population.temperature_ev, [&](double energy_ev) {
-            return computeSeeYield(material, energy_ev + std::max(0.0, potential), 0.0);
-        });
+        const double average_yield = Particle::integratePopulationMaxwellianAverageEv(
+            population.temperature_ev, [&](double energy_ev) {
+                return computeSeeYield(material, energy_ev + std::max(0.0, potential), 0.0);
+            });
         const double current = thermalCurrentDensity(
             population.density_m3, population.temperature_ev,
             clampPositive(population.mass_amu, 1.0e-6) * kAtomicMassUnit);
         const double factor = collection_model.populationFactor(potential, population.temperature_ev);
-        return current * clampPositive(config_.electron_collection_coefficient, 0.0) *
+        return current * electron_collection_coefficient *
                clampPositive(config_.electron_calibration_factor, 0.1) * factor * average_yield *
                secondary_escape;
     };
     const auto electron_secondary_from_flux = [&](const Particle::ResolvedSpectrum& spectrum) {
-        const double mean_energy_ev = averageDiscreteEnergy(spectrum);
-        const double flux = integrateDiscreteFlux(spectrum, [&](double energy_ev, double value) {
+        const double mean_energy_ev = Particle::resolvedSpectrumAverageEnergyEv(spectrum, 1.0);
+        const double flux = Particle::integrateResolvedSpectrumFlux(
+            spectrum, [&](double energy_ev, double value) {
             const double weight =
                 collection_model.fluxEmissionWeight(potential, energy_ev, mean_energy_ev);
             return value * weight *
                    computeSeeYield(material, energy_ev + std::max(0.0, potential), 0.0);
         });
-        return flux * kElementaryCharge *
-               clampPositive(config_.electron_collection_coefficient, 0.0) *
+        return flux * kElementaryCharge * electron_collection_coefficient *
                clampPositive(config_.electron_calibration_factor, 0.1) * secondary_escape;
     };
     const auto ion_secondary_from_pop = [&](const Particle::SpectrumPopulation& population) {
-        const double average_yield = integrateGammaLike(population.temperature_ev, [&](double energy_ev) {
-            return ionSecondaryYield(
-                material.getScalarProperty("ion_secondary_peak_energy_kev", 0.35),
-                clampPositive(
-                    material.getScalarProperty("ion_secondary_yield", config_.ion_secondary_yield), 0.0),
-                energy_ev + std::max(0.0, -potential), 0.0);
-        });
+        const double average_yield = Particle::integratePopulationMaxwellianAverageEv(
+            population.temperature_ev, [&](double energy_ev) {
+                return ionSecondaryYield(material, energy_ev + std::max(0.0, -potential), 0.0);
+            });
         const double current = thermalCurrentDensity(
             population.density_m3, population.temperature_ev,
             clampPositive(population.mass_amu, 1.0e-6) * kAtomicMassUnit);
         const double factor = potential >= 0.0
-                                  ? safeExp(-potential /
-                                            clampPositive(population.temperature_ev, 1.0e-3))
+                                  ? ionSecondaryRecollectionScale(
+                                        material, potential, population.temperature_ev)
                                   : (1.0 - potential /
                                                clampPositive(population.temperature_ev, 1.0e-3));
         return current * clampPositive(config_.ion_collection_coefficient, 0.0) *
@@ -575,47 +446,41 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
                secondary_escape;
     };
     const auto ion_secondary_from_flux = [&](const Particle::ResolvedSpectrum& spectrum) {
-        const double flux = integrateDiscreteFlux(spectrum, [&](double energy_ev, double value) {
+        const double flux = Particle::integrateResolvedSpectrumFlux(
+            spectrum, [&](double energy_ev, double value) {
             if (potential > 0.0 && energy_ev - potential <= 0.0)
             {
                 return 0.0;
             }
-            return value * ionSecondaryYield(
-                               material.getScalarProperty("ion_secondary_peak_energy_kev", 0.35),
-                               clampPositive(material.getScalarProperty("ion_secondary_yield",
-                                                                       config_.ion_secondary_yield),
-                                             0.0),
-                               energy_ev + std::max(0.0, -potential), 0.0);
+            return value * ionSecondaryYield(material,
+                                             energy_ev + std::max(0.0, -potential), 0.0);
         });
         return flux * kElementaryCharge * clampPositive(config_.ion_collection_coefficient, 0.0) *
                clampPositive(config_.ion_calibration_factor, 0.1) * secondary_escape;
     };
     const auto backscatter_from_pop = [&](const Particle::SpectrumPopulation& population) {
-        const double average_yield = integrateGammaLike(population.temperature_ev, [&](double energy_ev) {
-            return backscatterYield(
-                energy_ev + std::max(0.0, potential), 0.0,
-                material.getScalarProperty("atomic_number", config_.backscatter_atomic_number));
-        });
+        const double average_yield = Particle::integratePopulationMaxwellianAverageEv(
+            population.temperature_ev, [&](double energy_ev) {
+                return backscatterYield(material, energy_ev + std::max(0.0, potential), 0.0);
+            });
         const double current = thermalCurrentDensity(
             population.density_m3, population.temperature_ev,
             clampPositive(population.mass_amu, 1.0e-6) * kAtomicMassUnit);
         const double factor = collection_model.populationFactor(potential, population.temperature_ev);
-        return current * clampPositive(config_.electron_collection_coefficient, 0.0) *
+        return current * electron_collection_coefficient *
                clampPositive(config_.electron_calibration_factor, 0.1) * factor * average_yield *
                secondary_escape;
     };
     const auto backscatter_from_flux = [&](const Particle::ResolvedSpectrum& spectrum) {
-        const double mean_energy_ev = averageDiscreteEnergy(spectrum);
-        const double flux = integrateDiscreteFlux(spectrum, [&](double energy_ev, double value) {
+        const double mean_energy_ev = Particle::resolvedSpectrumAverageEnergyEv(spectrum, 1.0);
+        const double flux = Particle::integrateResolvedSpectrumFlux(
+            spectrum, [&](double energy_ev, double value) {
             const double weight =
                 collection_model.fluxEmissionWeight(potential, energy_ev, mean_energy_ev);
             return value * weight * backscatterYield(
-                               energy_ev + std::max(0.0, potential), 0.0,
-                               material.getScalarProperty("atomic_number",
-                                                          config_.backscatter_atomic_number));
+                               material, energy_ev + std::max(0.0, potential), 0.0);
         });
-        return flux * kElementaryCharge *
-               clampPositive(config_.electron_collection_coefficient, 0.0) *
+        return flux * kElementaryCharge * electron_collection_coefficient *
                clampPositive(config_.electron_calibration_factor, 0.1) * secondary_escape;
     };
 
@@ -629,14 +494,13 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
     }
     else
     {
-        const double see_yield = integrateGammaLike(config_.plasma.electron_temperature_ev, [&](double energy_ev) {
-            return computeSeeYield(material, energy_ev + std::max(0.0, potential), 0.0);
-        });
-        const double backscatter_yield = integrateGammaLike(
+        const double see_yield = Particle::integratePopulationMaxwellianAverageEv(
             config_.plasma.electron_temperature_ev, [&](double energy_ev) {
-                return backscatterYield(
-                    energy_ev + std::max(0.0, potential), 0.0,
-                    material.getScalarProperty("atomic_number", config_.backscatter_atomic_number));
+                return computeSeeYield(material, energy_ev + std::max(0.0, potential), 0.0);
+            });
+        const double backscatter_yield = Particle::integratePopulationMaxwellianAverageEv(
+            config_.plasma.electron_temperature_ev, [&](double energy_ev) {
+                return backscatterYield(material, energy_ev + std::max(0.0, potential), 0.0);
             });
         components.secondary_electron_a_per_m2 =
             std::abs(components.electron_collection_a_per_m2) * see_yield * secondary_escape;
@@ -651,14 +515,10 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
     }
     else
     {
-        const double ion_secondary_yield = integrateGammaLike(
+        const double ion_secondary_yield = Particle::integratePopulationMaxwellianAverageEv(
             config_.plasma.ion_temperature_ev, [&](double energy_ev) {
-                return ionSecondaryYield(
-                    material.getScalarProperty("ion_secondary_peak_energy_kev", 0.35),
-                    clampPositive(material.getScalarProperty("ion_secondary_yield",
-                                                             config_.ion_secondary_yield),
-                                  0.0),
-                    energy_ev + std::max(0.0, -potential), 0.0);
+                return ionSecondaryYield(material, energy_ev + std::max(0.0, -potential),
+                                         0.0);
             });
         components.ion_secondary_electron_a_per_m2 =
             std::abs(components.ion_collection_a_per_m2) * ion_secondary_yield * secondary_escape;
@@ -666,7 +526,8 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
 
     const double base_photo_current =
         role == ReferenceSurfaceRole::Body
-            ? bodyPhotoCurrentDensity(config_.body_photo_current_density_a_per_m2)
+            ? bodyPhotoCurrentDensity(config_.body_photo_current_density_a_per_m2,
+                                      photo_emission_scale)
             : patchPhotoCurrentDensity(config_.patch_photo_current_density_a_per_m2,
                                        config_.patch_incidence_angle_deg);
     components.photoelectron_a_per_m2 = base_photo_current * photo_escape;
@@ -684,16 +545,21 @@ ReferenceCurrentBalanceModel::evaluate(ReferenceSurfaceRole role, double body_po
             config_.bulk_flow_velocity_m_per_s, config_.flow_alignment_cosine,
             config_.patch_flow_angle_deg);
         const double ion_density = config_.has_ion_spectrum
-                                       ? spectrumDensity(config_.ion_spectrum,
-                                                         config_.plasma.ion_density_m3)
+                                       ? Particle::resolvedSpectrumDensity(
+                                             config_.ion_spectrum,
+                                             config_.plasma.ion_density_m3)
                                        : config_.plasma.ion_density_m3;
         const double ion_temperature =
             config_.has_ion_spectrum
-                ? spectrumTemperatureScaleEv(config_.ion_spectrum, config_.plasma.ion_temperature_ev)
+                ? Particle::resolvedSpectrumCharacteristicEnergyEv(
+                      config_.ion_spectrum,
+                      clampPositive(config_.plasma.ion_temperature_ev, 1.0))
                 : config_.plasma.ion_temperature_ev;
         const double ion_mass_amu =
             config_.has_ion_spectrum
-                ? spectrumIonMassAmu(config_.ion_spectrum, config_.plasma.ion_mass_amu)
+                ? Particle::resolvedSpectrumAverageMassAmu(
+                      config_.ion_spectrum,
+                      clampPositive(config_.plasma.ion_mass_amu, 1.0))
                 : config_.plasma.ion_mass_amu;
         if (role == ReferenceSurfaceRole::Body)
         {
@@ -746,8 +612,11 @@ double ReferenceCurrentBalanceModel::computeCurrentDerivative(ReferenceSurfaceRo
 {
     const double role_potential = rolePotential(role, body_potential_v, patch_potential_v);
     const double temperature_scale = config_.has_electron_spectrum
-                                         ? spectrumTemperatureScaleEv(config_.electron_spectrum,
-                                                                      config_.plasma.electron_temperature_ev)
+                                         ? Particle::resolvedSpectrumCharacteristicEnergyEv(
+                                               config_.electron_spectrum,
+                                               clampPositive(config_.plasma
+                                                                 .electron_temperature_ev,
+                                                             1.0))
                                          : clampPositive(config_.plasma.electron_temperature_ev, 1.0);
     const double step = std::max(1.0e-3, 1.0e-2 * std::max(1.0, std::abs(role_potential)) +
                                            1.0e-2 * temperature_scale);
@@ -769,8 +638,11 @@ double ReferenceCurrentBalanceModel::solveEquilibriumPotential(ReferenceSurfaceR
                                                                double maximum_potential_v) const
 {
     const double temperature_scale = config_.has_electron_spectrum
-                                         ? spectrumTemperatureScaleEv(config_.electron_spectrum,
-                                                                      config_.plasma.electron_temperature_ev)
+                                         ? Particle::resolvedSpectrumCharacteristicEnergyEv(
+                                               config_.electron_spectrum,
+                                               clampPositive(config_.plasma
+                                                                 .electron_temperature_ev,
+                                                             1.0))
                                          : clampPositive(config_.plasma.electron_temperature_ev, 1.0);
     double lower = std::isfinite(minimum_potential_v)
                        ? minimum_potential_v

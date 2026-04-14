@@ -40,4 +40,15 @@ if(BUILD_TESTING)
             --summary-json ${CMAKE_BINARY_DIR}/plasma_multiscale_regression_gate.json
             --summary-md ${CMAKE_BINARY_DIR}/plasma_multiscale_regression_gate.md
     )
+
+    add_test(
+        NAME PlasmaPhysicsDiagnosticsGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_plasma_physics_diagnostics_gate.py
+            --project-root ${CMAKE_SOURCE_DIR}
+            --scdat-exe $<TARGET_FILE:SCDAT>
+            --matrix ${CMAKE_SOURCE_DIR}/scripts/run/plasma_physics_diagnostics_matrix.json
+            --output-root ${CMAKE_BINARY_DIR}/plasma_physics_diagnostics_gate
+    )
 endif()
