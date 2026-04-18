@@ -1,0 +1,17 @@
+{
+  "schema_version": "v1",
+  "module": "surface",
+  "base_preset": "leo_daylight_kapton",
+  "name": "surface_config_minimal_example",
+  "output_csv": "results/surface_config_minimal_example.csv",
+  "run": {
+    "time_step_s": 2.0e-8,
+    "steps": 3,
+    "adaptive_time_stepping": false
+  },
+  "config": {
+    "runtime_route": "scdat_unified",
+    "surface_area_m2": 0.02,
+    "enable_body_patch_circuit": false
+  }
+}

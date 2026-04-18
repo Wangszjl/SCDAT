@@ -4,6 +4,9 @@
 #include "MaterialProperty.h"
 #include "SurfaceMaterialModel.h"
 
+#include <memory>
+#include <string>
+
 namespace SCDAT
 {
 namespace Material
@@ -110,6 +113,65 @@ struct SurfaceInteractionMaterialSelection
     std::string interaction_family = "spis_material_indexed_surface_interaction_v1";
 };
 
+struct SurfaceInteractorFamilyView
+{
+    std::size_t supported_family_count = 0;
+    std::size_t active_family_count = 0;
+    std::string supported_family_signature;
+    std::string active_family_signature;
+};
+
+enum class SurfaceInteractorModelVariant
+{
+    MaterialModel = 0,
+    MaterialDf = 1,
+    GenericDf = 2,
+    Maxwellian = 3,
+    MaxwellianWithRecollection = 4,
+    Multiple = 5,
+    MultipleMaxwellian = 6,
+    Yield = 7,
+    Reflection = 8,
+    Erosion = 9,
+    ImprovedPhotoEmission = 10,
+    BasicInducedConduction = 11,
+    TabulatedSey = 12,
+    RecollectedSey = 13,
+    DefaultPee = 14,
+    DefaultSeee = 15,
+    DefaultSeep = 16,
+    DefaultErosion = 17,
+    Device = 18,
+};
+
+struct SurfaceInteractorEvaluationContext
+{
+        const SurfaceMaterialModel* material_model = nullptr;
+        double absorption_probability = 0.9;
+        double reflection_coefficient = 0.05;
+        double emission_scaling = 1.0;
+};
+
+class SurfaceInteractorPlugin
+{
+    public:
+        virtual ~SurfaceInteractorPlugin() = default;
+
+        virtual const char* interactorFamily() const = 0;
+        virtual SurfaceInteractionResult evaluate(
+                const MaterialProperty& material, const SurfaceImpactState& impact,
+                const SurfaceInteractorEvaluationContext& context) const = 0;
+};
+
+class MaterialModelSurfaceInteractor final : public SurfaceInteractorPlugin
+{
+    public:
+        const char* interactorFamily() const override;
+        SurfaceInteractionResult evaluate(
+                const MaterialProperty& material, const SurfaceImpactState& impact,
+                const SurfaceInteractorEvaluationContext& context) const override;
+};
+
 class SurfaceInteraction
 {
   public:
@@ -119,7 +181,13 @@ class SurfaceInteraction
     void setReflectionCoefficient(double value) { reflection_coefficient_ = value; }
     void setEmissionScaling(double value) { emission_scaling_ = value; }
     void setMaterialModel(const SurfaceMaterialModel* model) { material_model_ = model; }
+    void setInteractorPlugin(std::shared_ptr<const SurfaceInteractorPlugin> plugin);
+    void resetInteractorPlugin();
+
     const char* materialModelFamily() const;
+    const char* interactorFamily() const;
+    const char* interactorFamily(const MaterialProperty& material) const;
+    SurfaceInteractorFamilyView interactorFamilyView(const MaterialProperty& material) const;
 
     SurfaceInteractionResult evaluate(const MaterialProperty& material,
                                       const SurfaceImpactState& impact) const;
@@ -127,8 +195,9 @@ class SurfaceInteraction
         const SurfaceInteractionEnvironment& environment) const;
     static SurfaceInteractionMaterialSelection selectMaterialInteraction(
         const MaterialProperty& material);
-SurfaceInteractionBundleResult evaluateBundle(const MaterialProperty& material,
-                                                  const SurfaceInteractionBundleRequest& request) const;
+    SurfaceInteractionBundleResult evaluateBundle(
+        const MaterialProperty& material,
+        const SurfaceInteractionBundleRequest& request) const;
     SurfaceInteractionBundleResult evaluateBundle(const MaterialProperty& material,
                                                   const SurfaceInteractionEnvironment& environment) const;
     SurfaceInteractionBundleResult evaluateMaterialIndexedBundle(
@@ -142,7 +211,13 @@ SurfaceInteractionBundleResult evaluateBundle(const MaterialProperty& material,
     double emission_scaling_ = 1.0;
     BasicSurfaceMaterialModel default_material_model_{};
     const SurfaceMaterialModel* material_model_ = nullptr;
+    std::shared_ptr<const SurfaceInteractorPlugin> default_interactor_plugin_;
+    std::shared_ptr<const SurfaceInteractorPlugin> interactor_plugin_;
 };
+
+SurfaceInteractorModelVariant resolveSurfaceInteractorModelVariant(
+    const MaterialProperty& material);
+const char* resolveSurfaceInteractorModelFamily(const MaterialProperty& material);
 
 } // namespace Material
 } // namespace SCDAT

@@ -1,5 +1,8 @@
 #include "DensePlasmaSurfaceCharging.h"
 #include "LegacyBenchmarkSupport.h"
+#include "SurfaceBridgeArtifactWriters.h"
+#include "SurfaceInstrumentObservability.h"
+#include "SurfaceObserverArtifactExport.h"
 #include "SurfaceRuntimePlan.h"
 #include "SurfaceTransitionEngine.h"
 #include "SurfaceFlowCouplingModel.h"
@@ -8,6 +11,7 @@
 #include "../../Tools/Basic/include/StringTokenUtils.h"
 #include "../../Tools/Coupling/include/SurfaceCurrentLinearizationKernel.h"
 #include "../../Tools/FieldSolver/include/SurfaceBarrierModels.h"
+#include "../../Tools/FieldSolver/include/SurfaceFieldVolumeBridge.h"
 #include "../../Tools/Material/include/SurfaceMaterialImporter.h"
 #include "../../Tools/Particle/include/SurfaceDistributionFunction.h"
 #include "../../Tools/Solver/include/SurfaceSolverFacade.h"
@@ -43,6 +47,898 @@ constexpr double kRichardsonConstant = 1.20173e6;
 constexpr double kEpsilon0 = 8.8541878128e-12;
 constexpr double kPi = 3.14159265358979323846;
 constexpr std::size_t kLegacyExecutorMaxSamples = 4096;
+
+struct FamilySignatureView
+{
+    std::size_t supported_family_count = 0;
+    std::size_t active_family_count = 0;
+    std::string supported_family_signature;
+    std::string active_family_signature;
+};
+
+template <typename Range>
+std::string joinFamilyRange(const Range& families)
+{
+    std::ostringstream stream;
+    bool first = true;
+    for (const auto& family : families)
+    {
+        const std::string family_name = family;
+        if (family_name.empty())
+        {
+            continue;
+        }
+        if (!first)
+        {
+            stream << "+";
+        }
+        stream << family_name;
+        first = false;
+    }
+    return stream.str();
+}
+
+void appendUniqueFamily(std::vector<std::string>& families, const std::string& family)
+{
+    if (family.empty())
+    {
+        return;
+    }
+    if (std::find(families.begin(), families.end(), family) == families.end())
+    {
+        families.push_back(family);
+    }
+}
+
+template <typename Range>
+FamilySignatureView makeFamilySignatureView(const Range& supported_families,
+                                           const std::vector<std::string>& active_families)
+{
+    FamilySignatureView view;
+    view.supported_family_count = supported_families.size();
+    view.active_family_count = active_families.size();
+    view.supported_family_signature = joinFamilyRange(supported_families);
+    view.active_family_signature = joinFamilyRange(active_families);
+    return view;
+}
+
+FamilySignatureView makeSingleFamilySignatureView(const std::string& family_name, bool active)
+{
+    FamilySignatureView view;
+    if (family_name.empty())
+    {
+        return view;
+    }
+
+    view.supported_family_count = 1;
+    view.active_family_count = active ? 1U : 0U;
+    view.supported_family_signature = family_name;
+    view.active_family_signature = active ? family_name : std::string{};
+    return view;
+}
+
+template <typename MetadataMap>
+void appendFamilyMetadata(MetadataMap& metadata,
+                          const std::string& prefix,
+                          const FamilySignatureView& view)
+{
+    metadata[prefix + "_family_count"] = std::to_string(view.supported_family_count);
+    metadata[prefix + "_active_family_count"] = std::to_string(view.active_family_count);
+    metadata[prefix + "_family_signature"] = view.supported_family_signature;
+    metadata[prefix + "_active_family_signature"] = view.active_family_signature;
+}
+
+bool isFormalSurfacePicRoute(const SurfaceChargingConfig& config)
+{
+    return config.runtime_route == SurfaceRuntimeRoute::SurfacePic ||
+           config.runtime_route == SurfaceRuntimeRoute::SurfacePicHybrid;
+}
+
+bool usesPicRuntimeFeatures(const SurfaceChargingConfig& config)
+{
+    return isFormalSurfacePicRoute(config) || config.enable_live_pic_window ||
+           config.enable_live_pic_mcc || config.enable_pic_calibration ||
+           config.surface_pic_runtime_kind == SurfacePicRuntimeKind::GraphCoupledSharedSurface;
+}
+
+bool hasTransitionLifecycleConfiguration(const SurfaceChargingConfig& config)
+{
+    static const std::array<const char*, 11> kTransitionToggleKeys = {
+        "transition_local_time_enabled",
+        "transition_spinning_enabled",
+        "transition_sun_flux_enabled",
+        "transition_conductivity_evolution_enabled",
+        "transition_source_flux_updater_enabled",
+        "transition_simulation_param_updater_enabled",
+        "transition_sheath_or_presheath_poisson_bc_updater_enabled",
+        "transition_rccabs_sc_updater_enabled",
+        "transition_vcross_bfield_updater_enabled",
+        "transition_basic_eclipse_exit_enabled",
+        "transition_transient_artificial_sources_enabled",
+    };
+    for (const char* key : kTransitionToggleKeys)
+    {
+        if (config.material.getScalarProperty(key, 0.0) > 0.5)
+        {
+            return true;
+        }
+    }
+    return config.material.getScalarProperty("transition_langmuir_probe_transition_enabled", 0.0) >
+               0.5 ||
+           config.material.getScalarProperty("transition_observer_enabled", 0.0) > 0.5 ||
+           config.material.getScalarProperty("transition_finalization_enabled", 0.0) > 0.5;
+}
+
+FamilySignatureView buildSurfaceUtilFamilyView(const SurfaceChargingConfig& config)
+{
+    static const std::array<const char*, 15> kSurfaceUtilSupportedFamilies = {
+        "DistribFunc", "Exception", "Func",     "Instrument", "io",
+        "List",       "Matrix",    "Monitor",  "OcTree",     "OcTreeMesh",
+        "Part",       "Phys",      "Sampler",  "Table",      "Vect",
+    };
+
+    std::vector<std::string> active_families = {
+        "DistribFunc", "Exception", "Func",   "io",     "List",
+        "Matrix",      "Monitor",   "Part",   "Phys",   "Sampler",
+        "Table",       "Vect",
+    };
+    if (usesPicRuntimeFeatures(config))
+    {
+        appendUniqueFamily(active_families, "OcTree");
+        appendUniqueFamily(active_families, "OcTreeMesh");
+        appendUniqueFamily(active_families, "Instrument");
+    }
+    return makeFamilySignatureView(kSurfaceUtilSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildSurfaceUtilFuncFamilyView()
+{
+    return makeSingleFamilySignatureView("Func", true);
+}
+
+FamilySignatureView buildSurfaceUtilDistribFuncFamilyView()
+{
+    return makeSingleFamilySignatureView("DistribFunc", true);
+}
+
+FamilySignatureView buildSurfaceUtilExceptionFamilyView()
+{
+    return makeSingleFamilySignatureView("Exception", true);
+}
+
+FamilySignatureView buildSurfaceUtilInstrumentFamilyView(const SurfaceChargingConfig& config)
+{
+    const bool active = usesPicRuntimeFeatures(config) ||
+                        config.surface_instrument_set_kind ==
+                            SurfaceInstrumentSetKind::SurfacePicObserverSet;
+    return makeSingleFamilySignatureView("Instrument", active);
+}
+
+FamilySignatureView buildSurfaceUtilSamplerFamilyView()
+{
+    return makeSingleFamilySignatureView("Sampler", true);
+}
+
+FamilySignatureView buildSurfaceUtilMonitorFamilyView()
+{
+    return makeSingleFamilySignatureView("Monitor", true);
+}
+
+FamilySignatureView buildSurfaceUtilIoFamilyView()
+{
+    return makeSingleFamilySignatureView("io", true);
+}
+
+FamilySignatureView buildSurfaceUtilListFamilyView()
+{
+    return makeSingleFamilySignatureView("List", true);
+}
+
+FamilySignatureView buildSurfaceUtilOcTreeFamilyView(const SurfaceChargingConfig& config)
+{
+    return makeSingleFamilySignatureView("OcTree", usesPicRuntimeFeatures(config));
+}
+
+FamilySignatureView buildSurfaceUtilOcTreeMeshFamilyView(const SurfaceChargingConfig& config)
+{
+    return makeSingleFamilySignatureView("OcTreeMesh", usesPicRuntimeFeatures(config));
+}
+
+FamilySignatureView buildSurfaceUtilPartFamilyView()
+{
+    return makeSingleFamilySignatureView("Part", true);
+}
+
+FamilySignatureView buildSurfaceUtilPhysFamilyView()
+{
+    return makeSingleFamilySignatureView("Phys", true);
+}
+
+FamilySignatureView buildSurfaceUtilTableFamilyView()
+{
+    return makeSingleFamilySignatureView("Table", true);
+}
+
+FamilySignatureView buildSurfaceUtilMatrixFamilyView()
+{
+    return makeSingleFamilySignatureView("Matrix", true);
+}
+
+FamilySignatureView buildSurfaceUtilVectFamilyView()
+{
+    return makeSingleFamilySignatureView("Vect", true);
+}
+
+FamilySignatureView buildTopSimulationFamilyView(const SurfaceChargingConfig& config)
+{
+    static const std::array<const char*, 5> kTopSimulationSupportedFamilies = {
+        "Simulation",
+        "PlasmaScSimulation",
+        "SimulationFromUIParams",
+        "SimulationListener",
+        "BundleAPI_SimulationInit",
+    };
+
+    std::vector<std::string> active_families = {
+        "Simulation",
+        "SimulationFromUIParams",
+        "BundleAPI_SimulationInit",
+    };
+    if (config.runtime_route != SurfaceRuntimeRoute::LegacyBenchmark)
+    {
+        appendUniqueFamily(active_families, "PlasmaScSimulation");
+    }
+    if (config.surface_instrument_set_kind == SurfaceInstrumentSetKind::SurfacePicObserverSet ||
+        usesPicRuntimeFeatures(config))
+    {
+        appendUniqueFamily(active_families, "SimulationListener");
+    }
+    return makeFamilySignatureView(kTopSimulationSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildTopTopFamilyView(const std::string& entrypoint_mode,
+                                          bool adaptive_time_stepping,
+                                          double total_duration_s)
+{
+    static const std::array<const char*, 5> kTopTopSupportedFamilies = {
+        "Scenario",
+        "PotentialSweep",
+        "UIInvokable",
+        "SpisTopMenu",
+        "NumTopFromUI",
+    };
+
+    std::vector<std::string> active_families = {"Scenario"};
+    if (adaptive_time_stepping || total_duration_s > 0.0)
+    {
+        appendUniqueFamily(active_families, "PotentialSweep");
+    }
+    if (entrypoint_mode == "preset_catalog" || entrypoint_mode == "surface_config_json")
+    {
+        appendUniqueFamily(active_families, "UIInvokable");
+    }
+    if (entrypoint_mode == "preset_catalog")
+    {
+        appendUniqueFamily(active_families, "SpisTopMenu");
+    }
+    if (entrypoint_mode == "surface_config_json")
+    {
+        appendUniqueFamily(active_families, "NumTopFromUI");
+    }
+    return makeFamilySignatureView(kTopTopSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildTopPlasmaFamilyView(const SurfaceChargingConfig& config,
+                                             const SurfaceAdvanceTransition& transition)
+{
+    static const std::array<const char*, 7> kTopPlasmaSupportedFamilies = {
+        "Plasma",
+        "Environment",
+        "ExtendedEnvironment",
+        "TimeDependentEnvironment",
+        "BiMaxwellianEnvironment",
+        "MeshedPlasma",
+        "MmfPlasma",
+    };
+
+    std::vector<std::string> active_families = {
+        "Plasma",
+        "Environment",
+        "BiMaxwellianEnvironment",
+    };
+    if (config.has_electron_spectrum || config.has_ion_spectrum || !config.patches.empty() ||
+        !config.bodies.empty())
+    {
+        appendUniqueFamily(active_families, "ExtendedEnvironment");
+    }
+    if (transition.object_layer.active_family_count > 0 || config.benchmark_source != SurfaceBenchmarkSource::None)
+    {
+        appendUniqueFamily(active_families, "TimeDependentEnvironment");
+    }
+    if (usesPicRuntimeFeatures(config) || config.enable_external_volume_solver_bridge ||
+        config.enable_external_field_solver_bridge)
+    {
+        appendUniqueFamily(active_families, "MeshedPlasma");
+    }
+    if (std::abs(config.bulk_flow_velocity_m_per_s) > 0.0 ||
+        config.distribution_model == PlasmaAnalysis::PlasmaDistributionModelKind::WakeAnisotropic ||
+        config.distribution_model == PlasmaAnalysis::PlasmaDistributionModelKind::Fluid)
+    {
+        appendUniqueFamily(active_families, "MmfPlasma");
+    }
+    return makeFamilySignatureView(kTopPlasmaSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildTopScFamilyView(const SurfaceChargingConfig& config)
+{
+    static const std::array<const char*, 4> kTopScSupportedFamilies = {
+        "SC",
+        "InteractSC",
+        "RCCabsSC",
+        "RLCSC",
+    };
+
+    std::vector<std::string> active_families = {"SC", "RCCabsSC"};
+    if (config.enable_body_patch_circuit || !config.patches.empty() || !config.bodies.empty())
+    {
+        appendUniqueFamily(active_families, "InteractSC");
+    }
+    if (!config.surface_branches.empty() || !config.interfaces.empty())
+    {
+        appendUniqueFamily(active_families, "RLCSC");
+    }
+    return makeFamilySignatureView(kTopScSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildTopGridFamilyView(const SurfaceChargingConfig& config)
+{
+    static const std::array<const char*, 2> kTopGridSupportedFamilies = {
+        "Grid",
+        "InteractGrid",
+    };
+
+    std::vector<std::string> active_families = {"Grid"};
+    if (!config.boundary_mappings.empty() || !config.body_boundary_groups.empty() ||
+        !config.patch_boundary_groups.empty() || usesPicRuntimeFeatures(config))
+    {
+        appendUniqueFamily(active_families, "InteractGrid");
+    }
+    return makeFamilySignatureView(kTopGridSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildTopDefaultFamilyView(const SurfaceChargingConfig& config)
+{
+    static const std::array<const char*, 25> kTopDefaultSupportedFamilies = {
+        "ActiveZone",
+        "Common",
+        "Credits",
+        "Distribution",
+        "Duplicable",
+        "Field",
+        "GlobalParameter",
+        "InstrumentParameter",
+        "Interactor",
+        "Listener",
+        "LocalParameter",
+        "MaterialProperty",
+        "Mesh",
+        "NamedObject",
+        "ObjectWithBoundaries",
+        "ObjectWithTemperature",
+        "Parameter",
+        "PlasmaIO",
+        "ScalableObject",
+        "SimulationObject",
+        "Solver",
+        "SpisDefaultPartTypes",
+        "SpisDefaultSampling",
+        "ThermalElement",
+        "ThreadManager",
+    };
+
+    std::vector<std::string> active_families = {
+        "Common",
+        "Distribution",
+        "Field",
+        "GlobalParameter",
+        "Interactor",
+        "LocalParameter",
+        "MaterialProperty",
+        "Mesh",
+        "NamedObject",
+        "Parameter",
+        "ScalableObject",
+        "SimulationObject",
+        "Solver",
+    };
+    if (!config.boundary_mappings.empty() || !config.bodies.empty() || !config.patches.empty())
+    {
+        appendUniqueFamily(active_families, "ObjectWithBoundaries");
+        appendUniqueFamily(active_families, "ActiveZone");
+    }
+    if (config.material.getScalarProperty("surface_temperature_k", 0.0) > 0.0 ||
+        config.emission.surface_temperature_k > 0.0)
+    {
+        appendUniqueFamily(active_families, "ObjectWithTemperature");
+        appendUniqueFamily(active_families, "ThermalElement");
+    }
+    if (usesPicRuntimeFeatures(config))
+    {
+        appendUniqueFamily(active_families, "InstrumentParameter");
+        appendUniqueFamily(active_families, "PlasmaIO");
+        appendUniqueFamily(active_families, "SpisDefaultPartTypes");
+        appendUniqueFamily(active_families, "SpisDefaultSampling");
+        appendUniqueFamily(active_families, "ThreadManager");
+    }
+    if (hasTransitionLifecycleConfiguration(config))
+    {
+        appendUniqueFamily(active_families, "Listener");
+    }
+    return makeFamilySignatureView(kTopDefaultSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildSolverUtilFamilyView(bool has_circuit_solver,
+                                              bool has_electromag_solver,
+                                              bool has_matter_solver)
+{
+    static const std::array<const char*, 2> kSolverUtilSupportedFamilies = {
+        "SolverUtil",
+        "LeastSquare",
+    };
+
+    std::vector<std::string> active_families;
+    if (has_circuit_solver || has_electromag_solver || has_matter_solver)
+    {
+        appendUniqueFamily(active_families, "SolverUtil");
+    }
+    if (has_electromag_solver || has_matter_solver)
+    {
+        appendUniqueFamily(active_families, "LeastSquare");
+    }
+    return makeFamilySignatureView(kSolverUtilSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildNativeVolumeGeomFamilyView(const SurfaceChargingConfig& config)
+{
+    static const std::array<const char*, 7> kNativeVolumeGeomSupportedFamilies = {
+        "Geom",
+        "CartesianSystem",
+        "CylindricalSystem",
+        "SphericalSystem",
+        "CoordinateSystemTools",
+        "ThreeDCartesianGeom",
+        "TwoThreeDAxisymGeom",
+    };
+
+    std::vector<std::string> active_families = {
+        "Geom",
+        "CoordinateSystemTools",
+    };
+    const bool axisym_geometry_requested =
+        config.distribution_model == PlasmaAnalysis::PlasmaDistributionModelKind::AxisymTabulatedVelocity ||
+        config.distribution_model == PlasmaAnalysis::PlasmaDistributionModelKind::TwoAxesTabulatedVelocity;
+    if (axisym_geometry_requested)
+    {
+        appendUniqueFamily(active_families, "CylindricalSystem");
+        appendUniqueFamily(active_families, "TwoThreeDAxisymGeom");
+    }
+    else
+    {
+        appendUniqueFamily(active_families, "CartesianSystem");
+        appendUniqueFamily(active_families, "ThreeDCartesianGeom");
+    }
+    return makeFamilySignatureView(kNativeVolumeGeomSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildNativeVolumeMeshFamilyView(const SurfaceChargingConfig& config)
+{
+    static const std::array<const char*, 5> kNativeVolumeMeshSupportedFamilies = {
+        "VolMesh",
+        "ThreeDUnstructVolMesh",
+        "ThreeDUnstructVolMeshWithViewFactor",
+        "DisplayVolMesh",
+        "Centring",
+    };
+
+    std::vector<std::string> active_families = {
+        "VolMesh",
+        "ThreeDUnstructVolMesh",
+        "Centring",
+    };
+    if (config.enable_external_field_solver_bridge || config.enable_external_volume_solver_bridge)
+    {
+        appendUniqueFamily(active_families, "DisplayVolMesh");
+    }
+    if (config.enable_body_patch_circuit || !config.interfaces.empty())
+    {
+        appendUniqueFamily(active_families, "ThreeDUnstructVolMeshWithViewFactor");
+    }
+    return makeFamilySignatureView(kNativeVolumeMeshSupportedFamilies, active_families);
+}
+
+std::string surfaceSurfMeshRouteName(const SurfaceChargingConfig& config)
+{
+    const bool has_structured_surface_topology = !config.bodies.empty() || !config.patches.empty() ||
+                                                 !config.interfaces.empty() ||
+                                                 !config.body_boundary_groups.empty() ||
+                                                 !config.patch_boundary_groups.empty() ||
+                                                 !config.boundary_mappings.empty();
+    if (has_structured_surface_topology)
+    {
+        return "structured_topology";
+    }
+    if (!config.surface_nodes.empty() || !config.surface_branches.empty())
+    {
+        return "surface_node_graph";
+    }
+    return "implicit_single_surface";
+}
+
+FamilySignatureView buildSurfMeshFamilyView(const SurfaceChargingConfig& config)
+{
+    static const std::array<const char*, 2> kSurfMeshSupportedFamilies = {
+        "SurfMesh",
+        "ThreeDUnstructSurfMesh",
+    };
+
+    std::vector<std::string> active_families;
+    const std::string route = surfaceSurfMeshRouteName(config);
+    if (route == "surface_node_graph")
+    {
+        appendUniqueFamily(active_families, "SurfMesh");
+    }
+    else if (route == "structured_topology")
+    {
+        appendUniqueFamily(active_families, "SurfMesh");
+        appendUniqueFamily(active_families, "ThreeDUnstructSurfMesh");
+    }
+    return makeFamilySignatureView(kSurfMeshSupportedFamilies, active_families);
+}
+
+FamilySignatureView buildNativeVolumeBcAbstractFamilyView(
+    const std::vector<FieldSolver::NativeVolumeBoundaryConditionFamily>& active_families)
+{
+    static const std::array<const char*, 5> kNativeVolumeBcAbstractSupportedFamilies = {
+        "BC",
+        "DirichletPoissonBC",
+        "MatterBC",
+        "TestableMatterBC",
+        "VoltageGenerator",
+    };
+
+    std::vector<std::string> active_abstract_families = {
+        "BC",
+        "DirichletPoissonBC",
+    };
+
+    const auto hasFamily = [&](FieldSolver::NativeVolumeBoundaryConditionFamily family) {
+        return std::find(active_families.begin(), active_families.end(), family) != active_families.end();
+    };
+
+    if (hasFamily(FieldSolver::NativeVolumeBoundaryConditionFamily::SurfDistribMatterBC) ||
+        hasFamily(FieldSolver::NativeVolumeBoundaryConditionFamily::OneSurfDistribTestableMatterBC))
+    {
+        appendUniqueFamily(active_abstract_families, "MatterBC");
+    }
+    if (hasFamily(FieldSolver::NativeVolumeBoundaryConditionFamily::OneSurfDistribTestableMatterBC))
+    {
+        appendUniqueFamily(active_abstract_families, "TestableMatterBC");
+    }
+    if (hasFamily(FieldSolver::NativeVolumeBoundaryConditionFamily::VoltageDependentMBC) ||
+        hasFamily(FieldSolver::NativeVolumeBoundaryConditionFamily::CapacitiveVoltageGenerator) ||
+        hasFamily(FieldSolver::NativeVolumeBoundaryConditionFamily::FourierPoissonBC) ||
+        hasFamily(FieldSolver::NativeVolumeBoundaryConditionFamily::MixedDirichletFourierPoissonBC))
+    {
+        appendUniqueFamily(active_abstract_families, "VoltageGenerator");
+    }
+
+    return makeFamilySignatureView(kNativeVolumeBcAbstractSupportedFamilies, active_abstract_families);
+}
+
+FamilySignatureView buildNativeVolumeFieldAbstractFamilyView(
+    const std::vector<FieldSolver::NativeVolumeFieldFamily>& active_families)
+{
+    static const std::array<const char*, 9> kNativeVolumeFieldAbstractSupportedFamilies = {
+        "VolField",
+        "ScalVolField",
+        "VectVolField",
+        "EField",
+        "DirVectVolField",
+        "DirEField",
+        "PotEField",
+        "PotVectVolField",
+        "BField",
+    };
+
+    std::vector<std::string> active_abstract_families = {
+        "VolField",
+        "ScalVolField",
+        "VectVolField",
+        "EField",
+    };
+
+    const auto hasFamily = [&](FieldSolver::NativeVolumeFieldFamily family) {
+        return std::find(active_families.begin(), active_families.end(), family) != active_families.end();
+    };
+
+    if (hasFamily(FieldSolver::NativeVolumeFieldFamily::UniformBField) ||
+        hasFamily(FieldSolver::NativeVolumeFieldFamily::SolenoidBField) ||
+        hasFamily(FieldSolver::NativeVolumeFieldFamily::DipolarBField))
+    {
+        appendUniqueFamily(active_abstract_families, "DirVectVolField");
+    }
+    if (hasFamily(FieldSolver::NativeVolumeFieldFamily::EMField))
+    {
+        appendUniqueFamily(active_abstract_families, "DirEField");
+    }
+    appendUniqueFamily(active_abstract_families, "PotEField");
+    appendUniqueFamily(active_abstract_families, "PotVectVolField");
+    if (hasFamily(FieldSolver::NativeVolumeFieldFamily::UniformBField) ||
+        hasFamily(FieldSolver::NativeVolumeFieldFamily::SolenoidBField) ||
+        hasFamily(FieldSolver::NativeVolumeFieldFamily::DipolarBField))
+    {
+        appendUniqueFamily(active_abstract_families, "BField");
+    }
+
+    return makeFamilySignatureView(kNativeVolumeFieldAbstractSupportedFamilies,
+                                   active_abstract_families);
+}
+
+void appendNativeVolumeDistributionLongTailSelection(
+    std::vector<std::string>& active_families,
+    FieldSolver::NativeVolumeDistributionFamily family)
+{
+    using FieldSolver::NativeVolumeDistributionFamily;
+
+    switch (family)
+    {
+    case NativeVolumeDistributionFamily::VolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        break;
+    case NativeVolumeDistributionFamily::NonPICVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        break;
+    case NativeVolumeDistributionFamily::AnalyticVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case NativeVolumeDistributionFamily::MultipleVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "MultipleVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        break;
+    case NativeVolumeDistributionFamily::LocalMaxwellVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "LocalMaxwellVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        break;
+    case NativeVolumeDistributionFamily::LocalMaxwellBoltzmannVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families, "LocalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case NativeVolumeDistributionFamily::GlobalMaxwellBoltzmannVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families, "GlobalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case NativeVolumeDistributionFamily::PICBoltzmannVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "PICBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        break;
+    case NativeVolumeDistributionFamily::SteadyMaxwellBoltzmannVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families, "LocalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "SteadyMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case NativeVolumeDistributionFamily::UnlimitedGlobalMaxwellBoltzmannVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families, "UnlimitedGlobalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case NativeVolumeDistributionFamily::SurfaceLimitedGlobalMaxwellBoltzmannVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families,
+                           "SurfaceLimitedGlobalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case NativeVolumeDistributionFamily::TrunckatedGlobalMaxwellBoltzmannVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families,
+                           "TrunckatedGlobalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case NativeVolumeDistributionFamily::ImplicitableVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        break;
+    case NativeVolumeDistributionFamily::Updatable:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case NativeVolumeDistributionFamily::PICVolDistrib:
+    case NativeVolumeDistributionFamily::PICVolDistribNoAcc:
+    case NativeVolumeDistributionFamily::SmartPICVolDistrib:
+    case NativeVolumeDistributionFamily::CompositeVolDistrib:
+    case NativeVolumeDistributionFamily::BackTrackingVolDistrib:
+    case NativeVolumeDistributionFamily::BacktrackingPICCompositeVolDistrib:
+    case NativeVolumeDistributionFamily::BacktrackingBoltzmannCompositeVolDistrib:
+        appendUniqueFamily(active_families, "VolDistrib");
+        break;
+    case NativeVolumeDistributionFamily::PICVolDistribUpdatable:
+        appendUniqueFamily(active_families, "VolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    }
+}
+
+FamilySignatureView buildNativeVolumeDistributionLongTailFamilyView(
+    const SurfaceChargingConfig& config,
+    const std::vector<FieldSolver::NativeVolumeDistributionFamily>& configured_families)
+{
+    static const std::array<const char*, 14> kNativeVolumeDistributionLongTailSupportedFamilies = {
+        "VolDistrib",
+        "NonPICVolDistrib",
+        "AnalyticVolDistrib",
+        "MultipleVolDistrib",
+        "LocalMaxwellVolDistrib",
+        "LocalMaxwellBoltzmannVolDistrib",
+        "GlobalMaxwellBoltzmannVolDistrib",
+        "PICBoltzmannVolDistrib",
+        "SteadyMaxwellBoltzmannVolDistrib",
+        "UnlimitedGlobalMaxwellBoltzmannVolDistrib",
+        "SurfaceLimitedGlobalMaxwellBoltzmannVolDistrib",
+        "TrunckatedGlobalMaxwellBoltzmannVolDistrib",
+        "ImplicitableVolDistrib",
+        "Updatable",
+    };
+
+    std::vector<std::string> active_families;
+    if (!configured_families.empty())
+    {
+        for (const auto family : configured_families)
+        {
+            appendNativeVolumeDistributionLongTailSelection(active_families, family);
+        }
+        return makeFamilySignatureView(kNativeVolumeDistributionLongTailSupportedFamilies,
+                                       active_families);
+    }
+
+    appendUniqueFamily(active_families, "VolDistrib");
+    switch (config.distribution_model)
+    {
+    case PlasmaAnalysis::PlasmaDistributionModelKind::MultiPopulationHybrid:
+    case PlasmaAnalysis::PlasmaDistributionModelKind::MultipleSurf:
+        appendUniqueFamily(active_families, "MultipleVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalMaxwell:
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "LocalMaxwellVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalMaxwell2:
+    case PlasmaAnalysis::PlasmaDistributionModelKind::RecollMaxwell:
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families, "LocalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalMaxwellBoltzmann:
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families, "GlobalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalMaxwellBoltzmann2:
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families, "UnlimitedGlobalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families,
+                           "SurfaceLimitedGlobalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families,
+                           "TrunckatedGlobalMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::MaxwellianProjected:
+        appendUniqueFamily(active_families, "NonPICVolDistrib");
+        appendUniqueFamily(active_families, "AnalyticVolDistrib");
+        appendUniqueFamily(active_families, "SteadyMaxwellBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        appendUniqueFamily(active_families, "Updatable");
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::Fluid:
+    case PlasmaAnalysis::PlasmaDistributionModelKind::PICSurf:
+        appendUniqueFamily(active_families, "PICBoltzmannVolDistrib");
+        appendUniqueFamily(active_families, "ImplicitableVolDistrib");
+        break;
+    default:
+        break;
+    }
+
+    return makeFamilySignatureView(kNativeVolumeDistributionLongTailSupportedFamilies,
+                                   active_families);
+}
+
+FamilySignatureView buildNativeVolumeInteractionLongTailFamilyView(
+    const std::vector<FieldSolver::NativeVolumeInteractionFamily>& active_families)
+{
+    static const std::array<const char*, 5> kNativeVolumeInteractionLongTailSupportedFamilies = {
+        "VolInteractor",
+        "VolInteractModel",
+        "VolInteractionAlongTrajectory",
+        "ElasticCollisions",
+        "ConstantIonizationInteractor",
+    };
+
+    const auto hasFamily = [&](FieldSolver::NativeVolumeInteractionFamily family) {
+        return std::find(active_families.begin(), active_families.end(), family) !=
+               active_families.end();
+    };
+
+    const bool has_collision_family =
+        hasFamily(FieldSolver::NativeVolumeInteractionFamily::MCCInteractor) ||
+        hasFamily(FieldSolver::NativeVolumeInteractionFamily::CEXInteractor) ||
+        hasFamily(FieldSolver::NativeVolumeInteractionFamily::PhotoIonization);
+    const bool has_model_family = has_collision_family;
+    const bool has_along_trajectory_family =
+        hasFamily(FieldSolver::NativeVolumeInteractionFamily::TrajectoryInteractionFromField) ||
+        hasFamily(FieldSolver::NativeVolumeInteractionFamily::SpinningSpacecraftTrajectory);
+    const bool has_constant_ionization_family =
+        hasFamily(FieldSolver::NativeVolumeInteractionFamily::PhotoIonization);
+
+    std::vector<std::string> active_long_tail_families;
+    if (!active_families.empty())
+    {
+        appendUniqueFamily(active_long_tail_families, "VolInteractor");
+    }
+    if (has_model_family)
+    {
+        appendUniqueFamily(active_long_tail_families, "VolInteractModel");
+    }
+    if (has_along_trajectory_family)
+    {
+        appendUniqueFamily(active_long_tail_families, "VolInteractionAlongTrajectory");
+    }
+    if (has_collision_family)
+    {
+        appendUniqueFamily(active_long_tail_families, "ElasticCollisions");
+    }
+    if (has_constant_ionization_family)
+    {
+        appendUniqueFamily(active_long_tail_families, "ConstantIonizationInteractor");
+    }
+
+    return makeFamilySignatureView(kNativeVolumeInteractionLongTailSupportedFamilies,
+                                   active_long_tail_families);
+}
 
 bool applyImportedSurfaceMaterial(SurfaceChargingConfig& config, std::string& error_message)
 {
@@ -517,6 +1413,20 @@ std::string volumeLinearSolverPolicyName(VolumeLinearSolverPolicy policy)
     }
 }
 
+std::string potentialSweepModeName(SurfacePotentialSweepMode mode)
+{
+    switch (mode)
+    {
+    case SurfacePotentialSweepMode::PwlTimeline:
+        return "pwl_timeline";
+    case SurfacePotentialSweepMode::DiscretePoints:
+        return "discrete_points";
+    case SurfacePotentialSweepMode::None:
+    default:
+        return "none";
+    }
+}
+
 std::string nodeTypeLabel(bool is_patch)
 {
     return is_patch ? "patch" : "body";
@@ -612,9 +1522,40 @@ std::string surfaceMaterialModelFamily(const SurfaceChargingConfig& config)
 
 std::string barrierScalerFamily(const SurfaceChargingConfig& config)
 {
-    return config.runtime_route == SurfaceRuntimeRoute::LegacyBenchmark
-               ? "reference_barrier_scaler_v1"
-               : "spis_variable_barrier_scaler_v1";
+    if (config.runtime_route == SurfaceRuntimeRoute::LegacyBenchmark)
+    {
+        return "reference_barrier_scaler_v1";
+    }
+
+    FieldSolver::SurfaceBarrierState neutral_state;
+    neutral_state.emission_temperature_ev =
+        std::max(1.0e-3, config.material.getPhotoelectronTemperatureEv());
+
+    const auto photo_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+        config.material, neutral_state, "surface_photo_barrier_scaler_kind",
+        FieldSolver::SurfaceBarrierScalerKind::VariableBarrier);
+    const auto secondary_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+        config.material, neutral_state, "surface_secondary_barrier_scaler_kind",
+        FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+    const auto ion_secondary_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+        config.material, neutral_state, "surface_ion_secondary_barrier_scaler_kind",
+        FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+    const auto backscatter_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+        config.material, neutral_state, "surface_backscatter_barrier_scaler_kind",
+        FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+
+    const std::array<std::string, 4> configured_families = {
+        photo_decision.configured_family,
+        secondary_decision.configured_family,
+        ion_secondary_decision.configured_family,
+        backscatter_decision.configured_family,
+    };
+    if (std::all_of(configured_families.begin() + 1, configured_families.end(),
+                    [&](const std::string& family) { return family == configured_families.front(); }))
+    {
+        return configured_families.front();
+    }
+    return "spis_component_barrier_scaler_bundle_v1";
 }
 
 std::string distributionFamily(const SurfaceChargingConfig& config)
@@ -625,6 +1566,50 @@ std::string distributionFamily(const SurfaceChargingConfig& config)
         return "spis_isotropic_maxwellian_flux_v1";
     case PlasmaAnalysis::PlasmaDistributionModelKind::WakeAnisotropic:
         return "spis_wake_anisotropic_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::MultipleSurf:
+        return "spis_multiple_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalModifiedPearsonIV:
+        return "spis_local_modified_pearson_iv_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalTabulated:
+        return "spis_local_tabulated_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::TwoAxesTabulatedVelocity:
+        return "spis_two_axes_tabulated_velocity_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::AxisymTabulatedVelocity:
+        return "spis_axisym_tabulated_velocity_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalMaxwellBoltzmann:
+        return "spis_global_maxwell_boltzmann_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalMaxwellBoltzmann2:
+        return "spis_global_maxwell_boltzmann2_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalMaxwell:
+        return "spis_global_maxwell_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalMaxwell:
+        return "spis_local_maxwell_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalMaxwell2:
+        return "spis_local_maxwell2_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::RecollMaxwell:
+        return "spis_recoll_maxwell_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::PICSurf:
+        return "spis_pic_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::NonPICSurf:
+        return "spis_nonpic_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GenericSurf:
+        return "spis_generic_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalSurf:
+        return "spis_global_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalGenericSurf:
+        return "spis_local_generic_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::TestableSurf:
+        return "spis_testable_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::TestableForA:
+        return "spis_testable_for_a_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::MaxwellianThruster:
+        return "spis_maxwellian_thruster_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::UniformVelocity:
+        return "spis_uniform_velocity_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::Fluid:
+        return "spis_fluid_surface_flux_v1";
+    case PlasmaAnalysis::PlasmaDistributionModelKind::FowlerNordheim:
+        return "spis_fowler_nordheim_surface_flux_v1";
     case PlasmaAnalysis::PlasmaDistributionModelKind::MultiPopulationHybrid:
     default:
         return "spis_bimaxwellian_flux_v1";
@@ -682,47 +1667,6 @@ std::string resolvedRuntimeKernelSourceFamily(const SurfaceChargingConfig& confi
     }
     return configured_family;
 }
-
-struct SurfaceGraphMonitorSnapshot
-{
-    std::size_t node_count = 0;
-    std::size_t branch_count = 0;
-    std::size_t max_node_degree = 0;
-    double average_node_degree = 0.0;
-    std::size_t strongest_field_node_index = 0;
-    double strongest_field_node_abs_v_per_m = 0.0;
-    std::size_t strongest_coupling_interface_index = 0;
-    double strongest_coupling_interface_metric = 0.0;
-    double max_abs_neighbor_potential_delta_v = 0.0;
-    double max_abs_neighbor_field_contrast_v_per_m = 0.0;
-    double graph_coupling_metric = 0.0;
-};
-
-struct SurfaceFieldMonitorSnapshot
-{
-    std::size_t strongest_field_node_index = 0;
-    double strongest_field_node_abs_v_per_m = 0.0;
-    double max_abs_node_reference_offset_v = 0.0;
-    double max_abs_node_field_solver_reference_offset_v = 0.0;
-    double max_field_solver_coupling_gain = 0.0;
-    double reference_offset_envelope_v = 0.0;
-};
-
-struct SurfaceBenchmarkMonitorSnapshot
-{
-    std::string runtime_route;
-    std::string benchmark_mode;
-    std::string benchmark_source;
-    std::string benchmark_execution_mode;
-    std::string consistency_status;
-    std::string consistency_authority;
-    double patch_rmse_v = 0.0;
-    double body_rmse_v = 0.0;
-    double terminal_potential_v = 0.0;
-    double time_to_equilibrium_ms = 0.0;
-    std::size_t compared_patch_samples = 0;
-    std::size_t compared_body_samples = 0;
-};
 
 SurfaceGraphMonitorSnapshot buildSurfaceGraphMonitorSnapshot(
     const SurfaceChargingConfig& config, const SurfaceCircuitModel* circuit_model,
@@ -841,729 +1785,465 @@ SurfaceFieldMonitorSnapshot buildSurfaceFieldMonitorSnapshot(
     return snapshot;
 }
 
-std::string jsonEscape(const std::string& value);
-
-bool writeSurfaceMonitorJson(const std::filesystem::path& json_path,
-                             const SurfaceCircuitModel* circuit_model,
-                             const SurfaceGraphMonitorSnapshot& graph_snapshot,
-                             const SurfaceFieldMonitorSnapshot& field_snapshot,
-                             const SurfaceBenchmarkMonitorSnapshot& benchmark_snapshot)
+SurfaceBenchmarkMonitorSnapshot buildSurfaceBenchmarkMonitorSnapshot(
+    const SurfaceChargingConfig& config,
+    const LegacyBenchmarkConsistencyDiagnostics& benchmark_consistency,
+    const LegacyBenchmarkMetrics& benchmark_patch_metrics,
+    const LegacyBenchmarkMetrics& benchmark_body_metrics,
+    const std::vector<double>& history_potential,
+    double time_to_equilibrium_ms)
 {
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.surface_monitor.v1\",\n";
-    output << "  \"graph\": {\n";
-    output << "    \"node_count\": " << graph_snapshot.node_count << ",\n";
-    output << "    \"branch_count\": " << graph_snapshot.branch_count << ",\n";
-    output << "    \"max_node_degree\": " << graph_snapshot.max_node_degree << ",\n";
-    output << "    \"average_node_degree\": " << graph_snapshot.average_node_degree << ",\n";
-    output << "    \"graph_coupling_metric\": " << graph_snapshot.graph_coupling_metric << ",\n";
-    output << "    \"strongest_field_node_index\": " << graph_snapshot.strongest_field_node_index
-           << ",\n";
-    output << "    \"strongest_field_node_name\": \""
-           << jsonEscape((circuit_model && graph_snapshot.node_count > 0)
-                             ? circuit_model->nodeName(graph_snapshot.strongest_field_node_index)
-                             : "")
-           << "\",\n";
-    output << "    \"strongest_field_node_abs_v_per_m\": "
-           << graph_snapshot.strongest_field_node_abs_v_per_m << ",\n";
-    output << "    \"strongest_coupling_interface_index\": "
-           << graph_snapshot.strongest_coupling_interface_index << ",\n";
-    output << "    \"strongest_coupling_interface_name\": \""
-           << jsonEscape((circuit_model && graph_snapshot.branch_count > 0)
-                             ? circuit_model->branchName(
-                                   graph_snapshot.strongest_coupling_interface_index)
-                             : "")
-           << "\",\n";
-    output << "    \"strongest_coupling_interface_metric\": "
-           << graph_snapshot.strongest_coupling_interface_metric << ",\n";
-    output << "    \"max_abs_neighbor_potential_delta_v\": "
-           << graph_snapshot.max_abs_neighbor_potential_delta_v << ",\n";
-    output << "    \"max_abs_neighbor_field_contrast_v_per_m\": "
-           << graph_snapshot.max_abs_neighbor_field_contrast_v_per_m << "\n";
-    output << "  },\n";
-    output << "  \"field\": {\n";
-    output << "    \"strongest_field_node_index\": " << field_snapshot.strongest_field_node_index
-           << ",\n";
-    output << "    \"strongest_field_node_name\": \""
-           << jsonEscape((circuit_model && graph_snapshot.node_count > 0)
-                             ? circuit_model->nodeName(field_snapshot.strongest_field_node_index)
-                             : "")
-           << "\",\n";
-    output << "    \"strongest_field_node_abs_v_per_m\": "
-           << field_snapshot.strongest_field_node_abs_v_per_m << ",\n";
-    output << "    \"max_abs_node_reference_offset_v\": "
-           << field_snapshot.max_abs_node_reference_offset_v << ",\n";
-    output << "    \"max_abs_node_field_solver_reference_offset_v\": "
-           << field_snapshot.max_abs_node_field_solver_reference_offset_v << ",\n";
-    output << "    \"max_field_solver_coupling_gain\": "
-           << field_snapshot.max_field_solver_coupling_gain << ",\n";
-    output << "    \"reference_offset_envelope_v\": "
-           << field_snapshot.reference_offset_envelope_v << "\n";
-    output << "  },\n";
-    output << "  \"benchmark\": {\n";
-    output << "    \"runtime_route\": \"" << jsonEscape(benchmark_snapshot.runtime_route)
-           << "\",\n";
-    output << "    \"benchmark_mode\": \"" << jsonEscape(benchmark_snapshot.benchmark_mode)
-           << "\",\n";
-    output << "    \"benchmark_source\": \"" << jsonEscape(benchmark_snapshot.benchmark_source)
-           << "\",\n";
-    output << "    \"benchmark_execution_mode\": \""
-           << jsonEscape(benchmark_snapshot.benchmark_execution_mode) << "\",\n";
-    output << "    \"consistency_status\": \""
-           << jsonEscape(benchmark_snapshot.consistency_status) << "\",\n";
-    output << "    \"consistency_authority\": \""
-           << jsonEscape(benchmark_snapshot.consistency_authority) << "\",\n";
-    output << "    \"patch_rmse_v\": " << benchmark_snapshot.patch_rmse_v << ",\n";
-    output << "    \"body_rmse_v\": " << benchmark_snapshot.body_rmse_v << ",\n";
-    output << "    \"compared_patch_samples\": " << benchmark_snapshot.compared_patch_samples
-           << ",\n";
-    output << "    \"compared_body_samples\": " << benchmark_snapshot.compared_body_samples
-           << ",\n";
-    output << "    \"terminal_potential_v\": " << benchmark_snapshot.terminal_potential_v << ",\n";
-    output << "    \"time_to_equilibrium_ms\": " << benchmark_snapshot.time_to_equilibrium_ms
-           << "\n";
-    output << "  }\n";
-    output << "}\n";
-    return true;
+    SurfaceBenchmarkMonitorSnapshot snapshot;
+    snapshot.runtime_route = runtimeRouteName(config.runtime_route);
+    snapshot.benchmark_mode =
+        config.benchmark_mode == SurfaceBenchmarkMode::LegacyRefCompatible
+            ? "LegacyRefCompatible"
+            : "UnifiedKernelAligned";
+    snapshot.benchmark_source = benchmarkSourceName(config.benchmark_source);
+    snapshot.benchmark_execution_mode =
+        legacyBenchmarkExecutionModeName(config.legacy_benchmark_execution_mode);
+    snapshot.consistency_status =
+        benchmark_consistency.status.empty() ? "not_applicable" : benchmark_consistency.status;
+    snapshot.consistency_authority = benchmark_consistency.authority;
+    snapshot.patch_rmse_v = benchmark_patch_metrics.valid ? benchmark_patch_metrics.rmse_v : 0.0;
+    snapshot.body_rmse_v = benchmark_body_metrics.valid ? benchmark_body_metrics.rmse_v : 0.0;
+    snapshot.compared_patch_samples =
+        benchmark_patch_metrics.valid ? benchmark_patch_metrics.compared_sample_count : 0;
+    snapshot.compared_body_samples =
+        benchmark_body_metrics.valid ? benchmark_body_metrics.compared_sample_count : 0;
+    snapshot.terminal_potential_v = history_potential.empty() ? 0.0 : history_potential.back();
+    snapshot.time_to_equilibrium_ms = time_to_equilibrium_ms;
+    return snapshot;
 }
 
-bool writeSurfaceGraphReport(
-    const std::filesystem::path& report_path, const SurfaceChargingConfig& config,
-    const SurfaceCircuitModel* circuit_model, const std::string& runtime_route_name,
-    const std::string& circuit_model_name, const std::string& electric_field_provider_name,
-    const std::string& reference_graph_propagator_name,
-    const std::string& graph_capacitance_provider_name, const std::string& field_solver_adapter_name,
-    const SurfaceGraphCapacitanceMatrixProvider* graph_capacitance_matrix_provider,
-    const std::vector<std::vector<double>>& node_potential_history,
-    const std::vector<std::vector<double>>& node_total_current_history,
-    const std::vector<std::vector<double>>& node_field_history,
-    const std::vector<std::vector<double>>& node_charge_history,
-    const std::vector<std::vector<double>>& node_propagated_reference_history,
-    const std::vector<std::vector<double>>& node_field_solver_reference_history,
-    const std::vector<std::vector<double>>& node_graph_capacitance_history,
-    const std::vector<std::vector<double>>& node_graph_capacitance_row_sum_history,
-    const std::vector<std::vector<double>>& node_field_solver_coupling_gain_history,
-    const std::vector<std::vector<double>>& node_field_solver_capacitance_scale_history,
-    const std::vector<std::vector<double>>& branch_current_history,
-    const std::vector<std::vector<double>>& branch_conductance_history,
-    const std::vector<std::vector<double>>& branch_voltage_drop_history,
-    const std::vector<std::vector<double>>& branch_power_history,
-    const std::vector<std::vector<double>>& branch_mutual_capacitance_history)
-{
-    std::ofstream output(report_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << std::fixed << std::setprecision(12);
-    output << "runtime_route=" << runtime_route_name << "\n";
-    output << "surface_circuit_model=" << circuit_model_name << "\n";
-    output << "electric_field_provider=" << electric_field_provider_name << "\n";
-    output << "surface_reference_graph_propagator=" << reference_graph_propagator_name << "\n";
-    output << "surface_graph_capacitance_matrix_provider=" << graph_capacitance_provider_name
-           << "\n";
-    output << "surface_field_solver_adapter=" << field_solver_adapter_name << "\n";
-    if (graph_capacitance_matrix_provider != nullptr)
-    {
-        output << "surface_graph_capacitance_matrix_family="
-               << graph_capacitance_matrix_provider->matrixFamilyName() << "\n";
-        output << "surface_graph_capacitance_solver_adapter_hint="
-               << graph_capacitance_matrix_provider->solverAdapterHint() << "\n";
-        output << "surface_graph_capacitance_exposes_mutual_matrix="
-               << (graph_capacitance_matrix_provider->exposesMutualMatrix() ? 1 : 0) << "\n";
-        output << "surface_graph_capacitance_exposes_diagonal_matrix="
-               << (graph_capacitance_matrix_provider->exposesDiagonalMatrix() ? 1 : 0) << "\n";
-    }
-
-    if (circuit_model == nullptr)
-    {
-        output << "node_count=0\n";
-        output << "branch_count=0\n";
-        return true;
-    }
-
-    const std::size_t node_count = circuit_model->nodeCount();
-    const std::size_t branch_count = circuit_model->branchCount();
-    std::size_t body_count = 0;
-    std::size_t patch_count = 0;
-    std::size_t body_body_count = 0;
-    std::size_t body_patch_count = 0;
-    std::size_t patch_patch_count = 0;
-    std::vector<std::size_t> node_degrees(node_count, 0);
-
-    for (std::size_t node_index = 0; node_index < node_count; ++node_index)
-    {
-        if (circuit_model->nodeIsPatch(node_index))
-        {
-            ++patch_count;
-        }
-        else
-        {
-            ++body_count;
-        }
-    }
-
-    double total_graph_capacitance_diagonal_f = 0.0;
-    double max_graph_capacitance_diagonal_f = 0.0;
-    double total_graph_capacitance_row_sum_f = 0.0;
-    double max_graph_capacitance_row_sum_f = 0.0;
-    for (std::size_t node_index = 0; node_index < node_count; ++node_index)
-    {
-        const double diagonal_f =
-            latestHistoryValue(node_graph_capacitance_history, node_index);
-        total_graph_capacitance_diagonal_f += diagonal_f;
-        max_graph_capacitance_diagonal_f =
-            std::max(max_graph_capacitance_diagonal_f, std::abs(diagonal_f));
-        const double row_sum_f =
-            latestHistoryValue(node_graph_capacitance_row_sum_history, node_index);
-        total_graph_capacitance_row_sum_f += row_sum_f;
-        max_graph_capacitance_row_sum_f =
-            std::max(max_graph_capacitance_row_sum_f, std::abs(row_sum_f));
-    }
-
-    double total_mutual_capacitance_f = 0.0;
-    double max_mutual_capacitance_f = 0.0;
-    double max_abs_interface_current_a = 0.0;
-    double max_abs_interface_voltage_drop_v = 0.0;
-    double max_abs_interface_power_w = 0.0;
-    double max_interface_conductance_s = 0.0;
-    double max_abs_neighbor_potential_delta_v = 0.0;
-    double max_abs_neighbor_field_contrast_v_per_m = 0.0;
-    double max_abs_node_reference_offset_v = 0.0;
-    double max_abs_node_field_solver_reference_offset_v = 0.0;
-    double max_field_solver_coupling_gain = 0.0;
-    std::size_t strongest_field_node_index = 0;
-    double strongest_field_node_magnitude_v_per_m = 0.0;
-    std::size_t strongest_coupling_branch_index = 0;
-    double strongest_coupling_branch_metric = 0.0;
-    for (std::size_t branch_index = 0; branch_index < branch_count; ++branch_index)
-    {
-        const auto from_node = circuit_model->branchFromNodeIndex(branch_index);
-        const auto to_node = circuit_model->branchToNodeIndex(branch_index);
-        if (from_node < node_degrees.size())
-        {
-            ++node_degrees[from_node];
-        }
-        if (to_node < node_degrees.size())
-        {
-            ++node_degrees[to_node];
-        }
-
-        const auto branch_type = branchTypeLabel(circuit_model, branch_index);
-        if (branch_type == "body-body")
-        {
-            ++body_body_count;
-        }
-        else if (branch_type == "patch-patch")
-        {
-            ++patch_patch_count;
-        }
-        else if (branch_type == "body-patch")
-        {
-            ++body_patch_count;
-        }
-
-        const double mutual_capacitance_f =
-            latestHistoryValue(branch_mutual_capacitance_history, branch_index);
-        total_mutual_capacitance_f += mutual_capacitance_f;
-        max_mutual_capacitance_f =
-            std::max(max_mutual_capacitance_f, std::abs(mutual_capacitance_f));
-        const double abs_current_a =
-            std::abs(latestHistoryValue(branch_current_history, branch_index));
-        max_abs_interface_current_a =
-            std::max(max_abs_interface_current_a,
-                     abs_current_a);
-        const double abs_voltage_drop_v =
-            std::abs(latestHistoryValue(branch_voltage_drop_history, branch_index));
-        max_abs_interface_voltage_drop_v =
-            std::max(max_abs_interface_voltage_drop_v,
-                     abs_voltage_drop_v);
-        const double abs_power_w =
-            std::abs(latestHistoryValue(branch_power_history, branch_index));
-        max_abs_interface_power_w =
-            std::max(max_abs_interface_power_w,
-                     abs_power_w);
-        max_interface_conductance_s =
-            std::max(max_interface_conductance_s,
-                     latestHistoryValue(branch_conductance_history, branch_index));
-        const double from_potential_v = latestHistoryValue(node_potential_history, from_node);
-        const double to_potential_v = latestHistoryValue(node_potential_history, to_node);
-        max_abs_neighbor_potential_delta_v =
-            std::max(max_abs_neighbor_potential_delta_v, std::abs(from_potential_v - to_potential_v));
-        const double from_field_v_per_m = latestHistoryValue(node_field_history, from_node);
-        const double to_field_v_per_m = latestHistoryValue(node_field_history, to_node);
-        max_abs_neighbor_field_contrast_v_per_m =
-            std::max(max_abs_neighbor_field_contrast_v_per_m,
-                     std::abs(from_field_v_per_m - to_field_v_per_m));
-        const double coupling_metric =
-            std::abs(mutual_capacitance_f) *
-                std::max(0.0, latestHistoryValue(branch_conductance_history, branch_index)) +
-            abs_voltage_drop_v * std::max(0.0, latestHistoryValue(branch_conductance_history, branch_index));
-        if (coupling_metric > strongest_coupling_branch_metric)
-        {
-            strongest_coupling_branch_metric = coupling_metric;
-            strongest_coupling_branch_index = branch_index;
-        }
-    }
-
-    for (std::size_t node_index = 0; node_index < node_count; ++node_index)
-    {
-        const double field_magnitude_v_per_m =
-            std::abs(latestHistoryValue(node_field_history, node_index));
-        if (field_magnitude_v_per_m > strongest_field_node_magnitude_v_per_m)
-        {
-            strongest_field_node_magnitude_v_per_m = field_magnitude_v_per_m;
-            strongest_field_node_index = node_index;
-        }
-        const double reference_offset_v =
-            latestHistoryValue(node_propagated_reference_history, node_index) -
-            latestHistoryValue(node_potential_history, node_index);
-        max_abs_node_reference_offset_v =
-            std::max(max_abs_node_reference_offset_v, std::abs(reference_offset_v));
-        const double field_solver_reference_offset_v =
-            latestHistoryValue(node_field_solver_reference_history, node_index) -
-            latestHistoryValue(node_potential_history, node_index);
-        max_abs_node_field_solver_reference_offset_v =
-            std::max(max_abs_node_field_solver_reference_offset_v,
-                     std::abs(field_solver_reference_offset_v));
-        max_field_solver_coupling_gain =
-            std::max(max_field_solver_coupling_gain,
-                     std::abs(latestHistoryValue(node_field_solver_coupling_gain_history, node_index)));
-    }
-
-    const std::size_t max_node_degree =
-        node_degrees.empty() ? 0 : *std::max_element(node_degrees.begin(), node_degrees.end());
-    const double average_node_degree =
-        node_degrees.empty() ? 0.0 : Basic::meanValue(node_degrees, 0.0);
-
-    output << "node_count=" << node_count << "\n";
-    output << "body_count=" << body_count << "\n";
-    output << "patch_count=" << patch_count << "\n";
-    output << "branch_count=" << branch_count << "\n";
-    output << "body_body_interface_count=" << body_body_count << "\n";
-    output << "body_patch_interface_count=" << body_patch_count << "\n";
-    output << "patch_patch_interface_count=" << patch_patch_count << "\n";
-    output << "max_node_degree=" << max_node_degree << "\n";
-    output << "average_node_degree=" << average_node_degree << "\n";
-    output << "total_graph_capacitance_diagonal_f=" << total_graph_capacitance_diagonal_f << "\n";
-    output << "max_graph_capacitance_diagonal_f=" << max_graph_capacitance_diagonal_f << "\n";
-    output << "total_graph_capacitance_row_sum_f=" << total_graph_capacitance_row_sum_f << "\n";
-    output << "max_graph_capacitance_row_sum_f=" << max_graph_capacitance_row_sum_f << "\n";
-    output << "total_interface_mutual_capacitance_f=" << total_mutual_capacitance_f << "\n";
-    output << "max_interface_mutual_capacitance_f=" << max_mutual_capacitance_f << "\n";
-    output << "max_abs_interface_current_a=" << max_abs_interface_current_a << "\n";
-    output << "max_abs_interface_voltage_drop_v=" << max_abs_interface_voltage_drop_v << "\n";
-    output << "max_abs_interface_power_w=" << max_abs_interface_power_w << "\n";
-    output << "max_interface_conductance_s=" << max_interface_conductance_s << "\n";
-    output << "max_abs_neighbor_potential_delta_v=" << max_abs_neighbor_potential_delta_v << "\n";
-    output << "max_abs_neighbor_field_contrast_v_per_m="
-           << max_abs_neighbor_field_contrast_v_per_m << "\n";
-    output << "max_abs_node_reference_offset_v=" << max_abs_node_reference_offset_v << "\n";
-    output << "max_abs_node_field_solver_reference_offset_v="
-           << max_abs_node_field_solver_reference_offset_v << "\n";
-    output << "max_field_solver_coupling_gain=" << max_field_solver_coupling_gain << "\n";
-    output << "graph_coupling_metric="
-           << (graph_capacitance_matrix_provider != nullptr
-                   ? graph_capacitance_matrix_provider->graphCouplingMetric(config, circuit_model)
-                   : 0.0)
-           << "\n";
-    if (node_count > 0)
-    {
-        output << "strongest_field_node_index=" << strongest_field_node_index << "\n";
-        output << "strongest_field_node_name=" << circuit_model->nodeName(strongest_field_node_index)
-               << "\n";
-        output << "strongest_field_node_abs_field_v_per_m="
-               << strongest_field_node_magnitude_v_per_m << "\n";
-    }
-    if (branch_count > 0)
-    {
-        output << "strongest_coupling_interface_index=" << strongest_coupling_branch_index << "\n";
-        output << "strongest_coupling_interface_name="
-               << circuit_model->branchName(strongest_coupling_branch_index) << "\n";
-        output << "strongest_coupling_interface_metric="
-               << strongest_coupling_branch_metric << "\n";
-    }
-
-    for (std::size_t node_index = 0; node_index < node_count; ++node_index)
-    {
-        const double reference_offset_v =
-            latestHistoryValue(node_propagated_reference_history, node_index) -
-            latestHistoryValue(node_potential_history, node_index);
-        const double field_solver_reference_offset_v =
-            latestHistoryValue(node_field_solver_reference_history, node_index) -
-            latestHistoryValue(node_potential_history, node_index);
-        const double local_charge_density_c_per_m3 =
-            latestHistoryValue(node_charge_history, node_index);
-        const double field_to_charge_ratio =
-            std::abs(local_charge_density_c_per_m3) <= 1.0e-30
-                ? 0.0
-                : latestHistoryValue(node_field_history, node_index) / local_charge_density_c_per_m3;
-        output << "node_" << node_index << "="
-               << "name:" << circuit_model->nodeName(node_index)
-               << ",type:" << nodeTypeLabel(circuit_model->nodeIsPatch(node_index))
-               << ",owner:"
-               << nodeOwnerLabel(config, circuit_model->nodeName(node_index),
-                                 circuit_model->nodeIsPatch(node_index))
-               << ",material:"
-               << nodeMaterialName(config, node_index, circuit_model->nodeName(node_index),
-                                   circuit_model->nodeIsPatch(node_index))
-               << ",degree:" << node_degrees[node_index]
-               << ",area_m2:" << circuit_model->nodeAreaM2(node_index)
-               << ",last_potential_v:" << latestHistoryValue(node_potential_history, node_index)
-               << ",last_total_current_density_a_per_m2:"
-               << latestHistoryValue(node_total_current_history, node_index)
-               << ",last_normal_electric_field_v_per_m:"
-               << latestHistoryValue(node_field_history, node_index)
-               << ",last_local_charge_density_c_per_m3:"
-               << local_charge_density_c_per_m3
-               << ",last_propagated_reference_potential_v:"
-               << latestHistoryValue(node_propagated_reference_history, node_index)
-               << ",last_reference_offset_v:" << reference_offset_v
-               << ",last_field_solver_reference_potential_v:"
-               << latestHistoryValue(node_field_solver_reference_history, node_index)
-               << ",last_field_solver_reference_offset_v:" << field_solver_reference_offset_v
-               << ",last_graph_capacitance_diagonal_f:"
-               << latestHistoryValue(node_graph_capacitance_history, node_index)
-               << ",last_graph_capacitance_row_sum_f:"
-               << latestHistoryValue(node_graph_capacitance_row_sum_history, node_index)
-               << ",last_field_solver_coupling_gain:"
-               << latestHistoryValue(node_field_solver_coupling_gain_history, node_index)
-               << ",last_field_solver_capacitance_scale:"
-               << latestHistoryValue(node_field_solver_capacitance_scale_history, node_index)
-               << ",field_to_charge_ratio:" << field_to_charge_ratio << "\n";
-    }
-
-    for (std::size_t branch_index = 0; branch_index < branch_count; ++branch_index)
-    {
-        const auto from_node = circuit_model->branchFromNodeIndex(branch_index);
-        const auto to_node = circuit_model->branchToNodeIndex(branch_index);
-        output << "interface_" << branch_index << "="
-               << "name:" << circuit_model->branchName(branch_index)
-               << ",type:" << branchTypeLabel(circuit_model, branch_index)
-               << ",from_node:" << circuit_model->nodeName(from_node)
-               << ",to_node:" << circuit_model->nodeName(to_node)
-               << ",conductance_s:" << circuit_model->branchConductanceS(branch_index)
-               << ",resistance_ohm:" << circuit_model->branchResistanceOhm(branch_index)
-               << ",bias_v:" << circuit_model->branchBiasV(branch_index)
-               << ",dynamic_conductance:"
-               << (circuit_model->branchUsesDynamicConductance(branch_index) ? 1 : 0)
-               << ",last_current_a:" << latestHistoryValue(branch_current_history, branch_index)
-               << ",last_voltage_drop_v:"
-               << latestHistoryValue(branch_voltage_drop_history, branch_index)
-               << ",last_power_w:" << latestHistoryValue(branch_power_history, branch_index)
-               << ",last_mutual_capacitance_f:"
-               << latestHistoryValue(branch_mutual_capacitance_history, branch_index) << "\n";
-    }
-    return true;
-}
-
-std::string jsonEscape(const std::string& value);
-
-bool writeSurfaceGraphMatrixSnapshotCsv(
+bool writeLegacyBenchmarkArtifacts(
     const std::filesystem::path& csv_path, const SurfaceChargingConfig& config,
-    const SurfaceCircuitModel* circuit_model,
-    const SurfaceGraphCapacitanceMatrixProvider* graph_capacitance_matrix_provider)
+    const LegacyBenchmarkCaseDefinition& benchmark_case_definition,
+    const std::vector<LegacyBenchmarkCurveSample>& display_patch_curve,
+    const std::vector<LegacyBenchmarkCurveSample>& display_body_curve,
+    const LegacyBenchmarkMetrics& benchmark_patch_metrics,
+    const LegacyBenchmarkMetrics& benchmark_body_metrics,
+    const LegacyBenchmarkConsistencyDiagnostics& benchmark_consistency,
+    std::string& error_message)
 {
-    std::ofstream output(csv_path);
-    if (!output.is_open())
+    auto report_path = csv_path;
+    report_path.replace_extension(".benchmark.txt");
+    if (!writeLegacyBenchmarkReport(report_path, config.runtime_route, config.benchmark_source,
+                                    config.legacy_benchmark_execution_mode,
+                                    benchmark_case_definition, display_patch_curve,
+                                    display_body_curve, benchmark_patch_metrics,
+                                    benchmark_body_metrics, benchmark_consistency))
     {
+        error_message =
+            "Failed to write legacy benchmark sidecar report to: " + report_path.string();
         return false;
     }
 
-    output << std::fixed << std::setprecision(12);
-    output << "entry_type,index,name,from_node,to_node,value_f,aux_value,notes\n";
-    if (circuit_model == nullptr || graph_capacitance_matrix_provider == nullptr)
+    auto comparison_csv_path = csv_path;
+    comparison_csv_path.replace_extension(".benchmark.csv");
+    if (!writeLegacyBenchmarkComparisonCsv(comparison_csv_path, display_patch_curve,
+                                           benchmark_case_definition.patch_reference_curve,
+                                           display_body_curve,
+                                           benchmark_case_definition.body_reference_curve))
     {
-        return true;
+        error_message =
+            "Failed to write legacy benchmark comparison csv to: " +
+            comparison_csv_path.string();
+        return false;
     }
 
-    for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-    {
-        output << "node_diagonal," << node_index << "," << circuit_model->nodeName(node_index) << ",,,"
-               << graph_capacitance_matrix_provider->diagonalCapacitanceF(
-                      config, circuit_model, node_index)
-               << ","
-               << graph_capacitance_matrix_provider->rowSumCapacitanceF(
-                      config, circuit_model, node_index)
-               << ",row_sum_f\n";
-    }
-    for (std::size_t branch_index = 0; branch_index < circuit_model->branchCount(); ++branch_index)
-    {
-        const auto from_node = circuit_model->branchFromNodeIndex(branch_index);
-        const auto to_node = circuit_model->branchToNodeIndex(branch_index);
-        output << "branch_mutual," << branch_index << "," << circuit_model->branchName(branch_index)
-               << "," << circuit_model->nodeName(from_node) << ","
-               << circuit_model->nodeName(to_node) << ","
-               << graph_capacitance_matrix_provider->mutualCapacitanceF(
-                      config, circuit_model, branch_index)
-               << "," << circuit_model->branchConductanceS(branch_index) << ",conductance_s\n";
-    }
-    output << "graph_metric,0,matrix_family,,,0.000000000000,0.000000000000,"
-           << graph_capacitance_matrix_provider->matrixFamilyName() << "\n";
-    output << "graph_metric,1,graph_coupling_metric,,,"
-           << graph_capacitance_matrix_provider->graphCouplingMetric(config, circuit_model)
-           << ",0.000000000000,graph_coupling_metric\n";
     return true;
 }
 
-bool writeSurfaceGraphMatrixSnapshotJson(
-    const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
-    const SurfaceCircuitModel* circuit_model,
-    const SurfaceGraphCapacitanceMatrixProvider* graph_capacitance_matrix_provider)
+void normalizeExportScalarSeries(Output::ColumnarDataSet& data_set)
 {
-    std::ofstream output(json_path);
-    if (!output.is_open())
+    const std::size_t export_row_count = data_set.axis_values.size();
+    for (auto& [_, values] : data_set.scalar_series)
     {
-        return false;
-    }
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.surface_graph_matrix.v1\",\n";
-    output << "  \"matrix_family\": \""
-           << jsonEscape(graph_capacitance_matrix_provider
-                             ? graph_capacitance_matrix_provider->matrixFamilyName()
-                             : "BuiltinMatrixFamily")
-           << "\",\n";
-    output << "  \"solver_adapter_hint\": \""
-           << jsonEscape(graph_capacitance_matrix_provider
-                             ? graph_capacitance_matrix_provider->solverAdapterHint()
-                             : "BuiltinFieldSolverAdapter")
-           << "\",\n";
-    output << "  \"graph_coupling_metric\": "
-           << (graph_capacitance_matrix_provider && circuit_model
-                   ? graph_capacitance_matrix_provider->graphCouplingMetric(config, circuit_model)
-                   : 0.0)
-           << ",\n";
-    output << "  \"nodes\": [\n";
-    if (circuit_model && graph_capacitance_matrix_provider)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
+        if (values.size() < export_row_count)
         {
-            output << "    {\"index\": " << node_index << ", \"name\": \""
-                   << jsonEscape(circuit_model->nodeName(node_index)) << "\", \"diagonal_f\": "
-                   << graph_capacitance_matrix_provider->diagonalCapacitanceF(config, circuit_model, node_index)
-                   << ", \"row_sum_f\": "
-                   << graph_capacitance_matrix_provider->rowSumCapacitanceF(config, circuit_model, node_index)
-                   << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
+            values.resize(export_row_count, values.empty() ? 0.0 : values.back());
+        }
+        else if (values.size() > export_row_count)
+        {
+            values.resize(export_row_count);
         }
     }
-    output << "  ],\n";
-    output << "  \"interfaces\": [\n";
-    if (circuit_model && graph_capacitance_matrix_provider)
+}
+
+bool validateExportScalarSeries(const Output::ColumnarDataSet& data_set, std::string& error_message)
+{
+    if (!data_set.isConsistent())
     {
-        for (std::size_t branch_index = 0; branch_index < circuit_model->branchCount(); ++branch_index)
+        for (const auto& [series_name, values] : data_set.scalar_series)
         {
-            const auto from_node = circuit_model->branchFromNodeIndex(branch_index);
-            const auto to_node = circuit_model->branchToNodeIndex(branch_index);
-            output << "    {\"index\": " << branch_index << ", \"name\": \""
-                   << jsonEscape(circuit_model->branchName(branch_index)) << "\", \"from_node\": \""
-                   << jsonEscape(circuit_model->nodeName(from_node)) << "\", \"to_node\": \""
-                   << jsonEscape(circuit_model->nodeName(to_node)) << "\", \"mutual_capacitance_f\": "
-                   << graph_capacitance_matrix_provider->mutualCapacitanceF(config, circuit_model, branch_index)
-                   << ", \"conductance_s\": " << circuit_model->branchConductanceS(branch_index)
-                   << "}";
-            output << (branch_index + 1 < circuit_model->branchCount() ? ",\n" : "\n");
+            if (values.size() != data_set.axis_values.size())
+            {
+                error_message =
+                    "Inconsistent surface result series before export: " + series_name +
+                    " expected=" + std::to_string(data_set.axis_values.size()) + " actual=" +
+                    std::to_string(values.size());
+                return false;
+            }
         }
-    }
-    output << "  ]\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeSurfaceFieldSolverAdapterContractReport(
-    const std::filesystem::path& report_path, const SurfaceFieldSolverAdapter* field_solver_adapter,
-    const SurfaceGraphCapacitanceMatrixProvider* graph_capacitance_matrix_provider,
-    const SurfaceCircuitModel* circuit_model)
-{
-    std::ofstream output(report_path);
-    if (!output.is_open())
-    {
+        error_message = "Inconsistent surface result data set before export";
         return false;
     }
-
-    output << "surface_field_solver_adapter="
-           << (field_solver_adapter ? field_solver_adapter->modelName() : "BuiltinFieldSolverAdapter")
-           << "\n";
-    output << "surface_graph_capacitance_matrix_provider="
-           << (graph_capacitance_matrix_provider ? graph_capacitance_matrix_provider->modelName()
-                                                 : "BuiltinGraphCapacitance")
-           << "\n";
-    output << "surface_graph_capacitance_matrix_family="
-           << (graph_capacitance_matrix_provider ? graph_capacitance_matrix_provider->matrixFamilyName()
-                                                 : "BuiltinMatrixFamily")
-           << "\n";
-    output << "surface_graph_capacitance_solver_adapter_hint="
-           << (graph_capacitance_matrix_provider ? graph_capacitance_matrix_provider->solverAdapterHint()
-                                                 : "BuiltinFieldSolverAdapter")
-           << "\n";
-    output << "expects_node_reference_inputs=1\n";
-    output << "expects_node_charge_inputs=1\n";
-    output << "expects_node_field_inputs=1\n";
-    output << "expects_graph_capacitance_inputs="
-           << (graph_capacitance_matrix_provider ? 1 : 0) << "\n";
-    output << "supports_patch_nodes=1\n";
-    output << "supports_body_nodes=1\n";
-    output << "supports_mutual_matrix="
-           << (graph_capacitance_matrix_provider &&
-                       graph_capacitance_matrix_provider->exposesMutualMatrix()
-                   ? 1
-                   : 0)
-           << "\n";
-    output << "supports_diagonal_matrix="
-           << (graph_capacitance_matrix_provider &&
-                       graph_capacitance_matrix_provider->exposesDiagonalMatrix()
-                   ? 1
-                   : 0)
-           << "\n";
-    output << "node_count=" << (circuit_model ? circuit_model->nodeCount() : 0) << "\n";
-    output << "branch_count=" << (circuit_model ? circuit_model->branchCount() : 0) << "\n";
-    return true;
-}
-
-bool writeSurfaceFieldSolverAdapterContractJson(
-    const std::filesystem::path& json_path, const SurfaceFieldSolverAdapter* field_solver_adapter,
-    const SurfaceGraphCapacitanceMatrixProvider* graph_capacitance_matrix_provider,
-    const SurfaceCircuitModel* circuit_model)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
+    if (!data_set.hasOnlyFiniteValues())
     {
-        return false;
-    }
-
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.field_solver_adapter_contract.v1\",\n";
-    output << "  \"surface_field_solver_adapter\": \""
-           << jsonEscape(field_solver_adapter ? field_solver_adapter->modelName()
-                                              : "BuiltinFieldSolverAdapter")
-           << "\",\n";
-    output << "  \"surface_graph_capacitance_matrix_provider\": \""
-           << jsonEscape(graph_capacitance_matrix_provider
-                             ? graph_capacitance_matrix_provider->modelName()
-                             : "BuiltinGraphCapacitance")
-           << "\",\n";
-    output << "  \"surface_graph_capacitance_matrix_family\": \""
-           << jsonEscape(graph_capacitance_matrix_provider
-                             ? graph_capacitance_matrix_provider->matrixFamilyName()
-                             : "BuiltinMatrixFamily")
-           << "\",\n";
-    output << "  \"surface_graph_capacitance_solver_adapter_hint\": \""
-           << jsonEscape(graph_capacitance_matrix_provider
-                             ? graph_capacitance_matrix_provider->solverAdapterHint()
-                             : "BuiltinFieldSolverAdapter")
-           << "\",\n";
-    output << "  \"expects_node_reference_inputs\": true,\n";
-    output << "  \"expects_node_charge_inputs\": true,\n";
-    output << "  \"expects_node_field_inputs\": true,\n";
-    output << "  \"expects_graph_capacitance_inputs\": "
-           << (graph_capacitance_matrix_provider ? "true" : "false") << ",\n";
-    output << "  \"supports_patch_nodes\": true,\n";
-    output << "  \"supports_body_nodes\": true,\n";
-    output << "  \"supports_mutual_matrix\": "
-           << ((graph_capacitance_matrix_provider &&
-                graph_capacitance_matrix_provider->exposesMutualMatrix())
-                   ? "true"
-                   : "false")
-           << ",\n";
-    output << "  \"supports_diagonal_matrix\": "
-           << ((graph_capacitance_matrix_provider &&
-                graph_capacitance_matrix_provider->exposesDiagonalMatrix())
-                   ? "true"
-                   : "false")
-           << ",\n";
-    output << "  \"node_count\": " << (circuit_model ? circuit_model->nodeCount() : 0) << ",\n";
-    output << "  \"branch_count\": " << (circuit_model ? circuit_model->branchCount() : 0) << "\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeSharedSurfaceRuntimeObserverJson(
-    const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
-    const SurfaceCircuitModel* circuit_model, const std::vector<double>& time_history,
-    const std::vector<double>& shared_patch_potential_history,
-    const std::vector<double>& shared_patch_area_history,
-    const std::vector<double>& shared_reference_potential_history,
-    const std::vector<double>& shared_effective_sheath_length_history,
-    const std::vector<double>& shared_sheath_charge_history,
-    const std::vector<double>& shared_runtime_enabled_history,
-    const std::vector<std::vector<double>>& node_potential_history,
-    const std::vector<std::vector<double>>& node_shared_runtime_enabled_history,
-    const std::vector<std::vector<double>>& node_shared_patch_potential_history,
-    const std::vector<std::vector<double>>& node_shared_reference_potential_history,
-    const std::vector<std::vector<double>>& node_shared_sheath_charge_history)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    const auto latest_scalar = [](const std::vector<double>& values) {
-        return values.empty() ? 0.0 : values.back();
-    };
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.surface_shared_runtime_observer.v1\",\n";
-    output << "  \"contract_id\": \"surface-pic-boundary-observer-v1\",\n";
-    output << "  \"runtime_route\": \"" << runtimeRouteName(config.runtime_route) << "\",\n";
-    output << "  \"surface_pic_runtime\": \"" << surfacePicRuntimeName(config.surface_pic_runtime_kind)
-           << "\",\n";
-    output << "  \"surface_pic_strategy\": \""
-           << surfacePicStrategyName(config.surface_pic_strategy) << "\",\n";
-    output << "  \"shared_runtime_enabled\": "
-           << (latest_scalar(shared_runtime_enabled_history) >= 0.5 ? "true" : "false") << ",\n";
-    output << "  \"sample_count\": " << time_history.size() << ",\n";
-    output << "  \"latest_time_s\": " << latest_scalar(time_history) << ",\n";
-    output << "  \"shared_surface\": {\n";
-    output << "    \"latest_patch_potential_v\": "
-           << latest_scalar(shared_patch_potential_history) << ",\n";
-    output << "    \"latest_patch_area_m2\": " << latest_scalar(shared_patch_area_history) << ",\n";
-    output << "    \"latest_reference_potential_v\": "
-           << latest_scalar(shared_reference_potential_history) << ",\n";
-    output << "    \"latest_effective_sheath_length_m\": "
-           << latest_scalar(shared_effective_sheath_length_history) << ",\n";
-    output << "    \"latest_sheath_charge_c\": " << latest_scalar(shared_sheath_charge_history)
-           << "\n";
-    output << "  },\n";
-    output << "  \"nodes\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
+        for (const auto& [series_name, values] : data_set.scalar_series)
         {
-            output << "    {\"index\": " << node_index << ", \"name\": \""
-                   << jsonEscape(circuit_model->nodeName(node_index)) << "\", \"is_patch\": "
-                   << (circuit_model->nodeIsPatch(node_index) ? "true" : "false")
-                   << ", \"latest_potential_v\": "
-                   << latestHistoryValue(node_potential_history, node_index)
-                   << ", \"shared_runtime_enabled\": "
-                   << (latestHistoryValue(node_shared_runtime_enabled_history, node_index) >= 0.5
-                           ? "true"
-                           : "false")
-                   << ", \"latest_shared_patch_potential_v\": "
-                   << latestHistoryValue(node_shared_patch_potential_history, node_index)
-                   << ", \"latest_shared_reference_potential_v\": "
-                   << latestHistoryValue(node_shared_reference_potential_history, node_index)
-                   << ", \"latest_shared_sheath_charge_c\": "
-                   << latestHistoryValue(node_shared_sheath_charge_history, node_index) << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
+            for (const double value : values)
+            {
+                if (!std::isfinite(value))
+                {
+                    error_message =
+                        "Non-finite surface result series before export: " + series_name;
+                    return false;
+                }
+            }
         }
+        error_message = "Non-finite surface result data set before export";
+        return false;
     }
-    output << "  ]\n";
-    output << "}\n";
     return true;
 }
 
+void prependLegacyBenchmarkInitialRuntimeSample(
+    std::vector<LegacyBenchmarkCurveSample>& curve, ReferenceSurfaceRole role,
+    std::size_t node_index, const std::string& node_name, double node_area_m2,
+    double conductivity_s_per_m, double initial_body_potential_v,
+    double initial_patch_potential_v, double effective_sheath_length_m,
+    const std::function<SurfaceModelRuntimeState(double, double, double, double, double,
+                                                 std::size_t, const std::string&)>&
+        build_runtime_state,
+    const std::function<SurfaceCurrents(ReferenceSurfaceRole, const SurfaceModelRuntimeState&)>&
+        evaluate_currents)
+{
+    if (curve.empty() || !(curve.front().time_s > 1.0e-12))
+    {
+        return;
+    }
+
+    LegacyBenchmarkCurveSample initial_sample;
+    initial_sample.cycle_index = 0;
+    initial_sample.time_s = 0.0;
+    const auto runtime_state = build_runtime_state(
+        initial_body_potential_v, initial_patch_potential_v, std::max(1.0e-16, node_area_m2),
+        conductivity_s_per_m, effective_sheath_length_m, node_index, node_name);
+    const SurfaceCurrents initial_currents = evaluate_currents(role, runtime_state);
+    initial_sample.potential_v =
+        role == ReferenceSurfaceRole::Body ? initial_body_potential_v : initial_patch_potential_v;
+    initial_sample.jnet_a_per_m2 = initial_currents.total_current_a_per_m2;
+    initial_sample.je_a_per_m2 = initial_currents.electron_current_a_per_m2;
+    initial_sample.jse_a_per_m2 = initial_currents.secondary_emission_a_per_m2;
+    initial_sample.jb_a_per_m2 = initial_currents.backscatter_emission_a_per_m2;
+    initial_sample.ji_a_per_m2 = initial_currents.ion_current_a_per_m2;
+    initial_sample.jsi_a_per_m2 = initial_currents.ion_secondary_emission_a_per_m2;
+    initial_sample.jph_a_per_m2 = initial_currents.photo_emission_a_per_m2;
+    initial_sample.jcond_a_per_m2 = initial_currents.conduction_current_a_per_m2;
+
+    for (auto& sample : curve)
+    {
+        sample.cycle_index += 1;
+    }
+    curve.insert(curve.begin(), initial_sample);
+}
+
+void buildLegacyBenchmarkDisplayCurves(
+    const std::vector<LegacyBenchmarkCurveSample>& actual_patch_curve,
+    const std::vector<LegacyBenchmarkCurveSample>& actual_body_curve,
+    std::vector<LegacyBenchmarkCurveSample>& display_patch_curve,
+    std::vector<LegacyBenchmarkCurveSample>& display_body_curve,
+    std::size_t patch_node_index, const std::string& patch_node_name, double patch_area_m2,
+    std::size_t body_node_index, const std::string& body_node_name, double body_area_m2,
+    double initial_body_potential_v, double initial_patch_potential_v,
+    double conductivity_s_per_m, double effective_sheath_length_m,
+    const std::function<SurfaceModelRuntimeState(double, double, double, double, double,
+                                                 std::size_t, const std::string&)>&
+        build_runtime_state,
+    const std::function<SurfaceCurrents(ReferenceSurfaceRole, const SurfaceModelRuntimeState&)>&
+        evaluate_currents)
+{
+    display_patch_curve = actual_patch_curve;
+    display_body_curve = actual_body_curve;
+
+    prependLegacyBenchmarkInitialRuntimeSample(
+        display_patch_curve, ReferenceSurfaceRole::Patch, patch_node_index, patch_node_name,
+        patch_area_m2, conductivity_s_per_m, initial_body_potential_v,
+        initial_patch_potential_v, effective_sheath_length_m, build_runtime_state,
+        evaluate_currents);
+    prependLegacyBenchmarkInitialRuntimeSample(
+        display_body_curve, ReferenceSurfaceRole::Body, body_node_index, body_node_name,
+        body_area_m2, conductivity_s_per_m, initial_body_potential_v,
+        initial_patch_potential_v, effective_sheath_length_m, build_runtime_state,
+        evaluate_currents);
+}
+
+struct BenchmarkCaseArtifactInputs
+{
+    const SurfaceChargingConfig& config;
+    const std::filesystem::path& csv_path;
+    const std::filesystem::path& benchmark_case_path;
+    SurfaceBenchmarkSource resolved_benchmark_source;
+    const LegacyBenchmarkCaseDefinition& benchmark_case_definition;
+    const LegacyBenchmarkMetrics& benchmark_patch_metrics;
+    const LegacyBenchmarkMetrics& benchmark_body_metrics;
+    const LegacyBenchmarkAcceptanceCriteria& benchmark_acceptance;
+    const LegacyBenchmarkAcceptanceGateResult& benchmark_acceptance_gate;
+    const std::vector<Coupling::Contracts::ValidationMetric>&
+        benchmark_process_validation_metrics;
+    bool have_benchmark_definition = false;
+    double final_surface_potential_v = 0.0;
+    double final_surface_charge_c_per_m2 = 0.0;
+    double final_total_current_density_a_per_m2 = 0.0;
+    double final_current_derivative_a_per_m2_per_v = 0.0;
+    double final_capacitance_per_area_f_per_m2 = 0.0;
+    double final_effective_conductivity_s_per_m = 0.0;
+    double final_normal_electric_field_v_per_m = 0.0;
+    double total_live_pic_collision_events = 0.0;
+    double charge_conservation_drift_ratio = 0.0;
+    double shared_global_coupled_convergence_failure_rate = 0.0;
+    double global_sheath_field_residual_v_per_m = 0.0;
+    double global_particle_field_coupled_residual_v = 0.0;
+    double global_sheath_field_linear_residual_norm_v = 0.0;
+};
+
+struct BenchmarkCaseDerivedValues
+{
+    std::string benchmark_case_id;
+    double benchmark_patch_relative_rmse = 0.0;
+    double benchmark_body_relative_rmse = 0.0;
+    double benchmark_curve_relative_rmse_max = 0.0;
+    double benchmark_absolute_tolerance_v = 1.0e-6;
+};
+
+double computeLegacyBenchmarkRelativeRmse(
+    const LegacyBenchmarkMetrics& metrics,
+    const std::vector<LegacyBenchmarkCurveSample>& reference_curve)
+{
+    if (!metrics.valid || reference_curve.empty())
+    {
+        return 0.0;
+    }
+
+    double min_potential_v = reference_curve.front().potential_v;
+    double max_potential_v = min_potential_v;
+    for (const auto& sample : reference_curve)
+    {
+        min_potential_v = std::min(min_potential_v, sample.potential_v);
+        max_potential_v = std::max(max_potential_v, sample.potential_v);
+    }
+
+    const double scale_v =
+        std::max({1.0, std::abs(max_potential_v - min_potential_v), std::abs(max_potential_v),
+                  std::abs(min_potential_v)});
+    return metrics.rmse_v / scale_v;
+}
+
+BenchmarkCaseDerivedValues deriveBenchmarkCaseArtifactValues(
+    const BenchmarkCaseArtifactInputs& inputs)
+{
+    BenchmarkCaseDerivedValues derived;
+    derived.benchmark_case_id = !inputs.config.reference_matrix_case_id.empty()
+                                    ? inputs.config.reference_matrix_case_id
+                                : !inputs.config.reference_case_id.empty()
+                                    ? inputs.config.reference_case_id
+                                : inputs.resolved_benchmark_source != SurfaceBenchmarkSource::None
+                                    ? benchmarkSourceName(inputs.resolved_benchmark_source)
+                                    : inputs.csv_path.stem().string();
+    derived.benchmark_patch_relative_rmse = computeLegacyBenchmarkRelativeRmse(
+        inputs.benchmark_patch_metrics, inputs.benchmark_case_definition.patch_reference_curve);
+    derived.benchmark_body_relative_rmse = computeLegacyBenchmarkRelativeRmse(
+        inputs.benchmark_body_metrics, inputs.benchmark_case_definition.body_reference_curve);
+    derived.benchmark_curve_relative_rmse_max =
+        std::max(derived.benchmark_patch_relative_rmse, derived.benchmark_body_relative_rmse);
+    const double benchmark_rmse_tolerance_v =
+        std::max(inputs.benchmark_acceptance.patch_rmse_v_max,
+                 inputs.benchmark_acceptance.body_rmse_v_max);
+    derived.benchmark_absolute_tolerance_v = std::max(1.0e-6, benchmark_rmse_tolerance_v);
+    return derived;
+}
+
+void appendSurfaceBenchmarkCoreValidationMetrics(
+    Coupling::Contracts::BenchmarkCase& benchmark_case,
+    const BenchmarkCaseArtifactInputs& inputs)
+{
+    benchmark_case.validation_metrics.push_back(
+        {"final_surface_potential_v", inputs.final_surface_potential_v, "V"});
+    benchmark_case.validation_metrics.push_back(
+        {"final_surface_charge_density_c_per_m2", inputs.final_surface_charge_c_per_m2, "C/m2"});
+    benchmark_case.validation_metrics.push_back(
+        {"final_total_current_density_a_per_m2", inputs.final_total_current_density_a_per_m2,
+         "A/m2"});
+    benchmark_case.validation_metrics.push_back(
+        {"final_current_derivative_a_per_m2_per_v",
+         inputs.final_current_derivative_a_per_m2_per_v, "A/m2/V"});
+    benchmark_case.validation_metrics.push_back(
+        {"final_capacitance_per_area_f_per_m2", inputs.final_capacitance_per_area_f_per_m2,
+         "F/m2"});
+    benchmark_case.validation_metrics.push_back(
+        {"final_effective_conductivity_s_per_m", inputs.final_effective_conductivity_s_per_m,
+         "S/m"});
+    benchmark_case.validation_metrics.push_back(
+        {"final_normal_electric_field_v_per_m", inputs.final_normal_electric_field_v_per_m,
+         "V/m"});
+    benchmark_case.validation_metrics.push_back(
+        {"live_pic_collision_event_total", inputs.total_live_pic_collision_events, "count"});
+    benchmark_case.validation_metrics.push_back(
+        {"charge_conservation_drift_ratio", inputs.charge_conservation_drift_ratio, "ratio"});
+    benchmark_case.validation_metrics.push_back(
+        {"shared_global_coupled_convergence_failure_rate",
+         inputs.shared_global_coupled_convergence_failure_rate, "ratio"});
+    benchmark_case.validation_metrics.push_back(
+        {"global_sheath_field_residual_v_per_m", inputs.global_sheath_field_residual_v_per_m,
+         "V/m"});
+    benchmark_case.validation_metrics.push_back(
+        {"global_particle_field_coupled_residual_v",
+         inputs.global_particle_field_coupled_residual_v, "V"});
+    benchmark_case.validation_metrics.push_back(
+        {"global_sheath_field_linear_residual_norm_v",
+         inputs.global_sheath_field_linear_residual_norm_v, "V"});
+}
+
+void appendSurfaceBenchmarkResolvedValidationMetrics(
+    Coupling::Contracts::BenchmarkCase& benchmark_case,
+    const BenchmarkCaseArtifactInputs& inputs,
+    const BenchmarkCaseDerivedValues& derived)
+{
+    if (inputs.benchmark_patch_metrics.valid)
+    {
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_patch_rmse_v", inputs.benchmark_patch_metrics.rmse_v, "V"});
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_patch_relative_rmse", derived.benchmark_patch_relative_rmse, "ratio"});
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_patch_terminal_delta_v",
+             inputs.benchmark_patch_metrics.terminal_potential_delta_v, "V"});
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_patch_compared_sample_count",
+             static_cast<double>(inputs.benchmark_patch_metrics.compared_sample_count), "count"});
+    }
+    if (inputs.benchmark_body_metrics.valid)
+    {
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_body_rmse_v", inputs.benchmark_body_metrics.rmse_v, "V"});
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_body_relative_rmse", derived.benchmark_body_relative_rmse, "ratio"});
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_body_terminal_delta_v",
+             inputs.benchmark_body_metrics.terminal_potential_delta_v, "V"});
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_body_compared_sample_count",
+             static_cast<double>(inputs.benchmark_body_metrics.compared_sample_count), "count"});
+    }
+
+    benchmark_case.validation_metrics.insert(benchmark_case.validation_metrics.end(),
+                                             inputs.benchmark_process_validation_metrics.begin(),
+                                             inputs.benchmark_process_validation_metrics.end());
+    if (inputs.benchmark_acceptance_gate.applicable)
+    {
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_acceptance_gate_pass",
+             inputs.benchmark_acceptance_gate.pass ? 1.0 : 0.0, "flag"});
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_acceptance_gate_checks_failed",
+             static_cast<double>(inputs.benchmark_acceptance_gate.checks_failed), "count"});
+    }
+    if (inputs.benchmark_patch_metrics.valid || inputs.benchmark_body_metrics.valid)
+    {
+        benchmark_case.validation_metrics.push_back(
+            {"benchmark_curve_relative_rmse_max", derived.benchmark_curve_relative_rmse_max,
+             "ratio"});
+    }
+}
+
+void appendSurfaceBenchmarkReferenceDatasets(
+    Coupling::Contracts::BenchmarkCase& benchmark_case,
+    const BenchmarkCaseArtifactInputs& inputs,
+    const BenchmarkCaseDerivedValues& derived)
+{
+    if (!inputs.have_benchmark_definition)
+    {
+        return;
+    }
+
+    const std::string baseline_source =
+        legacyBenchmarkBaselineFamilyName(inputs.resolved_benchmark_source);
+    const std::string baseline_origin =
+        legacyBenchmarkBaselineOriginName(inputs.resolved_benchmark_source);
+    const auto append_reference_dataset =
+        [&](const std::string& id_suffix, const std::filesystem::path& path,
+            const std::string& citation_suffix) {
+            if (path.empty())
+            {
+                return;
+            }
+            benchmark_case.reference_datasets.push_back(
+                {derived.benchmark_case_id + "_" + id_suffix, baseline_source,
+                 baseline_origin + ":" + citation_suffix, path.string(), true});
+        };
+    append_reference_dataset("patch_curve",
+                             inputs.benchmark_case_definition.paths.patch_reference_curve_path,
+                             "patch_curve");
+    append_reference_dataset("body_curve",
+                             inputs.benchmark_case_definition.paths.body_reference_curve_path,
+                             "body_curve");
+    append_reference_dataset("input_deck", inputs.benchmark_case_definition.paths.input_path,
+                             "input_deck");
+    append_reference_dataset("environment_table",
+                             inputs.benchmark_case_definition.paths.environment_path,
+                             "environment_table");
+    append_reference_dataset("structure_material_table",
+                             inputs.benchmark_case_definition.paths.structure_material_path,
+                             "structure_material_table");
+    append_reference_dataset(
+        "dielectric_patch_material_table",
+        inputs.benchmark_case_definition.paths.dielectric_patch_material_path,
+        "dielectric_patch_material_table");
+    append_reference_dataset("metal_patch_material_table",
+                             inputs.benchmark_case_definition.paths.metal_patch_material_path,
+                             "metal_patch_material_table");
+}
+
+bool writeSurfaceBenchmarkCaseArtifact(const BenchmarkCaseArtifactInputs& inputs,
+                                       std::string& error_message)
+{
+    const auto derived = deriveBenchmarkCaseArtifactValues(inputs);
+
+    Coupling::Contracts::BenchmarkCase benchmark_case;
+    benchmark_case.id = derived.benchmark_case_id;
+    benchmark_case.module = "surface";
+    benchmark_case.reference_family =
+        inputs.config.reference_family.empty() ? "native" : inputs.config.reference_family;
+
+    appendSurfaceBenchmarkCoreValidationMetrics(benchmark_case, inputs);
+    appendSurfaceBenchmarkResolvedValidationMetrics(benchmark_case, inputs, derived);
+
+    benchmark_case.tolerance_profile.relative_tolerance =
+        benchmark_case.reference_family == "native" ? 0.0 : 0.10;
+    benchmark_case.tolerance_profile.absolute_tolerance = derived.benchmark_absolute_tolerance_v;
+    benchmark_case.tolerance_profile.rmse_tolerance = derived.benchmark_absolute_tolerance_v;
+    benchmark_case.tolerance_profile.drift_tolerance = 5.0e-3;
+
+    appendSurfaceBenchmarkReferenceDatasets(benchmark_case, inputs, derived);
+
+    if (!Coupling::Contracts::writeBenchmarkCaseJson(inputs.benchmark_case_path, benchmark_case,
+                                                     &error_message))
+    {
+        error_message = error_message.empty()
+                            ? "Failed to write benchmark case json to: " +
+                                  inputs.benchmark_case_path.string()
+                            : error_message;
+        return false;
+    }
+
+    return true;
+}
+
+std::string jsonEscape(const std::string& value);
+
+#if 0
 bool writeSharedSurfaceRuntimeConsistencyJson(
     const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
     const SurfaceCircuitModel* circuit_model,
@@ -2168,6 +2848,8 @@ bool writeSharedSurfaceRuntimeConsistencyJson(
     return true;
 }
 
+#endif
+#if 0
 bool writeSharedSurfaceParticleTransportDomainJson(
     const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
     const SurfaceCircuitModel* circuit_model,
@@ -2553,6 +3235,7 @@ bool writeSharedSurfaceParticleTransportDomainJson(
     return true;
 }
 
+#endif
 std::string jsonEscape(const std::string& value)
 {
     std::string escaped;
@@ -2597,6 +3280,7 @@ std::string logicalNodeIdFromName(const std::string& node_name)
     return node_name;
 }
 
+#if 0
 bool writeGlobalSurfaceParticleDomainJson(
     const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
     const SurfaceCircuitModel* circuit_model, const std::vector<double>& time_history,
@@ -3311,359 +3995,8 @@ bool writeGlobalSurfaceSheathFieldSolveJson(
     return true;
 }
 
+#endif
 std::string boundaryGroupIdForNode(const SurfaceChargingConfig& config, const std::string& node_name);
-
-bool writeSurfaceBoundaryMappingJson(const std::filesystem::path& json_path,
-                                     const SurfaceChargingConfig& config,
-                                     const SurfaceCircuitModel* circuit_model,
-                                     const SurfaceCircuitMappingState& mapping_state)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.surface_boundary_mapping.v1\",\n";
-    output << "  \"body_boundary_groups\": [\n";
-    for (std::size_t i = 0; i < config.body_boundary_groups.size(); ++i)
-    {
-        const auto& group = config.body_boundary_groups[i];
-        output << "    {\"id\": \"" << jsonEscape(group.id) << "\", \"body_id\": \""
-               << jsonEscape(group.body_id) << "\", \"external_group_name\": \""
-               << jsonEscape(group.external_group_name) << "\", \"boundary_face_ids\": [";
-        for (std::size_t j = 0; j < group.boundary_face_ids.size(); ++j)
-        {
-            if (j > 0)
-            {
-                output << ", ";
-            }
-            output << group.boundary_face_ids[j];
-        }
-        output << "]}";
-        output << (i + 1 < config.body_boundary_groups.size() ? ",\n" : "\n");
-    }
-    output << "  ],\n";
-    output << "  \"patch_boundary_groups\": [\n";
-    for (std::size_t i = 0; i < config.patch_boundary_groups.size(); ++i)
-    {
-        const auto& group = config.patch_boundary_groups[i];
-        output << "    {\"id\": \"" << jsonEscape(group.id) << "\", \"patch_id\": \""
-               << jsonEscape(group.patch_id) << "\", \"external_group_name\": \""
-               << jsonEscape(group.external_group_name) << "\", \"boundary_face_ids\": [";
-        for (std::size_t j = 0; j < group.boundary_face_ids.size(); ++j)
-        {
-            if (j > 0)
-            {
-                output << ", ";
-            }
-            output << group.boundary_face_ids[j];
-        }
-        output << "]}";
-        output << (i + 1 < config.patch_boundary_groups.size() ? ",\n" : "\n");
-    }
-    output << "  ],\n";
-    output << "  \"boundary_mappings\": [\n";
-    for (std::size_t i = 0; i < config.boundary_mappings.size(); ++i)
-    {
-        const auto& mapping = config.boundary_mappings[i];
-        output << "    {\"node_id\": \"" << jsonEscape(mapping.node_id)
-               << "\", \"boundary_group_id\": \"" << jsonEscape(mapping.boundary_group_id)
-               << "\", \"required\": " << (mapping.required ? "true" : "false") << "}";
-        output << (i + 1 < config.boundary_mappings.size() ? ",\n" : "\n");
-    }
-    output << "  ],\n";
-    output << "  \"surface_to_circuit\": [\n";
-    for (std::size_t surface_index = 0;
-         surface_index < mapping_state.surface_to_circuit_node_index.size();
-         ++surface_index)
-    {
-        const auto circuit_index = mapping_state.surface_to_circuit_node_index[surface_index];
-        const auto reduced_index =
-            circuit_index < mapping_state.circuit_to_reduced_node_index.size()
-                ? mapping_state.circuit_to_reduced_node_index[circuit_index]
-                : std::numeric_limits<std::size_t>::max();
-        const std::string node_name =
-            circuit_model != nullptr && circuit_index < circuit_model->nodeCount()
-                ? circuit_model->nodeName(circuit_index)
-                : ("node:" + std::to_string(circuit_index));
-        output << "    {\"surface_node_index\": " << surface_index
-               << ", \"circuit_node_index\": " << circuit_index
-               << ", \"node_name\": \"" << jsonEscape(node_name)
-               << "\", \"boundary_group_id\": \""
-               << jsonEscape(boundaryGroupIdForNode(config, node_name))
-               << "\", \"reduced_node_index\": ";
-        if (reduced_index == std::numeric_limits<std::size_t>::max())
-        {
-            output << "null";
-        }
-        else
-        {
-            output << reduced_index;
-        }
-        output << "}";
-        output << (surface_index + 1 < mapping_state.surface_to_circuit_node_index.size() ? ",\n"
-                                                                                           : "\n");
-    }
-    output << "  ],\n";
-    output << "  \"circuit_to_surface\": [\n";
-    for (std::size_t circuit_index = 0;
-         circuit_index < mapping_state.circuit_to_surface_node_indices.size();
-         ++circuit_index)
-    {
-        const auto reduced_index =
-            circuit_index < mapping_state.circuit_to_reduced_node_index.size()
-                ? mapping_state.circuit_to_reduced_node_index[circuit_index]
-                : std::numeric_limits<std::size_t>::max();
-        output << "    {\"circuit_node_index\": " << circuit_index
-               << ", \"node_name\": \""
-               << jsonEscape(circuit_model != nullptr && circuit_index < circuit_model->nodeCount()
-                                 ? circuit_model->nodeName(circuit_index)
-                                 : ("node:" + std::to_string(circuit_index)))
-               << "\", \"surface_node_indices\": [";
-        for (std::size_t j = 0; j < mapping_state.circuit_to_surface_node_indices[circuit_index].size();
-             ++j)
-        {
-            if (j > 0)
-            {
-                output << ", ";
-            }
-            output << mapping_state.circuit_to_surface_node_indices[circuit_index][j];
-        }
-        output << "], \"reduced_node_index\": ";
-        if (reduced_index == std::numeric_limits<std::size_t>::max())
-        {
-            output << "null";
-        }
-        else
-        {
-            output << reduced_index;
-        }
-        output << "}";
-        output << (circuit_index + 1 < mapping_state.circuit_to_surface_node_indices.size() ? ",\n"
-                                                                                            : "\n");
-    }
-    output << "  ],\n";
-    output << "  \"reduced_node_groups\": [\n";
-    for (std::size_t i = 0; i < mapping_state.reduced_node_groups.size(); ++i)
-    {
-        const auto& group = mapping_state.reduced_node_groups[i];
-        output << "    {\"reduced_node_index\": " << group.reduced_node_index
-               << ", \"group_id\": \"" << jsonEscape(group.group_id)
-               << "\", \"member_node_indices\": [";
-        for (std::size_t j = 0; j < group.member_node_indices.size(); ++j)
-        {
-            if (j > 0)
-            {
-                output << ", ";
-            }
-            output << group.member_node_indices[j];
-        }
-        output << "], \"total_area_m2\": " << group.total_area_m2 << "}";
-        output << (i + 1 < mapping_state.reduced_node_groups.size() ? ",\n" : "\n");
-    }
-    output << "  ]\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeExternalFieldSolveResultTemplateJson(const std::filesystem::path& json_path,
-                                               const SurfaceCircuitModel* circuit_model)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.external_field_result.v1\",\n";
-    output << "  \"nodes\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            output << "    {\"node_id\": \"" << jsonEscape(circuit_model->nodeName(node_index))
-                   << "\", \"reference_potential_v\": 0.000000000000"
-                   << ", \"normal_field_v_per_m\": 0.000000000000"
-                   << ", \"local_charge_density_c_per_m3\": 0.000000000000"
-                   << ", \"capacitance_scale\": 1.000000000000}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ]\n}\n";
-    return true;
-}
-
-bool writeExternalFieldSolveResultJson(
-    const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
-    const SurfaceCircuitModel* circuit_model,
-    const std::vector<std::vector<double>>& node_field_solver_reference_history,
-    const std::vector<std::vector<double>>& node_field_history,
-    const std::vector<std::vector<double>>& node_charge_history,
-    const std::vector<std::vector<double>>& node_field_solver_capacitance_scale_history)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.external_field_result.v1\",\n";
-    output << "  \"nodes\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            const auto node_name = circuit_model->nodeName(node_index);
-            output << "    {\"node_id\": \"" << jsonEscape(node_name)
-                   << "\", \"logical_node_id\": \""
-                   << jsonEscape(logicalNodeIdFromName(node_name))
-                   << "\", \"node_type\": \""
-                   << (circuit_model->nodeIsPatch(node_index) ? "patch" : "body")
-                   << "\", \"boundary_group_id\": \""
-                   << jsonEscape(boundaryGroupIdForNode(config, node_name))
-                   << "\", \"reference_potential_v\": "
-                   << latestHistoryValue(node_field_solver_reference_history, node_index)
-                   << ", \"normal_field_v_per_m\": "
-                   << latestHistoryValue(node_field_history, node_index)
-                   << ", \"local_charge_density_c_per_m3\": "
-                   << latestHistoryValue(node_charge_history, node_index)
-                   << ", \"capacitance_scale\": "
-                   << latestHistoryValue(node_field_solver_capacitance_scale_history, node_index)
-                   << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ]\n}\n";
-    return true;
-}
-
-bool writeExternalFieldSolveRequestJson(
-    const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
-    const SurfaceCircuitModel* circuit_model, const SurfaceGraphCapacitanceMatrixProvider* matrix_provider,
-    const SurfaceFieldSolverAdapter* field_solver_adapter,
-    const std::vector<std::vector<double>>& node_potential_history,
-    const std::vector<std::vector<double>>& node_total_current_history,
-    const std::vector<std::vector<double>>& node_field_history,
-    const std::vector<std::vector<double>>& node_charge_history,
-    const std::vector<std::vector<double>>& node_graph_capacitance_history,
-    const std::vector<std::vector<double>>& node_graph_capacitance_row_sum_history,
-    const std::vector<std::vector<double>>& node_field_solver_capacitance_scale_history,
-    const std::vector<std::vector<double>>& branch_current_history)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.external_field_request.v1\",\n";
-    output << "  \"runtime_route\": \"" << runtimeRouteName(config.runtime_route) << "\",\n";
-    output << "  \"surface_pic_strategy\": \""
-           << surfacePicStrategyName(config.surface_pic_strategy) << "\",\n";
-    output << "  \"live_pic_collision_cross_section_set_id\": \""
-           << jsonEscape(config.live_pic_collision_cross_section_set_id) << "\",\n";
-    output << "  \"surface_circuit_model\": \""
-           << jsonEscape(circuit_model ? circuit_model->modelName() : "BuiltinCircuit") << "\",\n";
-    output << "  \"matrix_family\": \""
-           << jsonEscape(matrix_provider ? matrix_provider->matrixFamilyName() : "BuiltinMatrixFamily")
-           << "\",\n";
-    output << "  \"solver_adapter_hint\": \""
-           << jsonEscape(matrix_provider ? matrix_provider->solverAdapterHint()
-                                         : (field_solver_adapter ? field_solver_adapter->modelName()
-                                                                 : "BuiltinFieldSolverAdapter"))
-           << "\",\n";
-    output << "  \"nodes\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            output << "    {\"node_id\": \"" << jsonEscape(circuit_model->nodeName(node_index))
-                   << "\", \"logical_node_id\": \""
-                   << jsonEscape(logicalNodeIdFromName(circuit_model->nodeName(node_index)))
-                   << "\", \"node_type\": \""
-                   << (circuit_model->nodeIsPatch(node_index) ? "patch" : "body")
-                   << "\", \"potential_v\": "
-                   << latestHistoryValue(node_potential_history, node_index)
-                   << ", \"total_current_density_a_per_m2\": "
-                   << latestHistoryValue(node_total_current_history, node_index)
-                   << ", \"normal_field_v_per_m\": "
-                   << latestHistoryValue(node_field_history, node_index)
-                   << ", \"local_charge_density_c_per_m3\": "
-                   << latestHistoryValue(node_charge_history, node_index)
-                   << ", \"graph_capacitance_diagonal_f\": "
-                   << latestHistoryValue(node_graph_capacitance_history, node_index)
-                   << ", \"graph_capacitance_row_sum_f\": "
-                   << latestHistoryValue(node_graph_capacitance_row_sum_history, node_index)
-                   << ", \"field_solver_capacitance_scale\": "
-                   << latestHistoryValue(node_field_solver_capacitance_scale_history, node_index)
-                   << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ],\n";
-    output << "  \"interfaces\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t branch_index = 0; branch_index < circuit_model->branchCount(); ++branch_index)
-        {
-            const auto from_node = circuit_model->branchFromNodeIndex(branch_index);
-            const auto to_node = circuit_model->branchToNodeIndex(branch_index);
-            output << "    {\"interface_id\": \"" << jsonEscape(circuit_model->branchName(branch_index))
-                   << "\", \"from_node\": \"" << jsonEscape(circuit_model->nodeName(from_node))
-                   << "\", \"to_node\": \"" << jsonEscape(circuit_model->nodeName(to_node))
-                   << "\", \"conductance_s\": " << circuit_model->branchConductanceS(branch_index)
-                   << ", \"current_a\": " << latestHistoryValue(branch_current_history, branch_index)
-                   << ", \"mutual_capacitance_f\": "
-                   << (matrix_provider ? matrix_provider->mutualCapacitanceF(config, circuit_model, branch_index)
-                                       : 0.0)
-                   << "}";
-            output << (branch_index + 1 < circuit_model->branchCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ],\n";
-    output << "  \"body_boundary_groups\": [\n";
-    for (std::size_t i = 0; i < config.body_boundary_groups.size(); ++i)
-    {
-        const auto& group = config.body_boundary_groups[i];
-        output << "    {\"id\": \"" << jsonEscape(group.id) << "\", \"body_id\": \""
-               << jsonEscape(group.body_id) << "\", \"external_group_name\": \""
-               << jsonEscape(group.external_group_name) << "\", \"boundary_face_count\": "
-               << group.boundary_face_ids.size() << "}";
-        output << (i + 1 < config.body_boundary_groups.size() ? ",\n" : "\n");
-    }
-    output << "  ],\n";
-    output << "  \"patch_boundary_groups\": [\n";
-    for (std::size_t i = 0; i < config.patch_boundary_groups.size(); ++i)
-    {
-        const auto& group = config.patch_boundary_groups[i];
-        output << "    {\"id\": \"" << jsonEscape(group.id) << "\", \"patch_id\": \""
-               << jsonEscape(group.patch_id) << "\", \"external_group_name\": \""
-               << jsonEscape(group.external_group_name) << "\", \"boundary_face_count\": "
-               << group.boundary_face_ids.size() << "}";
-        output << (i + 1 < config.patch_boundary_groups.size() ? ",\n" : "\n");
-    }
-    output << "  ],\n";
-    output << "  \"boundary_mappings\": [\n";
-    for (std::size_t i = 0; i < config.boundary_mappings.size(); ++i)
-    {
-        const auto& mapping = config.boundary_mappings[i];
-        output << "    {\"node_id\": \"" << jsonEscape(mapping.node_id)
-               << "\", \"boundary_group_id\": \"" << jsonEscape(mapping.boundary_group_id)
-               << "\", \"required\": " << (mapping.required ? "true" : "false") << "}";
-        output << (i + 1 < config.boundary_mappings.size() ? ",\n" : "\n");
-    }
-    output << "  ]\n";
-    output << "}\n";
-    return true;
-}
 
 std::string boundaryGroupIdForNode(const SurfaceChargingConfig& config, const std::string& node_name)
 {
@@ -3827,867 +4160,6 @@ double boundaryFaceAreaForGroup(const SurfaceChargingConfig& config, const Surfa
     return 0.0;
 }
 
-bool writeExternalVolumeMeshStubJson(
-    const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
-    const SurfaceCircuitModel* circuit_model,
-    const std::vector<std::vector<double>>& node_potential_history,
-    const std::vector<std::vector<double>>& node_field_solver_reference_history,
-    const std::vector<std::vector<double>>& node_field_history,
-    const std::vector<std::vector<double>>& node_charge_history,
-    const std::vector<std::vector<double>>& node_field_solver_capacitance_scale_history,
-    const std::vector<std::vector<double>>& node_volume_potential_history,
-    const std::vector<std::vector<double>>& node_deposited_charge_history,
-    const std::vector<std::vector<double>>& node_poisson_residual_history)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    const double sheath_length_m =
-        std::clamp(config.sheath_length_m > 0.0 ? config.sheath_length_m : 1.0e-3,
-                   std::max(1.0e-6, config.minimum_sheath_length_m),
-                   std::max(config.minimum_sheath_length_m, config.maximum_sheath_length_m));
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.surface_volume_stub.v1\",\n";
-    output << "  \"pseudo_sheath_length_m\": " << sheath_length_m << ",\n";
-    output << "  \"cells\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            const auto node_name = circuit_model->nodeName(node_index);
-            const auto boundary_group_id = boundaryGroupIdForNode(config, node_name);
-            const double area_m2 = std::max(0.0, circuit_model->nodeAreaM2(node_index));
-            const double projection_weight = projectionWeightForNode(config, node_name);
-            const auto center = pseudoNodeCenterForNode(config, circuit_model, node_index);
-            output << "    {\"cell_id\": \"cell_" << node_index << "\", \"node_id\": \""
-                   << jsonEscape(node_name) << "\", \"logical_node_id\": \""
-                   << jsonEscape(logicalNodeIdFromName(node_name))
-                   << "\", \"node_type\": \""
-                   << (circuit_model->nodeIsPatch(node_index) ? "patch" : "body")
-                   << "\", \"boundary_group_id\": \"" << jsonEscape(boundary_group_id)
-                   << "\", \"pseudo_volume_m3\": " << (area_m2 * sheath_length_m * projection_weight)
-                   << ", \"center_x_m\": " << center[0]
-                   << ", \"center_y_m\": " << center[1]
-                   << ", \"center_z_m\": " << center[2]
-                   << ", \"characteristic_length_m\": " << std::sqrt(std::max(0.0, area_m2) / kPi)
-                   << ", \"potential_v\": " << latestHistoryValue(node_potential_history, node_index)
-                   << ", \"reference_potential_v\": "
-                   << latestHistoryValue(node_field_solver_reference_history, node_index)
-                   << ", \"normal_field_v_per_m\": "
-                   << latestHistoryValue(node_field_history, node_index)
-                   << ", \"local_charge_density_c_per_m3\": "
-                   << latestHistoryValue(node_charge_history, node_index)
-                   << ", \"volume_potential_v\": "
-                   << latestHistoryValue(node_volume_potential_history, node_index)
-                   << ", \"deposited_charge_c\": "
-                   << latestHistoryValue(node_deposited_charge_history, node_index)
-                   << ", \"poisson_residual_v_m\": "
-                   << latestHistoryValue(node_poisson_residual_history, node_index)
-                   << ", \"field_solver_capacitance_scale\": "
-                   << latestHistoryValue(node_field_solver_capacitance_scale_history, node_index)
-                   << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ]\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeVolumeMeshSkeletonJson(const std::filesystem::path& json_path,
-                                 const SurfaceChargingConfig& config,
-                                 const SurfaceCircuitModel* circuit_model,
-                                 const SurfaceVolumetricSolverAdapter* volumetric_solver_adapter)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.volume_mesh_stub.v1\",\n";
-    output << "  \"mesh_family\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->meshFamilyName()
-                                                   : "PseudoBoundaryVolumeMesh")
-           << "\",\n";
-    output << "  \"projection_family\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->projectionFamilyName()
-                                                   : "NodeToPseudoCellProjection")
-           << "\",\n";
-    output << "  \"supports_boundary_face_mapping\": "
-           << ((volumetric_solver_adapter && volumetric_solver_adapter->supportsBoundaryFaceMapping()) ? "true"
-                                                                                                        : "false")
-           << ",\n";
-    output << "  \"boundary_faces\": [\n";
-
-    bool first_face = true;
-    for (const auto& group : config.body_boundary_groups)
-    {
-        const auto runtime_name = "body:" + group.body_id;
-        const double face_area_m2 =
-            boundaryFaceAreaForGroup(config, circuit_model, group.id);
-        for (std::size_t local_face_index = 0; local_face_index < group.boundary_face_ids.size();
-             ++local_face_index)
-        {
-            const int face_id = group.boundary_face_ids[local_face_index];
-            std::size_t node_index = 0;
-            if (circuit_model != nullptr)
-            {
-                for (std::size_t candidate = 0; candidate < circuit_model->nodeCount(); ++candidate)
-                {
-                    if (circuit_model->nodeName(candidate) == runtime_name)
-                    {
-                        node_index = candidate;
-                        break;
-                    }
-                }
-            }
-            const auto center = pseudoNodeCenterForNode(config, circuit_model, node_index);
-            const auto normal = pseudoNodeNormalForNode(config, circuit_model, node_index);
-            if (!first_face)
-            {
-                output << ",\n";
-            }
-            first_face = false;
-            output << "    {\"face_id\": \"face_" << jsonEscape(group.id) << "_" << local_face_index
-                   << "\", \"boundary_group_id\": \"" << jsonEscape(group.id)
-                   << "\", \"node_id\": \"" << jsonEscape(runtime_name)
-                   << "\", \"external_face_id\": " << face_id
-                   << ", \"area_m2\": " << face_area_m2
-                   << ", \"center_x_m\": " << center[0]
-                   << ", \"center_y_m\": " << center[1]
-                   << ", \"center_z_m\": " << center[2]
-                   << ", \"normal_x\": " << normal[0]
-                   << ", \"normal_y\": " << normal[1]
-                   << ", \"normal_z\": " << normal[2] << "}";
-        }
-    }
-    for (const auto& group : config.patch_boundary_groups)
-    {
-        const auto runtime_name = "patch:" + group.patch_id;
-        const double face_area_m2 =
-            boundaryFaceAreaForGroup(config, circuit_model, group.id);
-        for (std::size_t local_face_index = 0; local_face_index < group.boundary_face_ids.size();
-             ++local_face_index)
-        {
-            const int face_id = group.boundary_face_ids[local_face_index];
-            std::size_t node_index = 0;
-            if (circuit_model != nullptr)
-            {
-                for (std::size_t candidate = 0; candidate < circuit_model->nodeCount(); ++candidate)
-                {
-                    if (circuit_model->nodeName(candidate) == runtime_name)
-                    {
-                        node_index = candidate;
-                        break;
-                    }
-                }
-            }
-            const auto center = pseudoNodeCenterForNode(config, circuit_model, node_index);
-            const auto normal = pseudoNodeNormalForNode(config, circuit_model, node_index);
-            if (!first_face)
-            {
-                output << ",\n";
-            }
-            first_face = false;
-            output << "    {\"face_id\": \"face_" << jsonEscape(group.id) << "_" << local_face_index
-                   << "\", \"boundary_group_id\": \"" << jsonEscape(group.id)
-                   << "\", \"node_id\": \"" << jsonEscape(runtime_name)
-                   << "\", \"external_face_id\": " << face_id
-                   << ", \"area_m2\": " << face_area_m2
-                   << ", \"center_x_m\": " << center[0]
-                   << ", \"center_y_m\": " << center[1]
-                   << ", \"center_z_m\": " << center[2]
-                   << ", \"normal_x\": " << normal[0]
-                   << ", \"normal_y\": " << normal[1]
-                   << ", \"normal_z\": " << normal[2] << "}";
-        }
-    }
-    if (!first_face)
-    {
-        output << "\n";
-    }
-    output << "  ],\n";
-    output << "  \"cells\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            const auto node_name = circuit_model->nodeName(node_index);
-            const auto boundary_group_id = boundaryGroupIdForNode(config, node_name);
-            const auto center = pseudoNodeCenterForNode(config, circuit_model, node_index);
-            const auto normal = pseudoNodeNormalForNode(config, circuit_model, node_index);
-            std::size_t linked_face_count = 0;
-            for (const auto& group : config.body_boundary_groups)
-            {
-                if (group.id == boundary_group_id)
-                {
-                    linked_face_count = group.boundary_face_ids.size();
-                }
-            }
-            for (const auto& group : config.patch_boundary_groups)
-            {
-                if (group.id == boundary_group_id)
-                {
-                    linked_face_count = group.boundary_face_ids.size();
-                }
-            }
-            output << "    {\"cell_id\": \"cell_" << node_index
-                   << "\", \"node_id\": \"" << jsonEscape(node_name)
-                   << "\", \"boundary_group_id\": \"" << jsonEscape(boundary_group_id)
-                   << "\", \"linked_face_count\": " << linked_face_count
-                   << ", \"node_area_m2\": " << std::max(0.0, circuit_model->nodeAreaM2(node_index))
-                   << ", \"center_x_m\": " << center[0]
-                   << ", \"center_y_m\": " << center[1]
-                   << ", \"center_z_m\": " << center[2]
-                   << ", \"surface_normal_x\": " << normal[0]
-                   << ", \"surface_normal_y\": " << normal[1]
-                   << ", \"surface_normal_z\": " << normal[2]
-                   << ", \"cell_volume_m3\": "
-                   << (std::max(0.0, circuit_model->nodeAreaM2(node_index)) *
-                       std::max(1.0e-6, config.sheath_length_m))
-                   << ", \"characteristic_length_m\": "
-                   << std::sqrt(std::max(0.0, circuit_model->nodeAreaM2(node_index)) / kPi)
-                   << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ],\n";
-    output << "  \"cell_neighbors\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t branch_index = 0; branch_index < circuit_model->branchCount(); ++branch_index)
-        {
-            const auto from_node = circuit_model->branchFromNodeIndex(branch_index);
-            const auto to_node = circuit_model->branchToNodeIndex(branch_index);
-            const auto from_center = pseudoNodeCenterForNode(config, circuit_model, from_node);
-            const auto to_center = pseudoNodeCenterForNode(config, circuit_model, to_node);
-            const auto face_center = std::array<double, 3>{
-                0.5 * (from_center[0] + to_center[0]),
-                0.5 * (from_center[1] + to_center[1]),
-                0.5 * (from_center[2] + to_center[2])};
-            output << "    {\"source_cell_id\": \"cell_" << from_node
-                   << "\", \"target_cell_id\": \"cell_" << to_node
-                   << "\", \"interface_id\": \"" << jsonEscape(circuit_model->branchName(branch_index))
-                   << "\", \"conductance_s\": " << circuit_model->branchConductanceS(branch_index)
-                   << ", \"resistance_ohm\": " << circuit_model->branchResistanceOhm(branch_index)
-                   << ", \"shared_face_area_m2\": "
-                   << (0.5 * std::min(std::max(0.0, circuit_model->nodeAreaM2(from_node)),
-                                      std::max(0.0, circuit_model->nodeAreaM2(to_node))))
-                   << ", \"face_distance_m\": "
-                   << std::max(1.0e-6,
-                               0.5 * (std::sqrt(std::max(0.0, circuit_model->nodeAreaM2(from_node)) / kPi) +
-                                      std::sqrt(std::max(0.0, circuit_model->nodeAreaM2(to_node)) / kPi)) +
-                                   std::max(1.0e-6, config.sheath_length_m))
-                   << ", \"face_center_x_m\": " << face_center[0]
-                   << ", \"face_center_y_m\": " << face_center[1]
-                   << ", \"face_center_z_m\": " << face_center[2]
-                   << ", \"permittivity_scale\": 1.0"
-                   << ", \"branch_type\": \"" << jsonEscape(branchTypeLabel(circuit_model, branch_index))
-                   << "\"}";
-            output << (branch_index + 1 < circuit_model->branchCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ],\n";
-    output << "  \"cell_faces\": [\n";
-    if (circuit_model != nullptr)
-    {
-        bool first_cell_face = true;
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            const auto node_name = circuit_model->nodeName(node_index);
-            const auto boundary_group_id = boundaryGroupIdForNode(config, node_name);
-            std::vector<int> boundary_face_ids;
-            for (const auto& group : config.body_boundary_groups)
-            {
-                if (group.id == boundary_group_id)
-                {
-                    boundary_face_ids = group.boundary_face_ids;
-                }
-            }
-            for (const auto& group : config.patch_boundary_groups)
-            {
-                if (group.id == boundary_group_id)
-                {
-                    boundary_face_ids = group.boundary_face_ids;
-                }
-            }
-            const double projection_weight = projectionWeightForNode(config, node_name);
-            for (std::size_t local_face_index = 0; local_face_index < boundary_face_ids.size();
-                 ++local_face_index)
-            {
-                if (!first_cell_face)
-                {
-                    output << ",\n";
-                }
-                first_cell_face = false;
-                output << "    {\"cell_id\": \"cell_" << node_index
-                       << "\", \"face_id\": \"face_" << jsonEscape(boundary_group_id) << "_"
-                       << local_face_index
-                       << "\", \"role\": \"boundary\", \"projection_weight\": "
-                       << projection_weight << "}";
-            }
-        }
-        if (!first_cell_face)
-        {
-            output << "\n";
-        }
-    }
-    output << "  ],\n";
-    output << "  \"face_neighbors\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t branch_index = 0; branch_index < circuit_model->branchCount(); ++branch_index)
-        {
-            const auto from_node = circuit_model->branchFromNodeIndex(branch_index);
-            const auto to_node = circuit_model->branchToNodeIndex(branch_index);
-            const auto from_group = boundaryGroupIdForNode(config, circuit_model->nodeName(from_node));
-            const auto to_group = boundaryGroupIdForNode(config, circuit_model->nodeName(to_node));
-            const auto from_center = pseudoNodeCenterForNode(config, circuit_model, from_node);
-            const auto to_center = pseudoNodeCenterForNode(config, circuit_model, to_node);
-            output << "    {\"source_boundary_group_id\": \"" << jsonEscape(from_group)
-                   << "\", \"target_boundary_group_id\": \"" << jsonEscape(to_group)
-                   << "\", \"interface_id\": \"" << jsonEscape(circuit_model->branchName(branch_index))
-                   << "\", \"center_distance_m\": "
-                   << std::sqrt((from_center[0] - to_center[0]) * (from_center[0] - to_center[0]) +
-                                (from_center[1] - to_center[1]) * (from_center[1] - to_center[1]) +
-                                (from_center[2] - to_center[2]) * (from_center[2] - to_center[2]))
-                   << ", \"branch_type\": \"" << jsonEscape(branchTypeLabel(circuit_model, branch_index))
-                   << "\"}";
-            output << (branch_index + 1 < circuit_model->branchCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ]\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeExternalFieldBridgeManifestJson(const std::filesystem::path& json_path,
-                                          const std::filesystem::path& csv_path,
-                                          const SurfaceChargingConfig& config,
-                                          const SurfaceCircuitModel* circuit_model,
-                                          const SurfaceFieldSolverAdapter* field_solver_adapter,
-                                          const SurfaceGraphCapacitanceMatrixProvider* matrix_provider)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    auto artifact = [&](const char* extension) {
-        auto path = csv_path;
-        path.replace_extension(extension);
-        return path;
-    };
-
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.field_bridge_manifest.v1\",\n";
-    output << "  \"bridge_enabled\": " << (config.enable_external_field_solver_bridge ? "true" : "false")
-           << ",\n";
-    output << "  \"runtime_route\": \"" << runtimeRouteName(config.runtime_route) << "\",\n";
-    output << "  \"surface_pic_strategy\": \""
-           << surfacePicStrategyName(config.surface_pic_strategy) << "\",\n";
-    output << "  \"surface_field_solver_adapter\": \""
-           << jsonEscape(field_solver_adapter ? field_solver_adapter->modelName()
-                                              : "BuiltinFieldSolverAdapter")
-           << "\",\n";
-    output << "  \"surface_graph_capacitance_matrix_family\": \""
-           << jsonEscape(matrix_provider ? matrix_provider->matrixFamilyName() : "BuiltinMatrixFamily")
-           << "\",\n";
-    output << "  \"node_count\": " << (circuit_model ? circuit_model->nodeCount() : 0) << ",\n";
-    output << "  \"branch_count\": " << (circuit_model ? circuit_model->branchCount() : 0) << ",\n";
-    output << "  \"artifacts\": {\n";
-    output << "    \"boundary_mapping_json\": \"" << jsonEscape(artifact(".boundary_mapping.json").string()) << "\",\n";
-    output << "    \"field_request_json\": \"" << jsonEscape(artifact(".field_request.json").string()) << "\",\n";
-    output << "    \"field_result_template_json\": \"" << jsonEscape(artifact(".field_result_template.json").string()) << "\",\n";
-    output << "    \"field_result_json\": \"" << jsonEscape(artifact(".field_result.json").string()) << "\",\n";
-    output << "    \"graph_matrix_json\": \"" << jsonEscape(artifact(".graph_matrix.json").string()) << "\",\n";
-    output << "    \"field_adapter_json\": \"" << jsonEscape(artifact(".field_adapter.json").string()) << "\",\n";
-    output << "    \"volume_stub_json\": \"" << jsonEscape(artifact(".volume_stub.json").string()) << "\",\n";
-    output << "    \"volume_mesh_stub_json\": \"" << jsonEscape(artifact(".volume_mesh_stub.json").string()) << "\"\n";
-    output << "  }\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeVolumeHistoryJson(
-    const std::filesystem::path& json_path, const SurfaceCircuitModel* circuit_model,
-    const std::vector<double>& time_history,
-    const std::vector<std::vector<double>>& node_potential_history,
-    const std::vector<std::vector<double>>& node_volume_potential_history,
-    const std::vector<std::vector<double>>& node_deposited_charge_history,
-    const std::vector<std::vector<double>>& node_poisson_residual_history,
-    const std::vector<std::vector<double>>& node_pseudo_volume_history,
-    const std::vector<std::vector<double>>& node_projection_weight_history,
-    const std::vector<std::vector<double>>& node_mesh_coupling_gain_history,
-    const std::vector<std::vector<double>>& node_solver_mode_history,
-    const std::vector<std::vector<double>>& node_solver_iterations_history,
-    const std::vector<std::vector<double>>& node_solver_linear_iterations_history,
-    const std::vector<std::vector<double>>& node_solver_converged_history,
-    const std::vector<std::vector<double>>& node_solver_residual_history,
-    const std::vector<std::vector<double>>& node_solver_max_delta_history,
-    const std::vector<std::vector<double>>& node_solver_matrix_nnz_history,
-    const std::vector<std::vector<double>>& node_solver_cell_count_history,
-    const std::vector<std::vector<double>>& node_field_volume_coupling_iterations_history,
-    const std::vector<std::vector<double>>& node_field_volume_coupling_converged_history,
-    const std::vector<std::vector<double>>& node_field_volume_coupling_max_delta_history,
-    const std::vector<std::vector<double>>& node_field_volume_coupling_relaxation_used_history,
-    const std::vector<std::vector<double>>& node_external_volume_feedback_blend_factor_history,
-    const std::vector<std::vector<double>>& node_external_volume_feedback_mismatch_metric_history,
-    const std::vector<std::vector<double>>& node_external_volume_feedback_applied_history)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.volume_history.v1\",\n";
-    output << "  \"sample_count\": " << time_history.size() << ",\n";
-    output << "  \"times_s\": [";
-    for (std::size_t i = 0; i < time_history.size(); ++i)
-    {
-        if (i > 0)
-        {
-            output << ", ";
-        }
-        output << time_history[i];
-    }
-    output << "],\n";
-    output << "  \"nodes\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            if (node_index > 0)
-            {
-                output << ",\n";
-            }
-            auto write_series = [&](const char* key, const std::vector<std::vector<double>>& history) {
-                output << "      \"" << key << "\": [";
-                const auto& series = node_index < history.size() ? history[node_index]
-                                                                 : std::vector<double>{};
-                for (std::size_t i = 0; i < series.size(); ++i)
-                {
-                    if (i > 0)
-                    {
-                        output << ", ";
-                    }
-                    output << series[i];
-                }
-                output << "]";
-            };
-
-            output << "    {\n";
-            output << "      \"node_index\": " << node_index << ",\n";
-            output << "      \"node_name\": \"" << jsonEscape(circuit_model->nodeName(node_index))
-                   << "\",\n";
-            output << "      \"is_patch\": "
-                   << (circuit_model->nodeIsPatch(node_index) ? "true" : "false") << ",\n";
-            write_series("surface_potential_v", node_potential_history);
-            output << ",\n";
-            write_series("volume_potential_v", node_volume_potential_history);
-            output << ",\n";
-            write_series("deposited_charge_c", node_deposited_charge_history);
-            output << ",\n";
-            write_series("poisson_residual_v_m", node_poisson_residual_history);
-            output << ",\n";
-            write_series("pseudo_volume_m3", node_pseudo_volume_history);
-            output << ",\n";
-            write_series("projection_weight_sum", node_projection_weight_history);
-            output << ",\n";
-            write_series("mesh_coupling_gain", node_mesh_coupling_gain_history);
-            output << ",\n";
-            write_series("solver_mode_id", node_solver_mode_history);
-            output << ",\n";
-            write_series("solver_iterations", node_solver_iterations_history);
-            output << ",\n";
-            write_series("solver_linear_iterations", node_solver_linear_iterations_history);
-            output << ",\n";
-            write_series("solver_converged", node_solver_converged_history);
-            output << ",\n";
-            write_series("solver_residual_norm", node_solver_residual_history);
-            output << ",\n";
-            write_series("solver_max_delta_v", node_solver_max_delta_history);
-            output << ",\n";
-            write_series("solver_matrix_nnz", node_solver_matrix_nnz_history);
-            output << ",\n";
-            write_series("solver_cell_count", node_solver_cell_count_history);
-            output << ",\n";
-            write_series("field_volume_coupling_iterations",
-                         node_field_volume_coupling_iterations_history);
-            output << ",\n";
-            write_series("field_volume_coupling_converged",
-                         node_field_volume_coupling_converged_history);
-            output << ",\n";
-            write_series("field_volume_coupling_max_delta",
-                         node_field_volume_coupling_max_delta_history);
-            output << ",\n";
-            write_series("field_volume_coupling_relaxation_used",
-                         node_field_volume_coupling_relaxation_used_history);
-            output << ",\n";
-            write_series("external_volume_feedback_blend_factor",
-                         node_external_volume_feedback_blend_factor_history);
-            output << ",\n";
-            write_series("external_volume_feedback_mismatch_metric",
-                         node_external_volume_feedback_mismatch_metric_history);
-            output << ",\n";
-            write_series("external_volume_feedback_applied",
-                         node_external_volume_feedback_applied_history);
-            output << "\n    }";
-        }
-        output << "\n";
-    }
-    output << "  ]\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeSurfaceVolumeProjectionJson(const std::filesystem::path& json_path,
-                                      const SurfaceChargingConfig& config,
-                                      const SurfaceCircuitModel* circuit_model,
-                                      const SurfaceVolumetricSolverAdapter* volumetric_solver_adapter)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.surface_volume_projection.v1\",\n";
-    output << "  \"projection_family\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->projectionFamilyName()
-                                                   : "NodeToPseudoCellProjection")
-           << "\",\n";
-    output << "  \"mesh_family\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->meshFamilyName()
-                                                   : "PseudoBoundaryVolumeMesh")
-           << "\",\n";
-    output << "  \"supports_projection_weights\": "
-           << ((volumetric_solver_adapter && volumetric_solver_adapter->supportsProjectionWeights()) ? "true"
-                                                                                                      : "false")
-           << ",\n";
-    output << "  \"surface_to_volume\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            const auto node_name = circuit_model->nodeName(node_index);
-            const double projection_weight = projectionWeightForNode(config, node_name);
-            output << "    {\"node_id\": \"" << jsonEscape(node_name) << "\", \"cell_id\": \"cell_"
-                   << node_index << "\", \"boundary_group_id\": \""
-                   << jsonEscape(boundaryGroupIdForNode(config, node_name)) << "\", \"weight\": "
-                   << projection_weight << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ],\n";
-    output << "  \"projection_weights\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            const auto node_name = circuit_model->nodeName(node_index);
-            const double projection_weight = projectionWeightForNode(config, node_name);
-            output << "    {\"node_id\": \"" << jsonEscape(node_name)
-                   << "\", \"cell_id\": \"cell_" << node_index
-                   << "\", \"boundary_group_id\": \"" << jsonEscape(boundaryGroupIdForNode(config, node_name))
-                   << "\", \"surface_to_volume_weight\": " << projection_weight
-                   << ", \"volume_to_surface_weight\": " << projection_weight << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ],\n";
-    output << "  \"volume_to_surface\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            const auto node_name = circuit_model->nodeName(node_index);
-            const double projection_weight = projectionWeightForNode(config, node_name);
-            output << "    {\"cell_id\": \"cell_" << node_index << "\", \"node_id\": \""
-                   << jsonEscape(node_name) << "\", \"boundary_group_id\": \""
-                   << jsonEscape(boundaryGroupIdForNode(config, node_name)) << "\", \"weight\": "
-                   << projection_weight << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ]\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeVolumetricSolverAdapterContractJson(
-    const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
-    const SurfaceVolumetricSolverAdapter* volumetric_solver_adapter,
-    const SurfaceCircuitModel* circuit_model)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << "{\n";
-    output << "  \"schema_version\": \"scdat.volumetric_solver_adapter_contract.v1\",\n";
-    output << "  \"volumetric_solver_adapter\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->modelName()
-                                                   : "BuiltinVolumetricAdapter")
-           << "\",\n";
-    output << "  \"projection_family\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->projectionFamilyName()
-                                                   : "NodeToPseudoCellProjection")
-           << "\",\n";
-    output << "  \"mesh_family\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->meshFamilyName()
-                                                   : "PseudoBoundaryVolumeMesh")
-           << "\",\n";
-    output << "  \"request_schema_version\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->requestSchemaVersion()
-                                                   : "scdat.external_volume_request.v1")
-           << "\",\n";
-    output << "  \"result_schema_version\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->resultSchemaVersion()
-                                                   : "scdat.external_volume_result.v1")
-           << "\",\n";
-    output << "  \"supports_surface_to_volume_projection\": true,\n";
-    output << "  \"supports_volume_to_surface_projection\": true,\n";
-    output << "  \"supports_boundary_face_mapping\": "
-           << ((volumetric_solver_adapter && volumetric_solver_adapter->supportsBoundaryFaceMapping())
-                   ? "true"
-                   : "false")
-           << ",\n";
-    output << "  \"supports_projection_weights\": "
-           << ((volumetric_solver_adapter && volumetric_solver_adapter->supportsProjectionWeights())
-                   ? "true"
-                   : "false")
-           << ",\n";
-    output << "  \"supports_cell_centers\": true,\n";
-    output << "  \"supports_face_centers\": true,\n";
-    output << "  \"supports_face_normals\": true,\n";
-    output << "  \"supports_neighbor_face_geometry\": true,\n";
-    output << "  \"supports_cell_face_links\": true,\n";
-    output << "  \"supports_cell_volume_override\": true,\n";
-    output << "  \"supports_cell_initial_state\": true,\n";
-    output << "  \"solver_mode_hint\": \""
-           << volumeLinearSolverPolicyName(config.volume_linear_solver_policy) << "\",\n";
-    output << "  \"node_count\": " << (circuit_model ? circuit_model->nodeCount() : 0) << ",\n";
-    output << "  \"branch_count\": " << (circuit_model ? circuit_model->branchCount() : 0) << "\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeExternalVolumeSolveRequestJson(const std::filesystem::path& json_path,
-                                         const std::filesystem::path& csv_path,
-                                         const SurfaceChargingConfig& config,
-                                         const SurfaceCircuitModel* circuit_model,
-                                         const SurfaceVolumetricSolverAdapter* volumetric_solver_adapter)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    auto artifact = [&](const char* extension) {
-        auto path = csv_path;
-        path.replace_extension(extension);
-        return path;
-    };
-
-    output << "{\n";
-    output << "  \"schema_version\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->requestSchemaVersion()
-                                                   : "scdat.external_volume_request.v1")
-           << "\",\n";
-    output << "  \"runtime_route\": \"" << runtimeRouteName(config.runtime_route) << "\",\n";
-    output << "  \"surface_pic_strategy\": \""
-           << surfacePicStrategyName(config.surface_pic_strategy) << "\",\n";
-    output << "  \"volumetric_solver_adapter\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->modelName()
-                                                   : "BuiltinVolumetricAdapter")
-           << "\",\n";
-    output << "  \"projection_family\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->projectionFamilyName()
-                                                   : "NodeToPseudoCellProjection")
-           << "\",\n";
-    output << "  \"mesh_family\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->meshFamilyName()
-                                                   : "PseudoBoundaryVolumeMesh")
-           << "\",\n";
-    output << "  \"node_count\": " << (circuit_model ? circuit_model->nodeCount() : 0) << ",\n";
-    output << "  \"branch_count\": " << (circuit_model ? circuit_model->branchCount() : 0) << ",\n";
-    output << "  \"expects_cell_centers\": true,\n";
-    output << "  \"expects_face_centers\": true,\n";
-    output << "  \"expects_face_normals\": true,\n";
-    output << "  \"expects_neighbor_face_geometry\": true,\n";
-    output << "  \"expects_cell_face_links\": true,\n";
-    output << "  \"expects_cell_volume_override\": true,\n";
-    output << "  \"expects_cell_initial_state\": true,\n";
-    output << "  \"solver_mode_hint\": \""
-           << volumeLinearSolverPolicyName(config.volume_linear_solver_policy) << "\",\n";
-    output << "  \"linear_max_iterations\": "
-           << std::clamp<std::size_t>(config.volume_linear_max_iterations, 8, 4096) << ",\n";
-    output << "  \"linear_tolerance_scale\": "
-           << std::clamp(config.volume_linear_tolerance_scale, 0.01, 2.0) << ",\n";
-    output << "  \"linear_relaxation\": "
-           << std::clamp(config.volume_linear_relaxation, 0.2, 1.0) << ",\n";
-    output << "  \"field_volume_outer_iterations\": "
-           << std::clamp<std::size_t>(config.field_volume_outer_iterations, 1, 8) << ",\n";
-    output << "  \"field_volume_outer_tolerance\": "
-           << std::clamp(config.field_volume_outer_tolerance, 1.0e-9, 10.0) << ",\n";
-    output << "  \"field_volume_outer_relaxation\": "
-           << std::clamp(config.field_volume_outer_relaxation, 0.05, 1.0) << ",\n";
-    output << "  \"self_consistent_iterations\": "
-           << std::clamp<std::size_t>(config.volume_self_consistent_iterations, 1, 8) << ",\n";
-    output << "  \"self_consistent_tolerance_v\": "
-           << std::clamp(config.volume_self_consistent_tolerance_v, 1.0e-9, 1.0) << ",\n";
-    output << "  \"charge_relaxation\": "
-           << std::clamp(config.volume_charge_relaxation, 0.05, 1.0) << ",\n";
-    output << "  \"potential_relaxation\": "
-           << std::clamp(config.volume_potential_relaxation, 0.05, 1.0) << ",\n";
-    output << "  \"artifacts\": {\n";
-    output << "    \"volume_stub_json\": \"" << jsonEscape(artifact(".volume_stub.json").string()) << "\",\n";
-    output << "    \"volume_mesh_stub_json\": \"" << jsonEscape(artifact(".volume_mesh_stub.json").string()) << "\",\n";
-    output << "    \"surface_volume_projection_json\": \""
-           << jsonEscape(artifact(".surface_volume_projection.json").string()) << "\",\n";
-    output << "    \"graph_matrix_json\": \"" << jsonEscape(artifact(".graph_matrix.json").string()) << "\",\n";
-    output << "    \"field_request_json\": \"" << jsonEscape(artifact(".field_request.json").string()) << "\",\n";
-    output << "    \"volume_result_json\": \"" << jsonEscape(artifact(".volume_result.json").string()) << "\"\n";
-    output << "  }\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeExternalVolumeSolveResultTemplateJson(const std::filesystem::path& json_path,
-                                                const SurfaceCircuitModel* circuit_model,
-                                                const SurfaceVolumetricSolverAdapter* volumetric_solver_adapter)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->resultSchemaVersion()
-                                                   : "scdat.external_volume_result.v1")
-           << "\",\n";
-    output << "  \"cells\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            output << "    {\"cell_id\": \"cell_" << node_index
-                   << "\", \"potential_v\": 0.000000000000"
-                   << ", \"reference_potential_v\": 0.000000000000"
-                   << ", \"normal_field_v_per_m\": 0.000000000000"
-                   << ", \"local_charge_density_c_per_m3\": 0.000000000000"
-                   << ", \"capacitance_scale\": 1.000000000000"
-                   << ", \"coupling_gain\": 0.000000000000"
-                   << ", \"projection_weight_scale\": 1.000000000000"
-                   << ", \"sheath_length_scale\": 1.000000000000}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ]\n";
-    output << "}\n";
-    return true;
-}
-
-bool writeExternalVolumeSolveResultJson(
-    const std::filesystem::path& json_path, const SurfaceChargingConfig& config,
-    const SurfaceCircuitModel* circuit_model,
-    const SurfaceVolumetricSolverAdapter* volumetric_solver_adapter,
-    const std::vector<std::vector<double>>& node_potential_history,
-    const std::vector<std::vector<double>>& node_volume_potential_history,
-    const std::vector<std::vector<double>>& node_field_solver_reference_history,
-    const std::vector<std::vector<double>>& node_field_history,
-    const std::vector<std::vector<double>>& node_charge_history,
-    const std::vector<std::vector<double>>& node_field_solver_capacitance_scale_history,
-    const std::vector<std::vector<double>>& node_projection_weight_history,
-    const std::vector<std::vector<double>>& node_mesh_coupling_gain_history,
-    const std::vector<std::vector<double>>& node_effective_sheath_length_history)
-{
-    std::ofstream output(json_path);
-    if (!output.is_open())
-    {
-        return false;
-    }
-
-    const double nominal_sheath_length_m =
-        std::clamp(config.sheath_length_m > 0.0 ? config.sheath_length_m : 1.0e-3,
-                   std::max(1.0e-6, config.minimum_sheath_length_m),
-                   std::max(config.minimum_sheath_length_m, config.maximum_sheath_length_m));
-
-    output << std::fixed << std::setprecision(12);
-    output << "{\n";
-    output << "  \"schema_version\": \""
-           << jsonEscape(volumetric_solver_adapter ? volumetric_solver_adapter->resultSchemaVersion()
-                                                   : "scdat.external_volume_result.v1")
-           << "\",\n";
-    output << "  \"cells\": [\n";
-    if (circuit_model != nullptr)
-    {
-        for (std::size_t node_index = 0; node_index < circuit_model->nodeCount(); ++node_index)
-        {
-            const auto node_name = circuit_model->nodeName(node_index);
-            const double effective_sheath_length_m =
-                std::max(0.0, latestHistoryValue(node_effective_sheath_length_history, node_index));
-            const double sheath_length_scale =
-                effective_sheath_length_m > 0.0
-                    ? effective_sheath_length_m / std::max(1.0e-12, nominal_sheath_length_m)
-                    : 1.0;
-            double volume_potential_v = latestHistoryValue(node_volume_potential_history, node_index);
-            if (!std::isfinite(volume_potential_v))
-            {
-                volume_potential_v = latestHistoryValue(node_potential_history, node_index);
-            }
-
-            output << "    {\"cell_id\": \"cell_" << node_index
-                   << "\", \"node_id\": \"" << jsonEscape(node_name)
-                   << "\", \"logical_node_id\": \""
-                   << jsonEscape(logicalNodeIdFromName(node_name))
-                   << "\", \"node_type\": \""
-                   << (circuit_model->nodeIsPatch(node_index) ? "patch" : "body")
-                   << "\", \"boundary_group_id\": \""
-                   << jsonEscape(boundaryGroupIdForNode(config, node_name))
-                   << "\", \"potential_v\": " << volume_potential_v
-                   << ", \"reference_potential_v\": "
-                   << latestHistoryValue(node_field_solver_reference_history, node_index)
-                   << ", \"normal_field_v_per_m\": "
-                   << latestHistoryValue(node_field_history, node_index)
-                   << ", \"local_charge_density_c_per_m3\": "
-                   << latestHistoryValue(node_charge_history, node_index)
-                   << ", \"capacitance_scale\": "
-                   << latestHistoryValue(node_field_solver_capacitance_scale_history, node_index)
-                   << ", \"coupling_gain\": "
-                   << latestHistoryValue(node_mesh_coupling_gain_history, node_index)
-                   << ", \"projection_weight_scale\": "
-                   << std::max(1.0, latestHistoryValue(node_projection_weight_history, node_index))
-                   << ", \"sheath_length_scale\": " << std::max(1.0e-12, sheath_length_scale)
-                   << "}";
-            output << (node_index + 1 < circuit_model->nodeCount() ? ",\n" : "\n");
-        }
-    }
-    output << "  ]\n";
-    output << "}\n";
-    return true;
-}
-
 int signOf(double value)
 {
     if (value > 0.0)
@@ -4711,6 +4183,14 @@ bool DensePlasmaSurfaceCharging::initialize(const SurfaceChargingConfig& config)
 bool DensePlasmaSurfaceCharging::initialize(const SurfaceRuntimePlan& runtime_plan)
 {
     config_ = runtime_plan.compiled_config;
+    top_top_source_name_ = runtime_plan.source_name;
+    top_top_source_description_ = runtime_plan.source_description;
+    top_top_entrypoint_mode_ = runtime_plan.top_top_entrypoint;
+    top_top_scheduled_steps_ = runtime_plan.scheduled_steps;
+    top_top_adaptive_time_stepping_ = runtime_plan.adaptive_time_stepping;
+    top_top_total_duration_s_ = runtime_plan.total_duration_s;
+    top_top_minimum_time_step_s_ = runtime_plan.minimum_time_step_s;
+    top_top_maximum_time_step_s_ = runtime_plan.maximum_time_step_s;
     if (!config_.solver_config.collision_set.empty())
     {
         config_.live_pic_collision_cross_section_set_id = config_.solver_config.collision_set;
@@ -4765,9 +4245,25 @@ bool DensePlasmaSurfaceCharging::initialize(const SurfaceRuntimePlan& runtime_pl
     status_.transition_conductivity_scale = 1.0;
     status_.transition_source_flux_scale = 1.0;
     status_.transition_simulation_param_scale = 1.0;
+    status_.transition_poisson_bc_length_scale = 1.0;
+    status_.transition_poisson_bc_presheath_mode = false;
+    status_.transition_rccabs_sc_scale = 1.0;
+    status_.transition_vcross_bfield_scale = 1.0;
+    status_.transition_basic_eclipse_exit_photo_scale = 1.0;
+    status_.transition_transient_artificial_sources_scale = 1.0;
+    status_.transition_transient_artificial_source_current_density_a_per_m2 = 0.0;
+    status_.transition_langmuir_probe_derivative_scale = 1.0;
     transition_conductivity_scale_ = 1.0;
     transition_source_flux_scale_ = 1.0;
     transition_simulation_param_scale_ = 1.0;
+    transition_poisson_bc_length_scale_ = 1.0;
+    transition_poisson_bc_presheath_mode_ = false;
+    transition_rccabs_sc_scale_ = 1.0;
+    transition_vcross_bfield_scale_ = 1.0;
+    transition_basic_eclipse_exit_photo_scale_ = 1.0;
+    transition_transient_artificial_sources_scale_ = 1.0;
+    transition_transient_artificial_source_current_density_a_per_m2_ = 0.0;
+    transition_langmuir_probe_derivative_scale_ = 1.0;
     transition_runtime_internal_substeps_ = std::max<std::size_t>(1, config_.internal_substeps);
     transition_runtime_max_delta_potential_v_per_step_ =
         std::max(1.0e-3, config_.max_delta_potential_v_per_step);
@@ -4779,6 +4275,8 @@ bool DensePlasmaSurfaceCharging::initialize(const SurfaceRuntimePlan& runtime_pl
         transition_runtime_max_delta_potential_v_per_step_;
     status_.transition_runtime_solver_relaxation_factor =
         transition_runtime_solver_relaxation_factor_;
+    status_.transition_poisson_bc_effective_sheath_length_m =
+        computeEffectiveSheathLength();
     initialized_ = true;
     history_time_.clear();
     history_potential_.clear();
@@ -4899,6 +4397,13 @@ bool DensePlasmaSurfaceCharging::initialize(const SurfaceRuntimePlan& runtime_pl
     history_surface_node_live_pic_derivatives_.clear();
     history_surface_node_live_pic_collision_counts_.clear();
     history_surface_node_live_pic_mcc_enabled_.clear();
+    history_surface_node_source_collected_currents_.clear();
+    history_surface_node_source_interactor_currents_.clear();
+    history_surface_source_spacecraft_collected_currents_.clear();
+    history_surface_source_spacecraft_interactor_currents_.clear();
+    history_surface_source_superparticle_counts_.clear();
+    source_resolved_bookkeeping_slots_complete_ = false;
+    source_resolved_bookkeeping_strict_ = false;
     history_surface_branch_currents_.clear();
     history_surface_branch_conductances_.clear();
     history_surface_branch_voltage_drops_.clear();
@@ -5028,6 +4533,20 @@ bool DensePlasmaSurfaceCharging::initialize(const SurfaceRuntimePlan& runtime_pl
         history_surface_node_live_pic_derivatives_.assign(circuit_model_->nodeCount(), {});
         history_surface_node_live_pic_collision_counts_.assign(circuit_model_->nodeCount(), {});
         history_surface_node_live_pic_mcc_enabled_.assign(circuit_model_->nodeCount(), {});
+        history_surface_node_source_collected_currents_.assign(
+            config_.spis_import.source_keys.size(),
+            std::vector<std::vector<double>>(circuit_model_->nodeCount()));
+        history_surface_node_source_interactor_currents_.assign(
+            config_.spis_import.source_keys.size(),
+            std::vector<std::vector<double>>(circuit_model_->nodeCount()));
+        history_surface_source_spacecraft_collected_currents_.assign(
+            config_.spis_import.source_keys.size(), {});
+        history_surface_source_spacecraft_interactor_currents_.assign(
+            config_.spis_import.source_keys.size(), {});
+        history_surface_source_superparticle_counts_.assign(
+            config_.spis_import.source_keys.size(), {});
+        source_resolved_bookkeeping_slots_complete_ = !config_.spis_import.source_keys.empty();
+        source_resolved_bookkeeping_strict_ = config_.spis_import.source_keys.size() <= 1;
         history_surface_branch_currents_.assign(circuit_model_->branchCount(), {});
         history_surface_branch_conductances_.assign(circuit_model_->branchCount(), {});
         history_surface_branch_voltage_drops_.assign(circuit_model_->branchCount(), {});
@@ -6074,6 +5593,56 @@ void DensePlasmaSurfaceCharging::appendSurfaceNodeDiagnostics(
     ensure_node_storage(history_surface_node_live_pic_derivatives_);
     ensure_node_storage(history_surface_node_live_pic_collision_counts_);
     ensure_node_storage(history_surface_node_live_pic_mcc_enabled_);
+    if (history_surface_node_source_collected_currents_.size() != config_.spis_import.source_keys.size())
+    {
+        history_surface_node_source_collected_currents_.assign(
+            config_.spis_import.source_keys.size(),
+            std::vector<std::vector<double>>(node_count));
+    }
+    else
+    {
+        for (auto& source_history : history_surface_node_source_collected_currents_)
+        {
+            if (source_history.size() != node_count)
+            {
+                source_history.assign(node_count, {});
+            }
+        }
+    }
+    if (history_surface_node_source_interactor_currents_.size() !=
+        config_.spis_import.source_keys.size())
+    {
+        history_surface_node_source_interactor_currents_.assign(
+            config_.spis_import.source_keys.size(),
+            std::vector<std::vector<double>>(node_count));
+    }
+    else
+    {
+        for (auto& source_history : history_surface_node_source_interactor_currents_)
+        {
+            if (source_history.size() != node_count)
+            {
+                source_history.assign(node_count, {});
+            }
+        }
+    }
+    if (history_surface_source_spacecraft_collected_currents_.size() !=
+        config_.spis_import.source_keys.size())
+    {
+        history_surface_source_spacecraft_collected_currents_.assign(
+            config_.spis_import.source_keys.size(), {});
+    }
+    if (history_surface_source_spacecraft_interactor_currents_.size() !=
+        config_.spis_import.source_keys.size())
+    {
+        history_surface_source_spacecraft_interactor_currents_.assign(
+            config_.spis_import.source_keys.size(), {});
+    }
+    if (history_surface_source_superparticle_counts_.size() != config_.spis_import.source_keys.size())
+    {
+        history_surface_source_superparticle_counts_.assign(config_.spis_import.source_keys.size(),
+                                                            {});
+    }
 
     if (history_surface_branch_currents_.size() != branch_currents_a.size())
     {
@@ -6158,6 +5727,13 @@ void DensePlasmaSurfaceCharging::appendSurfaceNodeDiagnostics(
     double shared_reference_potential_v = shared_patch_potential_v;
     double shared_sheath_charge_c = 0.0;
     bool shared_reference_captured = false;
+    std::vector<double> source_spacecraft_collected_currents_a(
+        config_.spis_import.source_keys.size(), 0.0);
+    std::vector<double> source_spacecraft_interactor_currents_a(
+        config_.spis_import.source_keys.size(), 0.0);
+    std::vector<double> source_superparticle_counts(config_.spis_import.source_keys.size(), 0.0);
+    bool source_slots_complete_this_step = !config_.spis_import.source_keys.empty();
+    bool source_strict_this_step = !config_.spis_import.source_keys.empty();
     std::vector<SurfaceModelRuntimeState> runtime_states;
     runtime_states.reserve(node_count);
 
@@ -6320,6 +5896,54 @@ void DensePlasmaSurfaceCharging::appendSurfaceNodeDiagnostics(
             static_cast<double>(live_pic_sample.total_collisions));
         history_surface_node_live_pic_mcc_enabled_[node_index].push_back(
             live_pic_sample.mcc_enabled ? 1.0 : 0.0);
+        const double node_total_interactor_current_a =
+            -(node_currents.secondary_emission_a_per_m2 +
+              node_currents.ion_secondary_emission_a_per_m2 +
+              node_currents.backscatter_emission_a_per_m2) *
+            runtime_state.surface_area_m2;
+        for (std::size_t source_index = 0; source_index < config_.spis_import.source_keys.size();
+             ++source_index)
+        {
+            const auto& source_key = config_.spis_import.source_keys[source_index];
+            double node_source_collected_current_a = 0.0;
+            double node_source_interactor_current_a = 0.0;
+            double node_source_superparticle_count = 0.0;
+            bool matched_source_slot = false;
+            bool matched_source_strict = false;
+            for (const auto& source_sample : live_pic_sample.source_resolved_samples)
+            {
+                if (source_sample.source_key != source_key)
+                {
+                    continue;
+                }
+                matched_source_slot = true;
+                matched_source_strict = source_sample.strictly_attributed;
+                node_source_collected_current_a =
+                    source_sample.collected_current_density_a_per_m2 * runtime_state.surface_area_m2;
+                node_source_superparticle_count = source_sample.superparticle_count;
+                if (source_sample.strictly_attributed)
+                {
+                    node_source_interactor_current_a = node_total_interactor_current_a;
+                }
+                break;
+            }
+            if (!matched_source_slot)
+            {
+                source_slots_complete_this_step = false;
+            }
+            if (!matched_source_strict)
+            {
+                source_strict_this_step = false;
+            }
+            history_surface_node_source_collected_currents_[source_index][node_index].push_back(
+                node_source_collected_current_a);
+            history_surface_node_source_interactor_currents_[source_index][node_index].push_back(
+                node_source_interactor_current_a);
+            source_spacecraft_collected_currents_a[source_index] += node_source_collected_current_a;
+            source_spacecraft_interactor_currents_a[source_index] +=
+                node_source_interactor_current_a;
+            source_superparticle_counts[source_index] += node_source_superparticle_count;
+        }
         if (runtime_state.shared_runtime_enabled && !shared_reference_captured)
         {
             shared_patch_potential_v = runtime_state.shared_patch_potential_v;
@@ -6337,6 +5961,23 @@ void DensePlasmaSurfaceCharging::appendSurfaceNodeDiagnostics(
     history_shared_surface_effective_sheath_length_.push_back(shared_effective_sheath_length_m);
     history_shared_surface_sheath_charge_.push_back(shared_sheath_charge_c);
     history_shared_surface_runtime_enabled_.push_back(useSharedSurfacePicRuntime() ? 1.0 : 0.0);
+    if (!config_.spis_import.source_keys.empty())
+    {
+        source_resolved_bookkeeping_slots_complete_ =
+            source_resolved_bookkeeping_slots_complete_ && source_slots_complete_this_step;
+        source_resolved_bookkeeping_strict_ =
+            source_resolved_bookkeeping_strict_ && source_strict_this_step;
+    }
+    for (std::size_t source_index = 0; source_index < config_.spis_import.source_keys.size();
+         ++source_index)
+    {
+        history_surface_source_spacecraft_collected_currents_[source_index].push_back(
+            source_spacecraft_collected_currents_a[source_index]);
+        history_surface_source_spacecraft_interactor_currents_[source_index].push_back(
+            source_spacecraft_interactor_currents_a[source_index]);
+        history_surface_source_superparticle_counts_[source_index].push_back(
+            source_superparticle_counts[source_index]);
+    }
     refreshGlobalKernelStates(runtime_states);
     for (const auto& node_state : global_particle_domain_state_.nodes)
     {
@@ -7001,9 +6642,10 @@ double DensePlasmaSurfaceCharging::computeBodyNodeCapacitanceF(
 
 double DensePlasmaSurfaceCharging::computeEffectiveSheathLength() const
 {
+    const double transition_scale = std::max(1.0e-9, transition_poisson_bc_length_scale_);
     if (!config_.derive_sheath_length_from_plasma)
     {
-        return std::max(1.0e-6, config_.sheath_length_m);
+        return std::max(1.0e-6, config_.sheath_length_m * transition_scale);
     }
 
     const double electron_temperature_j =
@@ -7012,13 +6654,66 @@ double DensePlasmaSurfaceCharging::computeEffectiveSheathLength() const
         1.0e3, config_.plasma.electron_density_m3 * computeTransitionSourceFluxScale());
     const double debye_length = std::sqrt(kEpsilon0 * electron_temperature_j /
                                           (electron_density * kElementaryCharge * kElementaryCharge));
-    return std::clamp(debye_length, std::max(1.0e-6, config_.minimum_sheath_length_m),
-                      std::max(config_.minimum_sheath_length_m, config_.maximum_sheath_length_m));
+    const double minimum_sheath_length_m = std::max(1.0e-6, config_.minimum_sheath_length_m);
+    const double maximum_sheath_length_m =
+        std::max(config_.minimum_sheath_length_m, config_.maximum_sheath_length_m);
+    const double base_sheath_length =
+        std::clamp(debye_length, minimum_sheath_length_m, maximum_sheath_length_m);
+    const double scaled_sheath_length = std::max(1.0e-6, base_sheath_length * transition_scale);
+    return std::clamp(scaled_sheath_length, minimum_sheath_length_m, maximum_sheath_length_m);
 }
 
 double DensePlasmaSurfaceCharging::computeTransitionSourceFluxScale() const
 {
     return std::max(1.0e-9, transition_source_flux_scale_);
+}
+
+SurfaceCurrents DensePlasmaSurfaceCharging::applyExtendedTransitionEventAdjustments(
+    const SurfaceCurrents& currents) const
+{
+    SurfaceCurrents adjusted = currents;
+    const double max_abs_current_density =
+        std::max(1.0e-12, config_.max_abs_current_density_a_per_m2);
+
+    const double vcross_scale = std::clamp(transition_vcross_bfield_scale_, 1.0e-9, 1.0e3);
+    adjusted.electron_current_a_per_m2 *= vcross_scale;
+    adjusted.ion_current_a_per_m2 *= vcross_scale;
+    adjusted.ram_ion_current_a_per_m2 *= vcross_scale;
+
+    const double source_emission_scale = std::clamp(
+        transition_basic_eclipse_exit_photo_scale_ *
+            transition_transient_artificial_sources_scale_,
+        1.0e-9, 1.0e3);
+    adjusted.photo_emission_a_per_m2 *= source_emission_scale;
+    adjusted.photo_emission_a_per_m2 +=
+        transition_transient_artificial_source_current_density_a_per_m2_;
+
+    adjusted.current_derivative_a_per_m2_per_v *=
+        std::clamp(transition_langmuir_probe_derivative_scale_, 1.0e-9, 1.0e3);
+
+    adjusted.electron_current_a_per_m2 =
+        clampSigned(adjusted.electron_current_a_per_m2, max_abs_current_density);
+    adjusted.ion_current_a_per_m2 =
+        clampSigned(adjusted.ion_current_a_per_m2, max_abs_current_density);
+    adjusted.photo_emission_a_per_m2 =
+        clampSigned(adjusted.photo_emission_a_per_m2, max_abs_current_density);
+    adjusted.ram_ion_current_a_per_m2 =
+        clampSigned(adjusted.ram_ion_current_a_per_m2, max_abs_current_density);
+
+    adjusted.total_current_a_per_m2 = adjusted.electron_current_a_per_m2 +
+                                      adjusted.ion_current_a_per_m2 +
+                                      adjusted.secondary_emission_a_per_m2 +
+                                      adjusted.ion_secondary_emission_a_per_m2 +
+                                      adjusted.backscatter_emission_a_per_m2 +
+                                      adjusted.photo_emission_a_per_m2 +
+                                      adjusted.thermionic_emission_a_per_m2 +
+                                      adjusted.field_emission_a_per_m2 +
+                                      adjusted.conduction_current_a_per_m2 +
+                                      adjusted.ram_ion_current_a_per_m2;
+    adjusted.total_current_a_per_m2 =
+        clampSigned(adjusted.total_current_a_per_m2, max_abs_current_density);
+
+    return adjusted;
 }
 
 SurfaceCurrents DensePlasmaSurfaceCharging::computeLegacySurfaceCurrents(
@@ -7169,7 +6864,7 @@ SurfaceCurrents DensePlasmaSurfaceCharging::computeLegacySurfaceCurrents(
                                       currents.field_emission_a_per_m2;
     currents.total_current_a_per_m2 =
         clampSigned(currents.total_current_a_per_m2, config_.max_abs_current_density_a_per_m2);
-    return currents;
+    return applyExtendedTransitionEventAdjustments(currents);
 }
 
 SurfaceCurrents DensePlasmaSurfaceCharging::computeSurfaceCurrents(double surface_potential_v) const
@@ -7200,7 +6895,8 @@ SurfaceCurrents DensePlasmaSurfaceCharging::computeSurfaceCurrents(double surfac
     // the assembled global diagnostics on the state, but do not collapse the probe back to the
     // current shared patch potential before evaluation.
     probe_state.shared_runtime_enabled = false;
-    return current_model_->evaluate(ReferenceSurfaceRole::Patch, probe_state);
+    return applyExtendedTransitionEventAdjustments(
+        current_model_->evaluate(ReferenceSurfaceRole::Patch, probe_state));
 }
 
 double DensePlasmaSurfaceCharging::computeRadiationInducedConductivity() const
@@ -10116,6 +9812,279 @@ bool DensePlasmaSurfaceCharging::advance(double dt)
     };
     apply_source_flux_updater();
 
+    const auto apply_sheath_or_presheath_poisson_bc_updater = [&]() {
+        transition_poisson_bc_length_scale_ = 1.0;
+        transition_poisson_bc_presheath_mode_ = false;
+
+        if (transition.extended_events.sheath_or_presheath_poisson_bc_updater_active)
+        {
+            const double mode_selector = config_.material.getScalarProperty(
+                "transition_sheath_or_presheath_poisson_bc_mode", 0.0);
+            transition_poisson_bc_presheath_mode_ = mode_selector > 0.5;
+
+            const double base_scale = std::max(
+                0.0,
+                config_.material.getScalarProperty(
+                    "transition_sheath_or_presheath_poisson_bc_base_scale", 1.0));
+            const double sheath_scale = std::max(
+                1.0e-6,
+                config_.material.getScalarProperty(
+                    "transition_sheath_or_presheath_poisson_bc_sheath_scale", 1.0));
+            const double presheath_scale = std::max(
+                1.0e-6,
+                config_.material.getScalarProperty(
+                    "transition_sheath_or_presheath_poisson_bc_presheath_scale", 3.0));
+            const double min_scale = std::max(
+                1.0e-9,
+                config_.material.getScalarProperty(
+                    "transition_sheath_or_presheath_poisson_bc_min_scale", 1.0e-3));
+            const double max_scale = std::max(
+                min_scale,
+                config_.material.getScalarProperty(
+                    "transition_sheath_or_presheath_poisson_bc_max_scale", 1.0e3));
+            const double time_slope_per_day = config_.material.getScalarProperty(
+                "transition_sheath_or_presheath_poisson_bc_time_slope_per_day", 0.0);
+            const double sun_flux_coupling = std::clamp(
+                config_.material.getScalarProperty(
+                    "transition_sheath_or_presheath_poisson_bc_sun_flux_coupling", 0.0),
+                -2.0, 2.0);
+
+            const double elapsed_days = std::max(0.0, status_.time_s / 86400.0);
+            const double time_factor = std::max(0.0, 1.0 + time_slope_per_day * elapsed_days);
+            const double sun_factor = std::max(
+                0.0, 1.0 + sun_flux_coupling * (transition.sun_flux_scale - 1.0));
+            const double mode_scale =
+                transition_poisson_bc_presheath_mode_ ? presheath_scale : sheath_scale;
+
+            transition_poisson_bc_length_scale_ = std::clamp(
+                base_scale * mode_scale * time_factor * sun_factor, min_scale, max_scale);
+        }
+
+        status_.transition_poisson_bc_length_scale = transition_poisson_bc_length_scale_;
+        status_.transition_poisson_bc_presheath_mode = transition_poisson_bc_presheath_mode_;
+        status_.transition_poisson_bc_effective_sheath_length_m =
+            computeEffectiveSheathLength();
+    };
+    apply_sheath_or_presheath_poisson_bc_updater();
+
+    const auto apply_extended_transition_event_bundle = [&]() {
+        transition_rccabs_sc_scale_ = 1.0;
+        transition_vcross_bfield_scale_ = 1.0;
+        transition_basic_eclipse_exit_photo_scale_ = 1.0;
+        transition_transient_artificial_sources_scale_ = 1.0;
+        transition_transient_artificial_source_current_density_a_per_m2_ = 0.0;
+        transition_langmuir_probe_derivative_scale_ = 1.0;
+
+        const double elapsed_days = std::max(0.0, status_.time_s / 86400.0);
+
+        if (transition.extended_events.rccabs_sc_updater_active)
+        {
+            const double base_scale = std::max(
+                0.0,
+                config_.material.getScalarProperty("transition_rccabs_sc_updater_base_scale",
+                                                  1.0));
+            const double min_scale = std::max(
+                1.0e-9,
+                config_.material.getScalarProperty("transition_rccabs_sc_updater_min_scale",
+                                                  1.0e-3));
+            const double max_scale = std::max(
+                min_scale,
+                config_.material.getScalarProperty("transition_rccabs_sc_updater_max_scale",
+                                                  1.0e3));
+            const double time_slope_per_day = config_.material.getScalarProperty(
+                "transition_rccabs_sc_updater_time_slope_per_day", 0.0);
+            const double sun_flux_coupling = std::clamp(
+                config_.material.getScalarProperty("transition_rccabs_sc_updater_sun_flux_coupling",
+                                                  0.0),
+                -2.0, 2.0);
+            const double time_factor = std::max(0.0, 1.0 + time_slope_per_day * elapsed_days);
+            const double sun_factor = std::max(
+                0.0, 1.0 + sun_flux_coupling * (transition.sun_flux_scale - 1.0));
+            transition_rccabs_sc_scale_ =
+                std::clamp(base_scale * time_factor * sun_factor, min_scale, max_scale);
+            transition_conductivity_scale_ = std::clamp(
+                transition_conductivity_scale_ * transition_rccabs_sc_scale_, 1.0e-9, 1.0e9);
+            status_.transition_conductivity_scale = transition_conductivity_scale_;
+        }
+
+        if (transition.extended_events.vcross_bfield_updater_active)
+        {
+            const double base_scale = std::max(
+                0.0,
+                config_.material.getScalarProperty("transition_vcross_bfield_updater_base_scale",
+                                                  1.0));
+            const double min_scale = std::max(
+                1.0e-9,
+                config_.material.getScalarProperty("transition_vcross_bfield_updater_min_scale",
+                                                  1.0e-3));
+            const double max_scale = std::max(
+                min_scale,
+                config_.material.getScalarProperty("transition_vcross_bfield_updater_max_scale",
+                                                  1.0e3));
+            const double time_slope_per_day = config_.material.getScalarProperty(
+                "transition_vcross_bfield_updater_time_slope_per_day", 0.0);
+            const double sun_flux_coupling = std::clamp(
+                config_.material.getScalarProperty(
+                    "transition_vcross_bfield_updater_sun_flux_coupling", 0.0),
+                -2.0, 2.0);
+            const double time_factor = std::max(0.0, 1.0 + time_slope_per_day * elapsed_days);
+            const double sun_factor = std::max(
+                0.0, 1.0 + sun_flux_coupling * (transition.sun_flux_scale - 1.0));
+            transition_vcross_bfield_scale_ =
+                std::clamp(base_scale * time_factor * sun_factor, min_scale, max_scale);
+        }
+
+        if (transition.extended_events.basic_eclipse_exit_active)
+        {
+            const double base_scale = std::max(
+                0.0,
+                config_.material.getScalarProperty("transition_basic_eclipse_exit_base_scale",
+                                                  1.0));
+            const double exit_scale = std::max(
+                1.0e-6,
+                config_.material.getScalarProperty("transition_basic_eclipse_exit_exit_scale",
+                                                  2.0));
+            const double eclipse_scale = std::max(
+                1.0e-6,
+                config_.material.getScalarProperty("transition_basic_eclipse_exit_eclipse_scale",
+                                                  0.25));
+            const double min_scale = std::max(
+                1.0e-9,
+                config_.material.getScalarProperty("transition_basic_eclipse_exit_min_scale",
+                                                  1.0e-3));
+            const double max_scale = std::max(
+                min_scale,
+                config_.material.getScalarProperty("transition_basic_eclipse_exit_max_scale",
+                                                  1.0e3));
+            const double mode_scale = transition.local_time_transition_active ? exit_scale
+                                                                               : eclipse_scale;
+            transition_basic_eclipse_exit_photo_scale_ =
+                std::clamp(base_scale * mode_scale, min_scale, max_scale);
+        }
+
+        if (transition.extended_events.transient_artificial_sources_active)
+        {
+            const double base_scale = std::max(
+                0.0,
+                config_.material.getScalarProperty(
+                    "transition_transient_artificial_sources_base_scale", 1.0));
+            const double min_scale = std::max(
+                1.0e-9,
+                config_.material.getScalarProperty(
+                    "transition_transient_artificial_sources_min_scale", 1.0e-3));
+            const double max_scale = std::max(
+                min_scale,
+                config_.material.getScalarProperty(
+                    "transition_transient_artificial_sources_max_scale", 1.0e3));
+            const double pulse_period_s = std::max(
+                1.0e-9,
+                config_.material.getScalarProperty(
+                    "transition_transient_artificial_sources_pulse_period_s", 1.0));
+            const double pulse_duty = std::clamp(
+                config_.material.getScalarProperty(
+                    "transition_transient_artificial_sources_pulse_duty_cycle", 1.0),
+                0.0, 1.0);
+            const double phase_offset_s = config_.material.getScalarProperty(
+                "transition_transient_artificial_sources_phase_offset_s", 0.0);
+            const double pulse_phase_s =
+                std::fmod(std::max(0.0, status_.time_s + phase_offset_s), pulse_period_s);
+            const bool pulse_active = pulse_phase_s <= pulse_period_s * pulse_duty;
+
+            transition_transient_artificial_sources_scale_ =
+                std::clamp(base_scale, min_scale, max_scale);
+            const double source_current_density = std::max(
+                0.0,
+                config_.material.getScalarProperty(
+                    "transition_transient_artificial_sources_current_density_a_per_m2", 0.0));
+            transition_transient_artificial_source_current_density_a_per_m2_ =
+                pulse_active ? transition_transient_artificial_sources_scale_ *
+                                   source_current_density
+                             : 0.0;
+        }
+
+        if (transition.extended_events.langmuir_probe_transition_active)
+        {
+            const double base_scale = std::max(
+                0.0,
+                config_.material.getScalarProperty(
+                    "transition_langmuir_probe_transition_base_scale", 1.0));
+            const double min_scale = std::max(
+                1.0e-9,
+                config_.material.getScalarProperty(
+                    "transition_langmuir_probe_transition_min_scale", 1.0e-3));
+            const double max_scale = std::max(
+                min_scale,
+                config_.material.getScalarProperty(
+                    "transition_langmuir_probe_transition_max_scale", 1.0e3));
+            const double time_slope_per_day = config_.material.getScalarProperty(
+                "transition_langmuir_probe_transition_time_slope_per_day", 0.0);
+            const double sun_flux_coupling = std::clamp(
+                config_.material.getScalarProperty(
+                    "transition_langmuir_probe_transition_sun_flux_coupling", 0.0),
+                -2.0, 2.0);
+            const double time_factor = std::max(0.0, 1.0 + time_slope_per_day * elapsed_days);
+            const double sun_factor = std::max(
+                0.0, 1.0 + sun_flux_coupling * (transition.sun_flux_scale - 1.0));
+            transition_langmuir_probe_derivative_scale_ =
+                std::clamp(base_scale * time_factor * sun_factor, min_scale, max_scale);
+        }
+
+        status_.transition_rccabs_sc_scale = transition_rccabs_sc_scale_;
+        status_.transition_vcross_bfield_scale = transition_vcross_bfield_scale_;
+        status_.transition_basic_eclipse_exit_photo_scale =
+            transition_basic_eclipse_exit_photo_scale_;
+        status_.transition_transient_artificial_sources_scale =
+            transition_transient_artificial_sources_scale_;
+        status_.transition_transient_artificial_source_current_density_a_per_m2 =
+            transition_transient_artificial_source_current_density_a_per_m2_;
+        status_.transition_langmuir_probe_derivative_scale =
+            transition_langmuir_probe_derivative_scale_;
+        status_.transition_observer_active = transition.observer.active;
+        status_.transition_observer_transition_count =
+            transition.observer.observed_transition_count;
+        status_.transition_observer_checkpoint_dt_s =
+            transition.observer.checkpoint_dt_s;
+        status_.transition_observer_next_checkpoint_time_s =
+            transition.observer.next_checkpoint_time_s;
+        status_.transition_observer_local_time_window_active =
+            transition.local_time_transition_active;
+        status_.transition_observer_spinning_spacecraft_active =
+            transition.spinning_spacecraft_active;
+        status_.transition_observer_sun_flux_updater_active =
+            transition.sun_flux_updater_active;
+        status_.transition_observer_pic_recalibration_requested =
+            transition.pic_recalibration_requested;
+        status_.transition_observer_local_time_hour = transition.local_time_hour;
+        status_.transition_observer_spinning_phase_rad = transition.spinning_phase_rad;
+        status_.transition_observer_sun_flux_scale = transition.sun_flux_scale;
+        status_.transition_finalization_active = transition.finalization.active;
+        status_.transition_finalization_trigger_time_s =
+            transition.finalization.trigger_time_s;
+        status_.transition_finalization_duration_s =
+            transition.finalization.duration_s;
+        status_.transition_finalization_validity_renormalization =
+            transition.finalization.validity_renormalization;
+        status_.transition_finalization_shared_surface_pic_runtime =
+            transition.shared_surface_pic_runtime;
+        status_.transition_finalization_shared_global_coupled_iteration_limit =
+            transition.shared_global_coupled_iteration_limit;
+        status_.transition_finalization_fixed_iteration_policy =
+            transition.fixed_iteration_policy;
+        status_.transition_finalization_residual_guarded_policy =
+            transition.residual_guarded_policy;
+        status_.transition_sun_flux_intensity_active =
+            transition.sun_flux_intensity.active;
+        status_.transition_sun_flux_intensity_scale =
+            transition.sun_flux_intensity.intensity_scale;
+        status_.transition_sun_flux_intensity_normalized =
+            transition.sun_flux_intensity.normalized_scale;
+        status_.transition_sun_flux_intensity_daylight_factor =
+            transition.sun_flux_intensity.daylight_factor;
+        status_.transition_sun_flux_intensity_spin_factor =
+            transition.sun_flux_intensity.spin_factor;
+    };
+    apply_extended_transition_event_bundle();
+
     const auto apply_simulation_param_updater = [&]() {
         transition_simulation_param_scale_ = 1.0;
         transition_runtime_internal_substeps_ =
@@ -10680,6 +10649,55 @@ bool DensePlasmaSurfaceCharging::advance(double dt)
                         circuit_model_->branchConductanceS(branch_index);
                     topology_state.branch_bias_v[branch_index] =
                         circuit_model_->branchBiasV(branch_index);
+                }
+                if (!config_.circuit_waveforms.empty())
+                {
+                    const double excitation_time_s =
+                        status_.time_s + static_cast<double>(step + 1) * sub_dt;
+                    const auto excitation_sample =
+                        Coupling::sampleCircuitExcitations(config_.circuit_waveforms,
+                                                          excitation_time_s);
+                    for (const auto& element : excitation_sample.elements)
+                    {
+                        switch (element.kind)
+                        {
+                        case Coupling::CircuitElementKind::BranchBias:
+                            if (element.target_index < topology_state.branch_bias_v.size())
+                            {
+                                topology_state.branch_bias_v[element.target_index] = element.value;
+                            }
+                            break;
+                        case Coupling::CircuitElementKind::BranchCurrentSource:
+                            if (element.target_index <
+                                topology_state.branch_current_source_a.size())
+                            {
+                                topology_state.branch_current_source_a[element.target_index] =
+                                    element.value;
+                            }
+                            break;
+                        case Coupling::CircuitElementKind::BranchConductance:
+                            if (element.target_index <
+                                topology_state.branch_conductance_s.size())
+                            {
+                                topology_state.branch_conductance_s[element.target_index] =
+                                    std::max(0.0, element.value);
+                            }
+                            break;
+                        case Coupling::CircuitElementKind::NodeFixedPotential:
+                            if (element.target_index <
+                                topology_state.node_shunt_conductance_s.size())
+                            {
+                                didv_input.nodes[element.target_index].additional_diagonal_a_per_v +=
+                                    1.0e18;
+                                didv_input.nodes[element.target_index].additional_rhs_a +=
+                                    1.0e18 * element.value;
+                            }
+                            break;
+                        case Coupling::CircuitElementKind::NodeCapacitance:
+                        case Coupling::CircuitElementKind::NodeShuntConductance:
+                            break;
+                        }
+                    }
                 }
 
                 Coupling::SurfaceCircuitKernelInput kernel_input =
@@ -11639,12 +11657,69 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
                            history_surface_node_live_pic_collision_counts_);
         export_node_series("live_pic_mcc_enabled",
                            history_surface_node_live_pic_mcc_enabled_);
+        for (std::size_t source_index = 0; source_index < config_.spis_import.source_keys.size();
+             ++source_index)
+        {
+            if (source_index >= history_surface_node_source_collected_currents_.size() ||
+                node_index >= history_surface_node_source_collected_currents_[source_index].size())
+            {
+                continue;
+            }
+            const auto& source_history =
+                history_surface_node_source_collected_currents_[source_index][node_index];
+            if (source_history.size() == history_time_.size())
+            {
+                data_set.scalar_series[prefix + "source_" +
+                                       config_.spis_import.source_keys[source_index] +
+                                       "_collected_current_a"] = source_history;
+            }
+            if (source_index < history_surface_node_source_interactor_currents_.size() &&
+                node_index < history_surface_node_source_interactor_currents_[source_index].size())
+            {
+                const auto& interactor_history =
+                    history_surface_node_source_interactor_currents_[source_index][node_index];
+                if (interactor_history.size() == history_time_.size())
+                {
+                    data_set.scalar_series[prefix + "source_" +
+                                           config_.spis_import.source_keys[source_index] +
+                                           "_interactor_current_a"] = interactor_history;
+                }
+            }
+        }
         data_set.scalar_series[prefix + "surface_pic_enabled"] = constant_series(
             (circuit_model_ && circuit_model_->nodeIsPatch(node_index) &&
              (config_.runtime_route == SurfaceRuntimeRoute::SurfacePic ||
               config_.runtime_route == SurfaceRuntimeRoute::SurfacePicHybrid))
                 ? 1.0
                 : 0.0);
+    }
+    for (std::size_t source_index = 0; source_index < config_.spis_import.source_keys.size();
+         ++source_index)
+    {
+        const auto& source_key = config_.spis_import.source_keys[source_index];
+        if (source_index < history_surface_source_spacecraft_collected_currents_.size() &&
+            history_surface_source_spacecraft_collected_currents_[source_index].size() ==
+                history_time_.size())
+        {
+            data_set.scalar_series["surface_source_" + source_key +
+                                   "_spacecraft_collected_current_a"] =
+                history_surface_source_spacecraft_collected_currents_[source_index];
+        }
+        if (source_index < history_surface_source_spacecraft_interactor_currents_.size() &&
+            history_surface_source_spacecraft_interactor_currents_[source_index].size() ==
+                history_time_.size())
+        {
+            data_set.scalar_series["surface_source_" + source_key +
+                                   "_spacecraft_interactor_current_a"] =
+                history_surface_source_spacecraft_interactor_currents_[source_index];
+        }
+        if (source_index < history_surface_source_superparticle_counts_.size() &&
+            history_surface_source_superparticle_counts_[source_index].size() ==
+                history_time_.size())
+        {
+            data_set.scalar_series["surface_source_" + source_key + "_superparticle_count"] =
+                history_surface_source_superparticle_counts_[source_index];
+        }
     }
     for (std::size_t branch_index = 0; branch_index < history_surface_branch_currents_.size();
          ++branch_index)
@@ -11683,6 +11758,35 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
                 history_surface_branch_mutual_capacitances_[branch_index];
         }
     }
+    for (std::size_t point_index = 0; point_index < config_.potential_sweep_points.size();
+         ++point_index)
+    {
+        const auto prefix =
+            "surface_potential_sweep_point_" + std::to_string(point_index) + "_";
+        data_set.metadata[prefix + "time_s"] =
+            std::to_string(config_.potential_sweep_points[point_index].time_s);
+        data_set.metadata[prefix + "value"] =
+            std::to_string(config_.potential_sweep_points[point_index].value);
+        data_set.metadata[prefix + "label"] = config_.potential_sweep_points[point_index].label;
+    }
+    for (std::size_t target_index = 0; target_index < config_.comparison_targets.size();
+         ++target_index)
+    {
+        const auto prefix =
+            "surface_comparison_target_" + std::to_string(target_index) + "_";
+        data_set.metadata[prefix + "name"] = config_.comparison_targets[target_index].name;
+        data_set.metadata[prefix + "source_family"] =
+            config_.comparison_targets[target_index].source_family;
+        data_set.metadata[prefix + "source_pattern"] =
+            config_.comparison_targets[target_index].source_pattern;
+        data_set.metadata[prefix + "unit"] = config_.comparison_targets[target_index].unit;
+        data_set.metadata[prefix + "alignment_axis"] =
+            config_.comparison_targets[target_index].alignment_axis;
+        data_set.metadata[prefix + "source_key"] =
+            config_.comparison_targets[target_index].source_key;
+        data_set.metadata[prefix + "scdat_series_hint"] =
+            config_.comparison_targets[target_index].scdat_series_hint;
+    }
     data_set.metadata["module"] = "Surface Charging";
     data_set.metadata["current_algorithm_mode"] =
         current_model_ ? current_model_->algorithmName() : "LegacySurfaceCurrents";
@@ -11703,9 +11807,62 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
     data_set.metadata["surface_reference_case_id"] = config_.reference_case_id;
     data_set.metadata["surface_reference_matrix_case_id"] =
         config_.reference_matrix_case_id;
+    data_set.metadata["surface_spis_import_case_name"] = config_.spis_import.case_name;
+    data_set.metadata["surface_spis_import_case_id"] = config_.spis_import.case_id;
+    data_set.metadata["surface_spis_import_case_root"] = config_.spis_import.case_root.string();
+    data_set.metadata["surface_spis_import_model_xml_path"] =
+        config_.spis_import.model_xml_path.string();
+    data_set.metadata["surface_spis_import_global_parameters_path"] =
+        config_.spis_import.global_parameters_path.string();
+    data_set.metadata["surface_spis_import_groups_path"] =
+        config_.spis_import.groups_path.string();
+    data_set.metadata["surface_spis_import_circuit_path"] =
+        config_.spis_import.circuit_path.string();
+    data_set.metadata["surface_spis_import_manifest_path"] =
+        config_.spis_import.import_manifest_path.string();
+    data_set.metadata["surface_spis_import_scan_plan_path"] =
+        config_.spis_import.scan_plan_path.string();
+    data_set.metadata["surface_spis_import_numkernel_output_root"] =
+        config_.spis_import.numkernel_output_root.string();
+    data_set.metadata["surface_spis_import_source_key_count"] =
+        std::to_string(config_.spis_import.source_keys.size());
+    for (std::size_t source_index = 0; source_index < config_.spis_import.source_keys.size();
+         ++source_index)
+    {
+        data_set.metadata["surface_spis_import_source_key_" + std::to_string(source_index)] =
+            config_.spis_import.source_keys[source_index];
+    }
+    data_set.metadata["surface_source_resolved_bookkeeping_origin"] =
+        "runtime_live_pic_and_surface_kernel";
+    data_set.metadata["surface_source_resolved_bookkeeping_mode"] =
+        "per_source_atomic_ledger_transition_v1";
+    data_set.metadata["surface_source_resolved_slot_count_complete"] =
+        source_resolved_bookkeeping_slots_complete_ ? "1" : "0";
+    data_set.metadata["surface_source_resolved_strict_attribution_available"] =
+        source_resolved_bookkeeping_strict_ ? "1" : "0";
+    data_set.metadata["surface_potential_sweep_mode"] =
+        potentialSweepModeName(config_.potential_sweep_mode);
+    data_set.metadata["surface_potential_sweep_point_count"] =
+        std::to_string(config_.potential_sweep_points.size());
+    data_set.metadata["surface_potential_sweep_active_point_index"] =
+        std::to_string(config_.active_potential_sweep_point_index);
+    data_set.metadata["surface_circuit_waveform_count"] =
+        std::to_string(config_.circuit_waveforms.size());
+    data_set.metadata["surface_comparison_target_count"] =
+        std::to_string(config_.comparison_targets.size());
+    data_set.metadata["surface_spis_reference_output_root"] =
+        config_.spis_reference_output.output_root.string();
+    data_set.metadata["surface_spis_reference_monitored_root"] =
+        config_.spis_reference_output.monitored_root.string();
+    data_set.metadata["surface_spis_reference_extracted_root"] =
+        config_.spis_reference_output.extracted_root.string();
+    data_set.metadata["surface_spis_reference_comparison_csv_path"] =
+        config_.spis_reference_output.comparison_csv_path.string();
+    data_set.metadata["surface_spis_reference_comparison_summary_path"] =
+        config_.spis_reference_output.comparison_summary_path.string();
+    data_set.metadata["surface_spis_reference_comparison_json_path"] =
+        config_.spis_reference_output.comparison_json_path.string();
     data_set.metadata["surface_pic_runtime_contract_id"] = "surface-pic-runtime-v1";
-    data_set.metadata["surface_instrument_contract_id"] = "surface-instrument-observer-v1";
-    data_set.metadata["surface_instrument_contract_version"] = "v1";
     data_set.metadata["surface_pic_runtime_supports_shared_surface_nodes"] =
         (config_.surface_pic_runtime_kind ==
          SurfacePicRuntimeKind::GraphCoupledSharedSurface)
@@ -11756,8 +11913,13 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
         std::to_string(currentSharedSurfaceParticleTransportReferenceShiftV());
     auto shared_runtime_observer_metadata_path = csv_path;
     shared_runtime_observer_metadata_path.replace_extension(".shared_runtime_observer.json");
+    auto monitor_json_path = csv_path;
+    monitor_json_path.replace_extension(".monitor.json");
     data_set.metadata["surface_pic_runtime_boundary_observer_artifact"] =
         shared_runtime_observer_metadata_path.filename().string();
+    appendSurfaceInstrumentObservabilityMetadata(
+        data_set, csv_path, config_.surface_instrument_set_kind,
+        circuit_model_ ? circuit_model_->nodeCount() : 0);
     auto shared_runtime_consistency_path = csv_path;
     shared_runtime_consistency_path.replace_extension(".shared_runtime_consistency.json");
     data_set.metadata["surface_pic_runtime_consistency_artifact"] =
@@ -11780,13 +11942,6 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
     global_sheath_field_solve_path.replace_extension(".global_sheath_field_solve.json");
     data_set.metadata["surface_pic_runtime_global_sheath_field_solve_artifact"] =
         useSharedSurfacePicRuntime() ? global_sheath_field_solve_path.filename().string() : "";
-    data_set.metadata["surface_instrument_exports_node_level_pic_series"] =
-        (config_.surface_instrument_set_kind ==
-         SurfaceInstrumentSetKind::SurfacePicObserverSet)
-            ? "1"
-            : "0";
-    data_set.metadata["surface_instrument_node_count"] =
-        std::to_string(circuit_model_ ? circuit_model_->nodeCount() : 0);
     data_set.metadata["live_pic_collision_cross_section_set_id"] =
         config_.live_pic_collision_cross_section_set_id;
     const PicMccCurrentSample latest_live_pic_sample =
@@ -11855,8 +12010,65 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
     data_set.metadata["surface_runtime_kernel_conductivity_scale"] =
         std::to_string(config_.material.deriveSurfaceConductivityScaleFactor());
     data_set.metadata["surface_material_model_family"] = surfaceMaterialModelFamily(config_);
+    const auto interactor_family_view =
+        surface_interaction_.interactorFamilyView(config_.material);
+    data_set.metadata["surface_interactor_family"] =
+        surface_interaction_.interactorFamily(config_.material);
+    data_set.metadata["surface_interactor_supported_family_count"] =
+        std::to_string(interactor_family_view.supported_family_count);
+    data_set.metadata["surface_interactor_active_family_count"] =
+        std::to_string(interactor_family_view.active_family_count);
+    data_set.metadata["surface_interactor_supported_family_signature"] =
+        interactor_family_view.supported_family_signature;
+    data_set.metadata["surface_interactor_active_family_signature"] =
+        interactor_family_view.active_family_signature;
+    const auto surf_mesh_family_view = buildSurfMeshFamilyView(config_);
+    data_set.metadata["surface_surf_mesh_route"] = surfaceSurfMeshRouteName(config_);
+    data_set.metadata["surface_surf_mesh_body_boundary_group_count"] =
+        std::to_string(config_.body_boundary_groups.size());
+    data_set.metadata["surface_surf_mesh_patch_boundary_group_count"] =
+        std::to_string(config_.patch_boundary_groups.size());
+    data_set.metadata["surface_surf_mesh_boundary_mapping_count"] =
+        std::to_string(config_.boundary_mappings.size());
+    data_set.metadata["surface_surf_mesh_runtime_node_count"] =
+        std::to_string(config_.surface_nodes.size());
+    appendFamilyMetadata(data_set.metadata, "surface_surf_mesh", surf_mesh_family_view);
     data_set.metadata["surface_distribution_family"] = distributionFamily(config_);
     data_set.metadata["surface_barrier_scaler_family"] = barrierScalerFamily(config_);
+    if (config_.runtime_route != SurfaceRuntimeRoute::LegacyBenchmark)
+    {
+        FieldSolver::SurfaceBarrierState neutral_state;
+        neutral_state.emission_temperature_ev =
+            std::max(1.0e-3, config_.material.getPhotoelectronTemperatureEv());
+        const auto photo_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+            config_.material, neutral_state, "surface_photo_barrier_scaler_kind",
+            FieldSolver::SurfaceBarrierScalerKind::VariableBarrier);
+        const auto secondary_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+            config_.material, neutral_state, "surface_secondary_barrier_scaler_kind",
+            FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+        const auto ion_secondary_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+            config_.material, neutral_state, "surface_ion_secondary_barrier_scaler_kind",
+            FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+        const auto backscatter_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+            config_.material, neutral_state, "surface_backscatter_barrier_scaler_kind",
+            FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+        data_set.metadata["surface_photo_barrier_scaler_family"] =
+            photo_decision.configured_family;
+        data_set.metadata["surface_photo_barrier_scaler_resolved_family"] =
+            photo_decision.resolved_family;
+        data_set.metadata["surface_secondary_barrier_scaler_family"] =
+            secondary_decision.configured_family;
+        data_set.metadata["surface_secondary_barrier_scaler_resolved_family"] =
+            secondary_decision.resolved_family;
+        data_set.metadata["surface_ion_secondary_barrier_scaler_family"] =
+            ion_secondary_decision.configured_family;
+        data_set.metadata["surface_ion_secondary_barrier_scaler_resolved_family"] =
+            ion_secondary_decision.resolved_family;
+        data_set.metadata["surface_backscatter_barrier_scaler_family"] =
+            backscatter_decision.configured_family;
+        data_set.metadata["surface_backscatter_barrier_scaler_resolved_family"] =
+            backscatter_decision.resolved_family;
+    }
     data_set.metadata["surface_reference_completion_used"] =
         referenceCompletionUsed(config_, latest_live_pic_kernel_snapshot) ? "1" : "0";
     data_set.metadata["surface_native_component_assembly_family"] =
@@ -11934,6 +12146,136 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
         solver_policy_flags.residual_guarded_requested ? "1" : "0";
     data_set.metadata["surface_solver_shared_global_fixed_iteration_policy"] =
         solver_policy_flags.fixed_iteration_policy_requested ? "1" : "0";
+    data_set.metadata["surface_transition_event_conductivity_evolution_enabled"] =
+        config_.material.getScalarProperty("transition_conductivity_evolution_enabled", 0.0) >
+                0.5
+            ? "1"
+            : "0";
+    data_set.metadata["surface_transition_event_source_flux_updater_enabled"] =
+        config_.material.getScalarProperty("transition_source_flux_updater_enabled", 0.0) > 0.5
+            ? "1"
+            : "0";
+    data_set.metadata["surface_transition_event_simulation_param_updater_enabled"] =
+        config_.material.getScalarProperty("transition_simulation_param_updater_enabled", 0.0) >
+                0.5
+            ? "1"
+            : "0";
+    data_set.metadata["surface_transition_event_sheath_or_presheath_poisson_bc_updater_enabled"] =
+        config_.material.getScalarProperty(
+            "transition_sheath_or_presheath_poisson_bc_updater_enabled", 0.0) > 0.5
+            ? "1"
+            : "0";
+    data_set.metadata["surface_transition_event_rccabs_sc_updater_enabled"] =
+        config_.material.getScalarProperty("transition_rccabs_sc_updater_enabled", 0.0) > 0.5
+            ? "1"
+            : "0";
+    data_set.metadata["surface_transition_event_vcross_bfield_updater_enabled"] =
+        config_.material.getScalarProperty("transition_vcross_bfield_updater_enabled", 0.0) >
+                0.5
+            ? "1"
+            : "0";
+    data_set.metadata["surface_transition_event_basic_eclipse_exit_enabled"] =
+        config_.material.getScalarProperty("transition_basic_eclipse_exit_enabled", 0.0) > 0.5
+            ? "1"
+            : "0";
+    data_set.metadata["surface_transition_event_transient_artificial_sources_enabled"] =
+        config_.material.getScalarProperty("transition_transient_artificial_sources_enabled", 0.0) >
+                0.5
+            ? "1"
+            : "0";
+    data_set.metadata["surface_transition_event_langmuir_probe_transition_enabled"] =
+        config_.material.getScalarProperty("transition_langmuir_probe_transition_enabled", 0.0) >
+                0.5
+            ? "1"
+            : "0";
+    data_set.metadata["surface_transition_event_local_time_enabled"] =
+        config_.material.getScalarProperty("transition_local_time_enabled", 0.0) > 0.5 ? "1"
+                                                                                         : "0";
+    data_set.metadata["surface_transition_event_spinning_enabled"] =
+        config_.material.getScalarProperty("transition_spinning_enabled", 0.0) > 0.5 ? "1"
+                                                                                       : "0";
+    data_set.metadata["surface_transition_event_sun_flux_enabled"] =
+        config_.material.getScalarProperty("transition_sun_flux_enabled", 0.0) > 0.5 ? "1"
+                                                                                       : "0";
+    data_set.metadata["surface_transition_conductivity_scale_latest"] =
+        std::to_string(status_.transition_conductivity_scale);
+    data_set.metadata["surface_transition_source_flux_scale_latest"] =
+        std::to_string(status_.transition_source_flux_scale);
+    data_set.metadata["surface_transition_simulation_param_scale_latest"] =
+        std::to_string(status_.transition_simulation_param_scale);
+    data_set.metadata["surface_transition_poisson_bc_length_scale_latest"] =
+        std::to_string(status_.transition_poisson_bc_length_scale);
+    data_set.metadata["surface_transition_poisson_bc_presheath_mode_latest"] =
+        status_.transition_poisson_bc_presheath_mode ? "1" : "0";
+    data_set.metadata["surface_transition_poisson_bc_effective_sheath_length_m_latest"] =
+        std::to_string(status_.transition_poisson_bc_effective_sheath_length_m);
+    data_set.metadata["surface_transition_rccabs_sc_scale_latest"] =
+        std::to_string(status_.transition_rccabs_sc_scale);
+    data_set.metadata["surface_transition_vcross_bfield_scale_latest"] =
+        std::to_string(status_.transition_vcross_bfield_scale);
+    data_set.metadata["surface_transition_basic_eclipse_exit_photo_scale_latest"] =
+        std::to_string(status_.transition_basic_eclipse_exit_photo_scale);
+    data_set.metadata["surface_transition_transient_artificial_sources_scale_latest"] =
+        std::to_string(status_.transition_transient_artificial_sources_scale);
+    data_set.metadata["surface_transition_transient_artificial_source_current_density_a_per_m2_latest"] =
+        std::to_string(
+            status_.transition_transient_artificial_source_current_density_a_per_m2);
+    data_set.metadata["surface_transition_langmuir_probe_derivative_scale_latest"] =
+        std::to_string(status_.transition_langmuir_probe_derivative_scale);
+    data_set.metadata["surface_transition_observer_active"] =
+        status_.transition_observer_active ? "1" : "0";
+    data_set.metadata["surface_transition_observer_active_latest"] =
+        status_.transition_observer_active ? "1" : "0";
+    data_set.metadata["surface_transition_observer_transition_count"] =
+        std::to_string(status_.transition_observer_transition_count);
+    data_set.metadata["surface_transition_observer_checkpoint_dt_s"] =
+        std::to_string(status_.transition_observer_checkpoint_dt_s);
+    data_set.metadata["surface_transition_observer_next_checkpoint_time_s"] =
+        std::to_string(status_.transition_observer_next_checkpoint_time_s);
+    data_set.metadata["surface_transition_observer_local_time_window_active_latest"] =
+        status_.transition_observer_local_time_window_active ? "1" : "0";
+    data_set.metadata["surface_transition_observer_spinning_spacecraft_active_latest"] =
+        status_.transition_observer_spinning_spacecraft_active ? "1" : "0";
+    data_set.metadata["surface_transition_observer_sun_flux_updater_active_latest"] =
+        status_.transition_observer_sun_flux_updater_active ? "1" : "0";
+    data_set.metadata["surface_transition_observer_pic_recalibration_requested_latest"] =
+        status_.transition_observer_pic_recalibration_requested ? "1" : "0";
+    data_set.metadata["surface_transition_observer_local_time_hour_latest"] =
+        std::to_string(status_.transition_observer_local_time_hour);
+    data_set.metadata["surface_transition_observer_spinning_phase_rad_latest"] =
+        std::to_string(status_.transition_observer_spinning_phase_rad);
+    data_set.metadata["surface_transition_observer_sun_flux_scale_latest"] =
+        std::to_string(status_.transition_observer_sun_flux_scale);
+    data_set.metadata["surface_transition_finalization_active"] =
+        status_.transition_finalization_active ? "1" : "0";
+    data_set.metadata["surface_transition_finalization_active_latest"] =
+        status_.transition_finalization_active ? "1" : "0";
+    data_set.metadata["surface_transition_finalization_trigger_time_s"] =
+        std::to_string(status_.transition_finalization_trigger_time_s);
+    data_set.metadata["surface_transition_finalization_duration_s"] =
+        std::to_string(status_.transition_finalization_duration_s);
+    data_set.metadata["surface_transition_finalization_validity_renormalization"] =
+        std::to_string(status_.transition_finalization_validity_renormalization);
+    data_set.metadata["surface_transition_finalization_shared_surface_pic_runtime_latest"] =
+        status_.transition_finalization_shared_surface_pic_runtime ? "1" : "0";
+    data_set.metadata["surface_transition_finalization_shared_global_coupled_iteration_limit_latest"] =
+        std::to_string(status_.transition_finalization_shared_global_coupled_iteration_limit);
+    data_set.metadata["surface_transition_finalization_fixed_iteration_policy_latest"] =
+        status_.transition_finalization_fixed_iteration_policy ? "1" : "0";
+    data_set.metadata["surface_transition_finalization_residual_guarded_policy_latest"] =
+        status_.transition_finalization_residual_guarded_policy ? "1" : "0";
+    data_set.metadata["surface_transition_sun_flux_intensity_active"] =
+        status_.transition_sun_flux_intensity_active ? "1" : "0";
+    data_set.metadata["surface_transition_sun_flux_intensity_active_latest"] =
+        status_.transition_sun_flux_intensity_active ? "1" : "0";
+    data_set.metadata["surface_transition_sun_flux_intensity_scale_latest"] =
+        std::to_string(status_.transition_sun_flux_intensity_scale);
+    data_set.metadata["surface_transition_sun_flux_intensity_normalized_latest"] =
+        std::to_string(status_.transition_sun_flux_intensity_normalized);
+    data_set.metadata["surface_transition_sun_flux_intensity_daylight_factor_latest"] =
+        std::to_string(status_.transition_sun_flux_intensity_daylight_factor);
+    data_set.metadata["surface_transition_sun_flux_intensity_spin_factor_latest"] =
+        std::to_string(status_.transition_sun_flux_intensity_spin_factor);
     data_set.metadata["seed"] = std::to_string(config_.seed);
     data_set.metadata["sampling_policy"] = config_.sampling_policy;
     data_set.metadata["benchmark_case_contract_id"] = "benchmark-case-v1";
@@ -11983,6 +12325,386 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
                                    : "BuiltinVolumetricAdapter";
     data_set.metadata["surface_external_field_solver_bridge_enabled"] =
         config_.enable_external_field_solver_bridge ? "1" : "0";
+    data_set.metadata["surface_external_volume_solver_bridge_enabled"] =
+        config_.enable_external_volume_solver_bridge ? "1" : "0";
+    const auto native_volume_route =
+        config_.enable_external_volume_solver_bridge
+            ? ::SCDAT::FieldSolver::NativeVolumeParityRoute::ExternalBridge
+            : (config_.enable_external_field_solver_bridge
+                   ? ::SCDAT::FieldSolver::NativeVolumeParityRoute::HybridBlend
+                   : ::SCDAT::FieldSolver::NativeVolumeParityRoute::NativeMinimal);
+    const bool has_configured_native_volume_bc_families =
+        !config_.native_volume_boundary_condition_families.empty();
+    const auto native_volume_bc_families =
+        has_configured_native_volume_bc_families
+            ? ::SCDAT::FieldSolver::normalizeNativeVolumeBoundaryConditionFamilies(
+                  config_.native_volume_boundary_condition_families)
+            : ::SCDAT::FieldSolver::resolveNativeVolumeBoundaryConditionFamilies(
+                  native_volume_route);
+    const auto native_volume_active_bc_families =
+        has_configured_native_volume_bc_families
+            ? native_volume_bc_families
+            : ::SCDAT::FieldSolver::resolveActiveNativeVolumeBoundaryConditionFamilies(
+                  native_volume_route);
+    const bool has_configured_native_volume_field_families =
+        !config_.native_volume_field_families.empty();
+    const auto native_volume_field_families =
+        has_configured_native_volume_field_families
+            ? ::SCDAT::FieldSolver::normalizeNativeVolumeFieldFamilies(
+                  config_.native_volume_field_families)
+            : ::SCDAT::FieldSolver::resolveNativeVolumeFieldFamilies(native_volume_route);
+    const auto native_volume_active_field_families =
+        has_configured_native_volume_field_families
+            ? native_volume_field_families
+            : ::SCDAT::FieldSolver::resolveActiveNativeVolumeFieldFamilies(
+                  native_volume_route);
+    const bool has_configured_native_volume_distribution_families =
+        !config_.native_volume_distribution_families.empty();
+    const auto native_volume_distribution_long_tail_families =
+        has_configured_native_volume_distribution_families
+            ? ::SCDAT::FieldSolver::normalizeNativeVolumeDistributionFamilies(
+                  config_.native_volume_distribution_families)
+            : std::vector<::SCDAT::FieldSolver::NativeVolumeDistributionFamily>{};
+    const bool has_configured_native_volume_interaction_families =
+        !config_.native_volume_interaction_families.empty();
+    const auto native_volume_distribution_families =
+        ::SCDAT::FieldSolver::resolveNativeVolumeDistributionFamilies(native_volume_route);
+    const auto native_volume_interaction_families =
+        has_configured_native_volume_interaction_families
+            ? ::SCDAT::FieldSolver::normalizeNativeVolumeInteractionFamilies(
+                  config_.native_volume_interaction_families)
+            : ::SCDAT::FieldSolver::resolveNativeVolumeInteractionFamilies(native_volume_route);
+    const auto native_volume_active_interaction_families =
+        has_configured_native_volume_interaction_families
+            ? native_volume_interaction_families
+            : ::SCDAT::FieldSolver::resolveActiveNativeVolumeInteractionFamilies(
+                  native_volume_route);
+
+    const auto util_family_view = buildSurfaceUtilFamilyView(config_);
+    data_set.metadata["surface_util_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util", util_family_view);
+    const auto util_distrib_func_family_view = buildSurfaceUtilDistribFuncFamilyView();
+    data_set.metadata["surface_util_distrib_func_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_distrib_func",
+                         util_distrib_func_family_view);
+    const auto util_exception_family_view = buildSurfaceUtilExceptionFamilyView();
+    data_set.metadata["surface_util_exception_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_exception",
+                         util_exception_family_view);
+    const auto util_instrument_family_view = buildSurfaceUtilInstrumentFamilyView(config_);
+    data_set.metadata["surface_util_instrument_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_instrument",
+                         util_instrument_family_view);
+    const auto util_func_family_view = buildSurfaceUtilFuncFamilyView();
+    data_set.metadata["surface_util_func_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_func", util_func_family_view);
+    const auto util_sampler_family_view = buildSurfaceUtilSamplerFamilyView();
+    data_set.metadata["surface_util_sampler_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_sampler", util_sampler_family_view);
+    const auto util_monitor_family_view = buildSurfaceUtilMonitorFamilyView();
+    data_set.metadata["surface_util_monitor_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_monitor", util_monitor_family_view);
+    const auto util_io_family_view = buildSurfaceUtilIoFamilyView();
+    data_set.metadata["surface_util_io_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_io", util_io_family_view);
+    const auto util_list_family_view = buildSurfaceUtilListFamilyView();
+    data_set.metadata["surface_util_list_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_list", util_list_family_view);
+    const auto util_part_family_view = buildSurfaceUtilPartFamilyView();
+    data_set.metadata["surface_util_part_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_part", util_part_family_view);
+    const auto util_phys_family_view = buildSurfaceUtilPhysFamilyView();
+    data_set.metadata["surface_util_phys_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_phys", util_phys_family_view);
+    const auto util_table_family_view = buildSurfaceUtilTableFamilyView();
+    data_set.metadata["surface_util_table_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_table", util_table_family_view);
+    const auto util_matrix_family_view = buildSurfaceUtilMatrixFamilyView();
+    data_set.metadata["surface_util_matrix_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_matrix", util_matrix_family_view);
+    const auto util_octree_family_view = buildSurfaceUtilOcTreeFamilyView(config_);
+    data_set.metadata["surface_util_octree_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_octree", util_octree_family_view);
+    const auto util_octree_mesh_family_view = buildSurfaceUtilOcTreeMeshFamilyView(config_);
+    data_set.metadata["surface_util_octree_mesh_route"] =
+        runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata,
+                         "surface_util_octree_mesh",
+                         util_octree_mesh_family_view);
+    const auto util_vect_family_view = buildSurfaceUtilVectFamilyView();
+    data_set.metadata["surface_util_vect_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_util_vect", util_vect_family_view);
+    data_set.metadata["surface_native_volume_parity_mode"] =
+        ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    data_set.metadata["surface_native_volume_parity_boundary_condition_route"] =
+        has_configured_native_volume_bc_families
+            ? "config_override"
+            : ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    data_set.metadata["surface_native_volume_parity_field_route"] =
+        has_configured_native_volume_field_families
+            ? "config_override"
+            : ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    data_set.metadata["surface_native_volume_parity_interaction_route"] =
+        has_configured_native_volume_interaction_families
+            ? "config_override"
+            : ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    data_set.metadata["surface_native_volume_active_interaction_route"] =
+        has_configured_native_volume_interaction_families
+            ? "config_override"
+            : ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    data_set.metadata["surface_native_volume_parity_bridge_compatible"] = "1";
+    data_set.metadata["surface_native_volume_parity_boundary_condition_count"] =
+        config_.enable_external_volume_solver_bridge || config_.enable_external_field_solver_bridge
+            ? "3"
+            : "2";
+    data_set.metadata["surface_native_volume_parity_boundary_condition_family_count"] =
+        std::to_string(native_volume_bc_families.size());
+    data_set.metadata["surface_native_volume_parity_boundary_condition_family_signature"] =
+        ::SCDAT::FieldSolver::nativeVolumeBoundaryConditionFamilySignature(
+            native_volume_bc_families);
+    data_set.metadata["surface_native_volume_parity_active_boundary_condition_family_count"] =
+        std::to_string(native_volume_active_bc_families.size());
+    data_set.metadata["surface_native_volume_parity_active_boundary_condition_family_signature"] =
+        ::SCDAT::FieldSolver::nativeVolumeBoundaryConditionFamilySignature(
+            native_volume_active_bc_families);
+    const auto native_volume_bc_abstract_family_view =
+        buildNativeVolumeBcAbstractFamilyView(native_volume_active_bc_families);
+    data_set.metadata["surface_native_volume_bc_abstract_route"] =
+        has_configured_native_volume_bc_families
+            ? "config_override"
+            : ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    appendFamilyMetadata(data_set.metadata, "surface_native_volume_bc_abstract",
+                         native_volume_bc_abstract_family_view);
+    data_set.metadata["surface_native_volume_parity_field_family_count"] =
+        std::to_string(native_volume_field_families.size());
+    data_set.metadata["surface_native_volume_parity_field_family_signature"] =
+        ::SCDAT::FieldSolver::nativeVolumeFieldFamilySignature(native_volume_field_families);
+    data_set.metadata["surface_native_volume_parity_active_field_family_count"] =
+        std::to_string(native_volume_active_field_families.size());
+    data_set.metadata["surface_native_volume_parity_active_field_family_signature"] =
+        ::SCDAT::FieldSolver::nativeVolumeFieldFamilySignature(
+            native_volume_active_field_families);
+    const auto native_volume_field_abstract_family_view =
+        buildNativeVolumeFieldAbstractFamilyView(native_volume_active_field_families);
+    data_set.metadata["surface_native_volume_field_route"] =
+        has_configured_native_volume_field_families
+            ? "config_override"
+            : ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    appendFamilyMetadata(data_set.metadata, "surface_native_volume_field",
+                         native_volume_field_abstract_family_view);
+    const auto native_volume_distribution_long_tail_family_view =
+        buildNativeVolumeDistributionLongTailFamilyView(
+            config_, native_volume_distribution_long_tail_families);
+    data_set.metadata["surface_native_volume_distribution_route"] =
+        has_configured_native_volume_distribution_families
+            ? "config_override"
+            : "distribution_model_inference";
+    appendFamilyMetadata(data_set.metadata, "surface_native_volume_distribution",
+                         native_volume_distribution_long_tail_family_view);
+    const auto native_volume_geom_family_view = buildNativeVolumeGeomFamilyView(config_);
+    data_set.metadata["surface_native_volume_parity_geom_route"] =
+        ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    appendFamilyMetadata(
+        data_set.metadata, "surface_native_volume_parity_geom", native_volume_geom_family_view);
+    const auto native_volume_mesh_family_view = buildNativeVolumeMeshFamilyView(config_);
+    data_set.metadata["surface_native_volume_parity_mesh_route"] =
+        ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    appendFamilyMetadata(
+        data_set.metadata, "surface_native_volume_parity_mesh", native_volume_mesh_family_view);
+    data_set.metadata["surface_native_volume_parity_distribution_channel_count"] = "3";
+    data_set.metadata["surface_native_volume_parity_distribution_family_count"] =
+        std::to_string(native_volume_distribution_families.size());
+    data_set.metadata["surface_native_volume_parity_distribution_family_signature"] =
+        ::SCDAT::FieldSolver::nativeVolumeDistributionFamilySignature(native_volume_route);
+    data_set.metadata["surface_native_volume_parity_interactor_count"] =
+        std::to_string(native_volume_active_interaction_families.size());
+    data_set.metadata["surface_native_volume_parity_interaction_family_count"] =
+        std::to_string(native_volume_interaction_families.size());
+    data_set.metadata["surface_native_volume_parity_interaction_family_signature"] =
+        ::SCDAT::FieldSolver::nativeVolumeInteractionFamilySignature(
+            native_volume_interaction_families);
+    data_set.metadata["surface_native_volume_active_interaction_family_count"] =
+        std::to_string(native_volume_active_interaction_families.size());
+    data_set.metadata["surface_native_volume_active_interaction_family_signature"] =
+        ::SCDAT::FieldSolver::nativeVolumeInteractionFamilySignature(
+            native_volume_active_interaction_families);
+    const auto native_volume_interaction_long_tail_family_view =
+        buildNativeVolumeInteractionLongTailFamilyView(native_volume_active_interaction_families);
+    data_set.metadata["surface_native_volume_interaction_long_tail_route"] =
+        has_configured_native_volume_interaction_families
+            ? "config_override"
+            : ::SCDAT::FieldSolver::nativeVolumeParityRouteName(native_volume_route);
+    appendFamilyMetadata(data_set.metadata, "surface_native_volume_interaction_long_tail",
+                         native_volume_interaction_long_tail_family_view);
+    SurfaceAdvanceTransitionInput top_transition_input;
+    top_transition_input.config = config_;
+    top_transition_input.status = status_;
+    top_transition_input.has_legacy_benchmark_replay = !legacy_benchmark_replay_.empty();
+    top_transition_input.has_circuit_model = circuit_model_ != nullptr;
+    top_transition_input.patch_count = circuit_model_ ? circuit_model_->patchCount() : 0;
+    const auto top_transition = evaluateSurfaceAdvanceTransition(top_transition_input);
+    data_set.metadata["surface_top_transition_route"] = runtimeRouteName(config_.runtime_route);
+    data_set.metadata["surface_top_transition_interface_family_count"] =
+        std::to_string(top_transition.object_layer.interface_layer_family_count);
+    data_set.metadata["surface_top_transition_active_interface_family_count"] =
+        std::to_string(top_transition.object_layer.active_interface_layer_family_count);
+    data_set.metadata["surface_top_transition_interface_family_signature"] =
+        top_transition.object_layer.interface_layer_family_signature;
+    data_set.metadata["surface_top_transition_active_interface_family_signature"] =
+        top_transition.object_layer.active_interface_layer_family_signature;
+    data_set.metadata["surface_top_transition_family_count"] =
+        std::to_string(top_transition.object_layer.supported_family_count);
+    data_set.metadata["surface_top_transition_active_family_count"] =
+        std::to_string(top_transition.object_layer.active_family_count);
+    data_set.metadata["surface_top_transition_family_signature"] =
+        top_transition.object_layer.supported_family_signature;
+    data_set.metadata["surface_top_transition_active_family_signature"] =
+        top_transition.object_layer.active_family_signature;
+    data_set.metadata["surface_top_transition_lifecycle_family_count"] =
+        std::to_string(top_transition.object_layer.lifecycle_family_count);
+    data_set.metadata["surface_top_transition_active_lifecycle_family_count"] =
+        std::to_string(top_transition.object_layer.active_lifecycle_family_count);
+    data_set.metadata["surface_top_transition_lifecycle_family_signature"] =
+        top_transition.object_layer.lifecycle_family_signature;
+    data_set.metadata["surface_top_transition_active_lifecycle_family_signature"] =
+        top_transition.object_layer.active_lifecycle_family_signature;
+    const auto top_top_family_view = buildTopTopFamilyView(
+        top_top_entrypoint_mode_, top_top_adaptive_time_stepping_, top_top_total_duration_s_);
+    data_set.metadata["surface_top_top_route"] = runtimeRouteName(config_.runtime_route);
+    data_set.metadata["surface_top_top_entrypoint_mode"] = top_top_entrypoint_mode_;
+    data_set.metadata["surface_top_top_source_name"] = top_top_source_name_;
+    data_set.metadata["surface_top_top_source_description"] = top_top_source_description_;
+    data_set.metadata["surface_top_top_scheduled_steps"] =
+        std::to_string(top_top_scheduled_steps_);
+    data_set.metadata["surface_top_top_adaptive_time_stepping"] =
+        top_top_adaptive_time_stepping_ ? "1" : "0";
+    data_set.metadata["surface_top_top_total_duration_s"] =
+        std::to_string(top_top_total_duration_s_);
+    data_set.metadata["surface_top_top_minimum_time_step_s"] =
+        std::to_string(top_top_minimum_time_step_s_);
+    data_set.metadata["surface_top_top_maximum_time_step_s"] =
+        std::to_string(top_top_maximum_time_step_s_);
+    appendFamilyMetadata(data_set.metadata, "surface_top_top", top_top_family_view);
+    const auto top_simulation_family_view = buildTopSimulationFamilyView(config_);
+    data_set.metadata["surface_top_simulation_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_top_simulation", top_simulation_family_view);
+    const auto top_plasma_family_view = buildTopPlasmaFamilyView(config_, top_transition);
+    data_set.metadata["surface_top_plasma_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_top_plasma", top_plasma_family_view);
+    const auto top_sc_family_view = buildTopScFamilyView(config_);
+    data_set.metadata["surface_top_sc_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_top_sc", top_sc_family_view);
+    const auto top_grid_family_view = buildTopGridFamilyView(config_);
+    data_set.metadata["surface_top_grid_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_top_grid", top_grid_family_view);
+    const auto top_default_family_view = buildTopDefaultFamilyView(config_);
+    data_set.metadata["surface_top_default_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_top_default", top_default_family_view);
+    Coupling::CircuitFamilyRouteInput circ_family_input;
+    circ_family_input.has_circuit_model = circuit_model_ != nullptr;
+    circ_family_input.enable_reference_current_balance = config_.use_reference_current_balance;
+    circ_family_input.enable_body_patch_circuit = config_.enable_body_patch_circuit;
+    circ_family_input.has_dynamic_excitations = !config_.circuit_waveforms.empty();
+    circ_family_input.has_weighted_didv_terms = false;
+    circ_family_input.has_multi_surface_didv =
+        circuit_model_ != nullptr && circuit_model_->patchCount() > 1;
+    circ_family_input.has_matrix_didv = false;
+    circ_family_input.has_regular_reduction = false;
+    circ_family_input.has_surface_reduction = false;
+    circ_family_input.has_off_diagonal_coupling =
+        circuit_model_ != nullptr && circuit_model_->patchCount() > 1 &&
+        (useSharedSurfaceGlobalCoupledSolve() || circuit_model_->branchCount() > 1);
+    circ_family_input.node_count = circuit_model_ ? circuit_model_->nodeCount() : 0;
+    circ_family_input.patch_count = circuit_model_ ? circuit_model_->patchCount() : 0;
+    circ_family_input.branch_count = circuit_model_ ? circuit_model_->branchCount() : 0;
+    const auto circ_family_view = Coupling::resolveCircuitFamilyView(circ_family_input);
+    data_set.metadata["surface_circ_circuit_family_count"] =
+        std::to_string(circ_family_view.circ_family_count);
+    data_set.metadata["surface_circ_active_circuit_family_count"] =
+        std::to_string(circ_family_view.active_circ_family_count);
+    data_set.metadata["surface_circ_circuit_family_signature"] =
+        circ_family_view.circ_family_signature;
+    data_set.metadata["surface_circ_active_circuit_family_signature"] =
+        circ_family_view.active_circ_family_signature;
+    data_set.metadata["surface_circ_field_family_count"] =
+        std::to_string(circ_family_view.circfield_family_count);
+    data_set.metadata["surface_circ_active_field_family_count"] =
+        std::to_string(circ_family_view.active_circfield_family_count);
+    data_set.metadata["surface_circ_field_family_signature"] =
+        circ_family_view.circfield_family_signature;
+    data_set.metadata["surface_circ_active_field_family_signature"] =
+        circ_family_view.active_circfield_family_signature;
+    data_set.metadata["surface_circ_didv_family_count"] =
+        std::to_string(circ_family_view.didv_family_count);
+    data_set.metadata["surface_circ_active_didv_family_count"] =
+        std::to_string(circ_family_view.active_didv_family_count);
+    data_set.metadata["surface_circ_didv_family_signature"] =
+        circ_family_view.didv_family_signature;
+    data_set.metadata["surface_circ_active_didv_family_signature"] =
+        circ_family_view.active_didv_family_signature;
+    const bool matter_solver_active =
+        config_.runtime_route == SurfaceRuntimeRoute::SurfacePic ||
+        config_.runtime_route == SurfaceRuntimeRoute::SurfacePicHybrid ||
+        config_.enable_live_pic_window || config_.enable_pic_calibration ||
+        useSharedSurfacePicRuntime();
+    const auto latest_solver_family_node_value =
+        [](const std::vector<std::vector<double>>& history, std::size_t node_index) {
+            return (node_index < history.size() && !history[node_index].empty())
+                       ? history[node_index].back()
+                       : 0.0;
+        };
+    const std::size_t solver_family_primary_node_index =
+        circuit_model_ ? circuit_model_->primaryPatchNodeIndex() : 0;
+    const double solver_family_last_volume_solver_mode_id =
+        circuit_model_
+            ? latest_solver_family_node_value(history_surface_node_volume_solver_mode_ids_,
+                                              solver_family_primary_node_index)
+                       : 0.0;
+    Solver::SurfaceSolverFamilyRouteInput solver_family_input;
+    solver_family_input.has_circuit_solver =
+        circuit_model_ != nullptr && circuit_model_->nodeCount() > 0;
+    solver_family_input.has_electromag_solver =
+        electric_field_provider_ != nullptr || volume_charge_provider_ != nullptr ||
+        field_solver_adapter_ != nullptr || volumetric_solver_adapter_ != nullptr;
+    solver_family_input.has_matter_solver = matter_solver_active;
+    solver_family_input.use_dense_electromag_solver =
+        solver_family_input.has_electromag_solver &&
+        solver_family_last_volume_solver_mode_id < 1.5;
+    solver_family_input.use_iterative_electromag_solver =
+        solver_family_last_volume_solver_mode_id >= 1.5;
+    solver_family_input.has_magnetic_field = false;
+    solver_family_input.has_pic_particle_coupling = matter_solver_active;
+    const auto solver_family_view =
+        Solver::resolveSurfaceSolverFamilyView(solver_family_input);
+    data_set.metadata["surface_solver_circuit_family_count"] =
+        std::to_string(solver_family_view.circuit_family_count);
+    data_set.metadata["surface_solver_active_circuit_family_count"] =
+        std::to_string(solver_family_view.active_circuit_family_count);
+    data_set.metadata["surface_solver_circuit_family_signature"] =
+        solver_family_view.circuit_family_signature;
+    data_set.metadata["surface_solver_active_circuit_family_signature"] =
+        solver_family_view.active_circuit_family_signature;
+    data_set.metadata["surface_solver_electromag_family_count"] =
+        std::to_string(solver_family_view.electromag_family_count);
+    data_set.metadata["surface_solver_active_electromag_family_count"] =
+        std::to_string(solver_family_view.active_electromag_family_count);
+    data_set.metadata["surface_solver_electromag_family_signature"] =
+        solver_family_view.electromag_family_signature;
+    data_set.metadata["surface_solver_active_electromag_family_signature"] =
+        solver_family_view.active_electromag_family_signature;
+    data_set.metadata["surface_solver_matter_family_count"] =
+        std::to_string(solver_family_view.matter_family_count);
+    data_set.metadata["surface_solver_active_matter_family_count"] =
+        std::to_string(solver_family_view.active_matter_family_count);
+    data_set.metadata["surface_solver_matter_family_signature"] =
+        solver_family_view.matter_family_signature;
+    data_set.metadata["surface_solver_active_matter_family_signature"] =
+        solver_family_view.active_matter_family_signature;
+    const auto solver_util_family_view = buildSolverUtilFamilyView(
+        solver_family_input.has_circuit_solver, solver_family_input.has_electromag_solver,
+        solver_family_input.has_matter_solver);
+    data_set.metadata["surface_solver_util_route"] = runtimeRouteName(config_.runtime_route);
+    appendFamilyMetadata(data_set.metadata, "surface_solver_util", solver_util_family_view);
     data_set.metadata["surface_circuit_model"] =
         circuit_model_ ? circuit_model_->modelName() : "BuiltinCircuit";
     std::vector<LegacyBenchmarkCurveSample> actual_curve;
@@ -12737,77 +13459,13 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
         history_surface_node_propagated_reference_potentials_,
         history_surface_node_field_solver_reference_potentials_,
         history_surface_node_field_solver_coupling_gains_);
-    SurfaceBenchmarkMonitorSnapshot benchmark_monitor_snapshot;
-    benchmark_monitor_snapshot.runtime_route = runtimeRouteName(config_.runtime_route);
-    benchmark_monitor_snapshot.benchmark_mode =
-        config_.benchmark_mode == SurfaceBenchmarkMode::LegacyRefCompatible
-            ? "LegacyRefCompatible"
-            : "UnifiedKernelAligned";
-    benchmark_monitor_snapshot.benchmark_source = benchmarkSourceName(config_.benchmark_source);
-    benchmark_monitor_snapshot.benchmark_execution_mode =
-        legacyBenchmarkExecutionModeName(config_.legacy_benchmark_execution_mode);
-    benchmark_monitor_snapshot.consistency_status =
-        benchmark_consistency.status.empty() ? "not_applicable" : benchmark_consistency.status;
-    benchmark_monitor_snapshot.consistency_authority = benchmark_consistency.authority;
-    benchmark_monitor_snapshot.patch_rmse_v =
-        benchmark_patch_metrics.valid ? benchmark_patch_metrics.rmse_v : 0.0;
-    benchmark_monitor_snapshot.body_rmse_v =
-        benchmark_body_metrics.valid ? benchmark_body_metrics.rmse_v : 0.0;
-    benchmark_monitor_snapshot.compared_patch_samples =
-        benchmark_patch_metrics.valid ? benchmark_patch_metrics.compared_sample_count : 0;
-    benchmark_monitor_snapshot.compared_body_samples =
-        benchmark_body_metrics.valid ? benchmark_body_metrics.compared_sample_count : 0;
-    benchmark_monitor_snapshot.terminal_potential_v =
-        history_potential_.empty() ? 0.0 : history_potential_.back();
-    benchmark_monitor_snapshot.time_to_equilibrium_ms = first_equilibrium_time_ms();
+    const auto benchmark_monitor_snapshot = buildSurfaceBenchmarkMonitorSnapshot(
+        config_, benchmark_consistency, benchmark_patch_metrics, benchmark_body_metrics,
+        history_potential_, first_equilibrium_time_ms());
 
-    const std::size_t export_row_count = data_set.axis_values.size();
-    for (auto& [_, values] : data_set.scalar_series)
+    normalizeExportScalarSeries(data_set);
+    if (!validateExportScalarSeries(data_set, last_error_message_))
     {
-        if (values.size() < export_row_count)
-        {
-            values.resize(export_row_count, values.empty() ? 0.0 : values.back());
-        }
-        else if (values.size() > export_row_count)
-        {
-            values.resize(export_row_count);
-        }
-    }
-
-    if (!data_set.isConsistent())
-    {
-        for (const auto& [series_name, values] : data_set.scalar_series)
-        {
-            if (values.size() != data_set.axis_values.size())
-            {
-                last_error_message_ =
-                    "Inconsistent surface result series before export: " + series_name +
-                    " expected=" + std::to_string(data_set.axis_values.size()) + " actual=" +
-                    std::to_string(values.size());
-                std::cerr << last_error_message_ << "\n";
-                return false;
-            }
-        }
-        last_error_message_ = "Inconsistent surface result data set before export";
-        std::cerr << last_error_message_ << "\n";
-        return false;
-    }
-    if (!data_set.hasOnlyFiniteValues())
-    {
-        for (const auto& [series_name, values] : data_set.scalar_series)
-        {
-            for (const double value : values)
-            {
-                if (!std::isfinite(value))
-                {
-                    last_error_message_ =
-                        "Non-finite surface result series before export: " + series_name;
-                    std::cerr << last_error_message_ << "\n";
-                    return false;
-                }
-            }
-        }
-        last_error_message_ = "Non-finite surface result data set before export";
         std::cerr << last_error_message_ << "\n";
         return false;
     }
@@ -12824,564 +13482,383 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
     }
     if (have_benchmark_definition)
     {
-        auto display_patch_curve = actual_curve;
-        auto display_body_curve = actual_body_curve;
-        const auto prepend_initial_runtime_sample =
-            [&](std::vector<LegacyBenchmarkCurveSample>& curve, ReferenceSurfaceRole role,
-                std::size_t node_index, const std::string& node_name, double node_area_m2,
-                double conductivity_s_per_m) {
-                if (curve.empty() || !(curve.front().time_s > 1.0e-12))
-                {
-                    return;
-                }
-
-                LegacyBenchmarkCurveSample initial_sample;
-                initial_sample.cycle_index = 0;
-                initial_sample.time_s = 0.0;
-                const double initial_body_potential_v = config_.body_initial_potential_v;
-                const double initial_patch_potential_v = config_.body_initial_potential_v;
-                const auto runtime_state = buildRuntimeState(
-                    initial_body_potential_v, initial_patch_potential_v,
-                    std::max(1.0e-16, node_area_m2), conductivity_s_per_m,
-                    computeEffectiveSheathLength(), node_index, node_name);
-                const SurfaceCurrents initial_currents =
-                    current_model_ ? current_model_->evaluate(role, runtime_state) : SurfaceCurrents{};
-                initial_sample.potential_v =
-                    role == ReferenceSurfaceRole::Body ? initial_body_potential_v
-                                                       : initial_patch_potential_v;
-                initial_sample.jnet_a_per_m2 = initial_currents.total_current_a_per_m2;
-                initial_sample.je_a_per_m2 = initial_currents.electron_current_a_per_m2;
-                initial_sample.jse_a_per_m2 = initial_currents.secondary_emission_a_per_m2;
-                initial_sample.jb_a_per_m2 = initial_currents.backscatter_emission_a_per_m2;
-                initial_sample.ji_a_per_m2 = initial_currents.ion_current_a_per_m2;
-                initial_sample.jsi_a_per_m2 = initial_currents.ion_secondary_emission_a_per_m2;
-                initial_sample.jph_a_per_m2 = initial_currents.photo_emission_a_per_m2;
-                initial_sample.jcond_a_per_m2 = initial_currents.conduction_current_a_per_m2;
-
-                for (auto& sample : curve)
-                {
-                    sample.cycle_index += 1;
-                }
-                curve.insert(curve.begin(), initial_sample);
+        std::vector<LegacyBenchmarkCurveSample> display_patch_curve;
+        std::vector<LegacyBenchmarkCurveSample> display_body_curve;
+        const auto build_runtime_state =
+            [this](double body_potential_v, double patch_potential_v, double surface_area_m2,
+                   double effective_conductivity_s_per_m, double effective_sheath_length_m,
+                   std::size_t node_index, const std::string& node_name) {
+                return buildRuntimeState(body_potential_v, patch_potential_v, surface_area_m2,
+                                         effective_conductivity_s_per_m,
+                                         effective_sheath_length_m, node_index, node_name);
             };
-        prepend_initial_runtime_sample(
-            display_patch_curve, ReferenceSurfaceRole::Patch,
+        const auto evaluate_currents =
+            [this](ReferenceSurfaceRole role, const SurfaceModelRuntimeState& runtime_state) {
+                return current_model_ ? current_model_->evaluate(role, runtime_state)
+                                      : SurfaceCurrents{};
+            };
+        buildLegacyBenchmarkDisplayCurves(
+            actual_curve, actual_body_curve, display_patch_curve, display_body_curve,
             circuit_model_ ? circuit_model_->primaryPatchNodeIndex() : 0,
             circuit_model_ ? circuit_model_->nodeName(circuit_model_->primaryPatchNodeIndex())
                            : std::string{"patch"},
-            circuit_model_
-                ? circuit_model_->nodeAreaM2(circuit_model_->primaryPatchNodeIndex())
-                : config_.surface_area_m2,
-            computeEffectiveConductivity(config_.body_initial_potential_v));
-        prepend_initial_runtime_sample(
-            display_body_curve, ReferenceSurfaceRole::Body,
+            circuit_model_ ? circuit_model_->nodeAreaM2(circuit_model_->primaryPatchNodeIndex())
+                           : config_.surface_area_m2,
             circuit_model_ ? circuit_model_->bodyNodeIndex() : 0,
             circuit_model_ ? circuit_model_->nodeName(circuit_model_->bodyNodeIndex())
                            : std::string{"body"},
             circuit_model_ ? circuit_model_->bodyAreaM2() : config_.surface_area_m2,
-            computeEffectiveConductivity(config_.body_initial_potential_v));
+            config_.body_initial_potential_v, config_.body_initial_potential_v,
+            computeEffectiveConductivity(config_.body_initial_potential_v),
+            computeEffectiveSheathLength(), build_runtime_state, evaluate_currents);
 
-        auto report_path = csv_path;
-        report_path.replace_extension(".benchmark.txt");
-        if (!writeLegacyBenchmarkReport(report_path, config_.runtime_route, config_.benchmark_source,
-                                        config_.legacy_benchmark_execution_mode,
-                                        benchmark_case_definition, display_patch_curve, display_body_curve,
-                                        benchmark_patch_metrics, benchmark_body_metrics,
-                                        benchmark_consistency))
+        if (!writeLegacyBenchmarkArtifacts(
+                csv_path, config_, benchmark_case_definition, display_patch_curve,
+                display_body_curve, benchmark_patch_metrics, benchmark_body_metrics,
+                benchmark_consistency, last_error_message_))
         {
-            last_error_message_ =
-                "Failed to write legacy benchmark sidecar report to: " + report_path.string();
-            std::cerr << last_error_message_ << "\n";
-            return false;
-        }
-
-        auto comparison_csv_path = csv_path;
-        comparison_csv_path.replace_extension(".benchmark.csv");
-        if (!writeLegacyBenchmarkComparisonCsv(comparison_csv_path, display_patch_curve,
-                                               benchmark_case_definition.patch_reference_curve,
-                                               display_body_curve,
-                                               benchmark_case_definition.body_reference_curve))
-        {
-            last_error_message_ =
-                "Failed to write legacy benchmark comparison csv to: " +
-                comparison_csv_path.string();
             std::cerr << last_error_message_ << "\n";
             return false;
         }
     }
     if (circuit_model_)
     {
-        auto graph_report_path = csv_path;
-        graph_report_path.replace_extension(".graph.txt");
-        if (!writeSurfaceGraphReport(
-                graph_report_path, config_, circuit_model_.get(),
-                runtimeRouteName(config_.runtime_route),
-                circuit_model_ ? circuit_model_->modelName() : "BuiltinCircuit",
-                electric_field_provider_ ? electric_field_provider_->modelName()
-                                         : "BuiltinElectricField",
-                reference_graph_propagator_ ? reference_graph_propagator_->modelName()
-                                            : "BuiltinReferenceGraph",
-                graph_capacitance_matrix_provider_
-                    ? graph_capacitance_matrix_provider_->modelName()
-                    : "BuiltinGraphCapacitance",
-                field_solver_adapter_ ? field_solver_adapter_->modelName()
-                                      : "BuiltinFieldSolverAdapter",
-                graph_capacitance_matrix_provider_.get(),
-                history_surface_node_potentials_, history_surface_node_total_currents_,
-                history_surface_node_normal_electric_fields_,
-                history_surface_node_local_charge_densities_,
-                history_surface_node_propagated_reference_potentials_,
-                history_surface_node_field_solver_reference_potentials_,
-                history_surface_node_graph_capacitance_diagonals_,
-                history_surface_node_graph_capacitance_row_sums_,
-                history_surface_node_field_solver_coupling_gains_,
-                history_surface_node_field_solver_capacitance_scales_,
-                history_surface_branch_currents_, history_surface_branch_conductances_,
-                history_surface_branch_voltage_drops_, history_surface_branch_power_w_,
-                history_surface_branch_mutual_capacitances_))
+        if (!exportSurfaceObserverArtifacts(
+                csv_path,
+                [&](const std::filesystem::path& monitor_json_path) {
+                    return writeSurfaceMonitorJson(
+                        monitor_json_path, circuit_model_.get(), graph_monitor_snapshot,
+                        field_monitor_snapshot, benchmark_monitor_snapshot);
+                },
+                [&](const std::filesystem::path& shared_runtime_observer_path) {
+                    return writeSharedSurfaceRuntimeObserverJson(
+                        shared_runtime_observer_path, config_, circuit_model_.get(), history_time_,
+                        history_shared_surface_patch_potential_,
+                        history_shared_surface_patch_area_,
+                        history_shared_surface_reference_potential_,
+                        history_shared_surface_effective_sheath_length_,
+                        history_shared_surface_sheath_charge_,
+                        history_shared_surface_runtime_enabled_,
+                        history_surface_node_potentials_,
+                        history_surface_node_shared_runtime_enabled_,
+                        history_surface_node_shared_patch_potentials_,
+                        history_surface_node_shared_reference_potentials_,
+                        history_surface_node_shared_sheath_charges_);
+                },
+                last_error_message_))
         {
-            last_error_message_ =
-                "Failed to write surface graph sidecar report to: " +
-                graph_report_path.string();
-            return false;
-        }
-
-        auto monitor_json_path = csv_path;
-        monitor_json_path.replace_extension(".monitor.json");
-        if (!writeSurfaceMonitorJson(monitor_json_path, circuit_model_.get(),
-                                     graph_monitor_snapshot, field_monitor_snapshot,
-                                     benchmark_monitor_snapshot))
-        {
-            last_error_message_ =
-                "Failed to write surface monitor json to: " + monitor_json_path.string();
-            return false;
-        }
-
-        auto shared_runtime_observer_path = csv_path;
-        shared_runtime_observer_path.replace_extension(".shared_runtime_observer.json");
-        if (!writeSharedSurfaceRuntimeObserverJson(
-                shared_runtime_observer_path, config_, circuit_model_.get(), history_time_,
-                history_shared_surface_patch_potential_, history_shared_surface_patch_area_,
-                history_shared_surface_reference_potential_,
-                history_shared_surface_effective_sheath_length_,
-                history_shared_surface_sheath_charge_, history_shared_surface_runtime_enabled_,
-                history_surface_node_potentials_, history_surface_node_shared_runtime_enabled_,
-                history_surface_node_shared_patch_potentials_,
-                history_surface_node_shared_reference_potentials_,
-                history_surface_node_shared_sheath_charges_))
-        {
-            last_error_message_ = "Failed to write shared surface runtime observer json to: " +
-                                  shared_runtime_observer_path.string();
             std::cerr << last_error_message_ << "\n";
             return false;
         }
         if (useSharedSurfacePicRuntime())
         {
-            auto shared_runtime_consistency_path = csv_path;
-            shared_runtime_consistency_path.replace_extension(".shared_runtime_consistency.json");
-            if (!writeSharedSurfaceRuntimeConsistencyJson(
-                    shared_runtime_consistency_path, config_, circuit_model_.get(), history_time_,
-                    history_surface_node_potentials_,
-                    history_shared_surface_pre_global_solve_patch_potential_spread_,
-                    history_shared_surface_patch_potential_spread_reduction_v_,
-                    history_shared_surface_patch_potential_spread_reduction_ratio_,
-                history_shared_surface_current_matrix_coupling_active_,
-                history_shared_surface_current_matrix_coupling_offdiag_entries_,
-                    history_shared_surface_global_coupled_solve_active_,
-                    history_shared_surface_global_coupled_solve_iterations_,
-                    history_shared_surface_global_coupled_solve_converged_,
-                    history_shared_surface_global_coupled_solve_max_delta_v_,
-                    history_shared_surface_live_pic_coupled_refresh_active_,
-                    history_shared_surface_live_pic_coupled_refresh_count_,
-                    history_shared_surface_particle_transport_coupling_active_,
-                    history_shared_surface_particle_transport_offdiag_entries_,
-                    history_shared_surface_particle_transport_total_conductance_s_,
-                    history_shared_surface_particle_transport_conservation_error_a_per_v_,
-                    history_shared_surface_particle_transport_charge_c_,
-                    history_shared_surface_particle_transport_reference_shift_v_,
-                    history_surface_node_normal_electric_fields_,
-                history_surface_node_local_charge_densities_,
-                history_surface_node_shared_runtime_enabled_,
-                history_surface_node_shared_reference_potentials_,
-                history_surface_node_shared_sheath_charges_,
-                history_surface_node_distributed_particle_transport_charges_,
-                history_surface_node_distributed_particle_transport_reference_shifts_,
-                history_surface_node_distributed_particle_transport_net_fluxes_,
-                shared_particle_transport_edge_charge_matrix_c_,
-                shared_particle_transport_edge_target_charge_matrix_c_,
-                shared_particle_transport_edge_operator_drive_matrix_c_,
-                shared_particle_transport_edge_graph_operator_iterations_last_,
-                shared_particle_transport_edge_graph_operator_converged_last_ >= 0.5,
-                shared_particle_transport_edge_graph_operator_max_balance_residual_c_last_,
-                shared_particle_transport_edge_graph_operator_branch_graph_edge_count_last_,
-                shared_particle_transport_edge_graph_operator_branch_graph_pair_count_last_,
-                shared_particle_transport_edge_graph_operator_effective_pair_count_last_,
-                shared_particle_transport_edge_graph_operator_total_pair_weight_f_last_,
-                shared_particle_transport_edge_graph_operator_total_conductance_weight_f_last_,
-                shared_particle_transport_edge_graph_operator_min_node_preconditioner_last_,
-                shared_particle_transport_edge_graph_operator_max_node_preconditioner_last_,
-                    history_surface_node_live_pic_electron_currents_,
-                    history_surface_node_live_pic_ion_currents_,
-                    history_surface_node_live_pic_net_currents_,
-                    history_surface_node_live_pic_collision_counts_,
-                    history_surface_node_electron_calibration_factors_,
-                    history_surface_node_ion_calibration_factors_))
+            if (!exportSharedRuntimeArtifactSuite(
+                    csv_path, useSharedSurfaceParticleTransportCoupling(),
+                    [&](const std::filesystem::path& shared_runtime_consistency_path) {
+                        return writeSharedSurfaceRuntimeConsistencyJson(
+                            shared_runtime_consistency_path, config_, circuit_model_.get(),
+                            history_time_, history_surface_node_potentials_,
+                            history_shared_surface_pre_global_solve_patch_potential_spread_,
+                            history_shared_surface_patch_potential_spread_reduction_v_,
+                            history_shared_surface_patch_potential_spread_reduction_ratio_,
+                            history_shared_surface_current_matrix_coupling_active_,
+                            history_shared_surface_current_matrix_coupling_offdiag_entries_,
+                            history_shared_surface_global_coupled_solve_active_,
+                            history_shared_surface_global_coupled_solve_iterations_,
+                            history_shared_surface_global_coupled_solve_converged_,
+                            history_shared_surface_global_coupled_solve_max_delta_v_,
+                            history_shared_surface_live_pic_coupled_refresh_active_,
+                            history_shared_surface_live_pic_coupled_refresh_count_,
+                            history_shared_surface_particle_transport_coupling_active_,
+                            history_shared_surface_particle_transport_offdiag_entries_,
+                            history_shared_surface_particle_transport_total_conductance_s_,
+                            history_shared_surface_particle_transport_conservation_error_a_per_v_,
+                            history_shared_surface_particle_transport_charge_c_,
+                            history_shared_surface_particle_transport_reference_shift_v_,
+                            history_surface_node_normal_electric_fields_,
+                            history_surface_node_local_charge_densities_,
+                            history_surface_node_shared_runtime_enabled_,
+                            history_surface_node_shared_reference_potentials_,
+                            history_surface_node_shared_sheath_charges_,
+                            history_surface_node_distributed_particle_transport_charges_,
+                            history_surface_node_distributed_particle_transport_reference_shifts_,
+                            history_surface_node_distributed_particle_transport_net_fluxes_,
+                            shared_particle_transport_edge_charge_matrix_c_,
+                            shared_particle_transport_edge_target_charge_matrix_c_,
+                            shared_particle_transport_edge_operator_drive_matrix_c_,
+                            shared_particle_transport_edge_graph_operator_iterations_last_,
+                            shared_particle_transport_edge_graph_operator_converged_last_ >= 0.5,
+                            shared_particle_transport_edge_graph_operator_max_balance_residual_c_last_,
+                            shared_particle_transport_edge_graph_operator_branch_graph_edge_count_last_,
+                            shared_particle_transport_edge_graph_operator_branch_graph_pair_count_last_,
+                            shared_particle_transport_edge_graph_operator_effective_pair_count_last_,
+                            shared_particle_transport_edge_graph_operator_total_pair_weight_f_last_,
+                            shared_particle_transport_edge_graph_operator_total_conductance_weight_f_last_,
+                            shared_particle_transport_edge_graph_operator_min_node_preconditioner_last_,
+                            shared_particle_transport_edge_graph_operator_max_node_preconditioner_last_,
+                            history_surface_node_live_pic_electron_currents_,
+                            history_surface_node_live_pic_ion_currents_,
+                            history_surface_node_live_pic_net_currents_,
+                            history_surface_node_live_pic_collision_counts_,
+                            history_surface_node_electron_calibration_factors_,
+                            history_surface_node_ion_calibration_factors_);
+                    },
+                    [&](const std::filesystem::path& shared_particle_transport_domain_path) {
+                        return writeSharedSurfaceParticleTransportDomainJson(
+                            shared_particle_transport_domain_path, config_, circuit_model_.get(),
+                            global_particle_domain_state_, history_time_,
+                            history_shared_surface_particle_transport_charge_c_,
+                            history_shared_surface_particle_transport_reference_shift_v_,
+                            history_surface_node_potentials_,
+                            history_surface_node_shared_runtime_enabled_,
+                            history_surface_node_shared_reference_potentials_,
+                            history_surface_node_distributed_particle_transport_charges_,
+                            history_surface_node_distributed_particle_transport_reference_shifts_,
+                            history_surface_node_distributed_particle_transport_net_fluxes_,
+                            shared_particle_transport_edge_charge_matrix_c_,
+                            shared_particle_transport_edge_target_charge_matrix_c_,
+                            shared_particle_transport_edge_operator_drive_matrix_c_,
+                            shared_particle_transport_edge_graph_operator_iterations_last_,
+                            shared_particle_transport_edge_graph_operator_converged_last_ >= 0.5,
+                            shared_particle_transport_edge_graph_operator_max_balance_residual_c_last_,
+                            shared_particle_transport_edge_graph_operator_branch_graph_edge_count_last_,
+                            shared_particle_transport_edge_graph_operator_branch_graph_pair_count_last_,
+                            shared_particle_transport_edge_graph_operator_effective_pair_count_last_,
+                            shared_particle_transport_edge_graph_operator_total_pair_weight_f_last_,
+                            shared_particle_transport_edge_graph_operator_total_conductance_weight_f_last_,
+                            shared_particle_transport_edge_graph_operator_min_node_preconditioner_last_,
+                            shared_particle_transport_edge_graph_operator_max_node_preconditioner_last_,
+                            shared_particle_transport_exchange_flux_matrix_a_);
+                    },
+                    [&](const std::filesystem::path& global_particle_domain_path) {
+                        return writeGlobalSurfaceParticleDomainJson(
+                            global_particle_domain_path, config_, circuit_model_.get(),
+                            history_time_, global_particle_domain_state_,
+                            history_shared_surface_particle_transport_charge_c_,
+                            history_shared_surface_particle_transport_reference_shift_v_,
+                            history_surface_node_potentials_,
+                            history_surface_node_shared_runtime_enabled_,
+                            history_surface_node_shared_reference_potentials_,
+                            history_surface_node_distributed_particle_transport_charges_,
+                            history_surface_node_distributed_particle_transport_reference_shifts_,
+                            history_surface_node_distributed_particle_transport_net_fluxes_,
+                            shared_particle_transport_edge_charge_matrix_c_,
+                            shared_particle_transport_edge_target_charge_matrix_c_,
+                            shared_particle_transport_edge_operator_drive_matrix_c_,
+                            shared_particle_transport_edge_graph_operator_iterations_last_,
+                            shared_particle_transport_edge_graph_operator_converged_last_ >= 0.5,
+                            shared_particle_transport_edge_graph_operator_max_balance_residual_c_last_,
+                            shared_particle_transport_edge_graph_operator_branch_graph_edge_count_last_,
+                            shared_particle_transport_edge_graph_operator_branch_graph_pair_count_last_,
+                            shared_particle_transport_edge_graph_operator_effective_pair_count_last_,
+                            shared_particle_transport_edge_graph_operator_total_pair_weight_f_last_,
+                            shared_particle_transport_edge_graph_operator_total_conductance_weight_f_last_,
+                            shared_particle_transport_edge_graph_operator_min_node_preconditioner_last_,
+                            shared_particle_transport_edge_graph_operator_max_node_preconditioner_last_,
+                            shared_particle_transport_exchange_flux_matrix_a_);
+                    },
+                    [&](const std::filesystem::path& global_particle_repository_path) {
+                        return writeGlobalParticleRepositoryJson(
+                            global_particle_repository_path, config_, history_time_,
+                            global_particle_repository_state_);
+                    },
+                    [&](const std::filesystem::path& global_sheath_field_solve_path) {
+                        return writeGlobalSurfaceSheathFieldSolveJson(
+                            global_sheath_field_solve_path, config_, circuit_model_.get(),
+                            history_time_, global_sheath_field_solve_state_,
+                            global_particle_domain_state_,
+                            history_shared_surface_effective_sheath_length_,
+                            history_shared_surface_particle_transport_charge_c_,
+                            history_surface_node_potentials_,
+                            history_surface_node_shared_runtime_enabled_,
+                            history_surface_node_shared_reference_potentials_,
+                            history_surface_node_normal_electric_fields_,
+                            history_surface_node_local_charge_densities_,
+                            history_surface_node_distributed_particle_transport_charges_,
+                            history_surface_node_distributed_particle_transport_reference_shifts_,
+                            history_surface_node_distributed_particle_transport_net_fluxes_,
+                            history_shared_surface_global_coupled_solve_active_,
+                            history_shared_surface_global_coupled_solve_iterations_,
+                            history_shared_surface_global_coupled_solve_converged_,
+                            history_shared_surface_global_coupled_solve_max_delta_v_);
+                    },
+                    last_error_message_))
             {
-                last_error_message_ =
-                    "Failed to write shared surface runtime consistency json to: " +
-                    shared_runtime_consistency_path.string();
                 return false;
             }
+        }
 
-            if (useSharedSurfaceParticleTransportCoupling())
-            {
-                auto shared_particle_transport_domain_path = csv_path;
-                shared_particle_transport_domain_path.replace_extension(
-                    ".shared_particle_transport_domain.json");
-                if (!writeSharedSurfaceParticleTransportDomainJson(
-                        shared_particle_transport_domain_path, config_, circuit_model_.get(),
-                        global_particle_domain_state_,
-                        history_time_, history_shared_surface_particle_transport_charge_c_,
-                        history_shared_surface_particle_transport_reference_shift_v_,
+        if (!exportSurfaceBridgeArtifactSuite(
+                csv_path,
+                [&](const std::filesystem::path& graph_report_path) {
+                    return writeSurfaceGraphReport(
+                        graph_report_path, config_, circuit_model_.get(),
+                        runtimeRouteName(config_.runtime_route),
+                        circuit_model_ ? circuit_model_->modelName() : "BuiltinCircuit",
+                        electric_field_provider_ ? electric_field_provider_->modelName()
+                                                 : "BuiltinElectricField",
+                        reference_graph_propagator_ ? reference_graph_propagator_->modelName()
+                                                    : "BuiltinReferenceGraph",
+                        graph_capacitance_matrix_provider_
+                            ? graph_capacitance_matrix_provider_->modelName()
+                            : "BuiltinGraphCapacitance",
+                        field_solver_adapter_ ? field_solver_adapter_->modelName()
+                                              : "BuiltinFieldSolverAdapter",
+                        graph_capacitance_matrix_provider_.get(),
+                        history_surface_node_potentials_, history_surface_node_total_currents_,
+                        history_surface_node_normal_electric_fields_,
+                        history_surface_node_local_charge_densities_,
+                        history_surface_node_propagated_reference_potentials_,
+                        history_surface_node_field_solver_reference_potentials_,
+                        history_surface_node_graph_capacitance_diagonals_,
+                        history_surface_node_graph_capacitance_row_sums_,
+                        history_surface_node_field_solver_coupling_gains_,
+                        history_surface_node_field_solver_capacitance_scales_,
+                        history_surface_branch_currents_, history_surface_branch_conductances_,
+                        history_surface_branch_voltage_drops_, history_surface_branch_power_w_,
+                        history_surface_branch_mutual_capacitances_);
+                },
+                [&](const std::filesystem::path& graph_matrix_path) {
+                    return writeSurfaceGraphMatrixSnapshotCsv(
+                        graph_matrix_path, config_, circuit_model_.get(),
+                        graph_capacitance_matrix_provider_.get());
+                },
+                [&](const std::filesystem::path& graph_matrix_json_path) {
+                    return writeSurfaceGraphMatrixSnapshotJson(
+                        graph_matrix_json_path, config_, circuit_model_.get(),
+                        graph_capacitance_matrix_provider_.get());
+                },
+                [&](const std::filesystem::path& field_adapter_path) {
+                    return writeSurfaceFieldSolverAdapterContractReport(
+                        field_adapter_path, field_solver_adapter_.get(),
+                        graph_capacitance_matrix_provider_.get(), circuit_model_.get());
+                },
+                [&](const std::filesystem::path& field_adapter_json_path) {
+                    return writeSurfaceFieldSolverAdapterContractJson(
+                        field_adapter_json_path, field_solver_adapter_.get(),
+                        graph_capacitance_matrix_provider_.get(), circuit_model_.get());
+                },
+                [&](const std::filesystem::path& boundary_mapping_path) {
+                    return writeSurfaceBoundaryMappingJson(
+                        boundary_mapping_path, config_, circuit_model_.get(),
+                        buildSurfaceCircuitMappingState());
+                },
+                [&](const std::filesystem::path& field_request_path) {
+                    return writeExternalFieldSolveRequestJson(
+                        field_request_path, config_, circuit_model_.get(),
+                        graph_capacitance_matrix_provider_.get(), field_solver_adapter_.get(),
                         history_surface_node_potentials_,
-                        history_surface_node_shared_runtime_enabled_,
-                        history_surface_node_shared_reference_potentials_,
-                        history_surface_node_distributed_particle_transport_charges_,
-                        history_surface_node_distributed_particle_transport_reference_shifts_,
-                        history_surface_node_distributed_particle_transport_net_fluxes_,
-                        shared_particle_transport_edge_charge_matrix_c_,
-                        shared_particle_transport_edge_target_charge_matrix_c_,
-                        shared_particle_transport_edge_operator_drive_matrix_c_,
-                        shared_particle_transport_edge_graph_operator_iterations_last_,
-                        shared_particle_transport_edge_graph_operator_converged_last_ >= 0.5,
-                        shared_particle_transport_edge_graph_operator_max_balance_residual_c_last_,
-                        shared_particle_transport_edge_graph_operator_branch_graph_edge_count_last_,
-                        shared_particle_transport_edge_graph_operator_branch_graph_pair_count_last_,
-                        shared_particle_transport_edge_graph_operator_effective_pair_count_last_,
-                        shared_particle_transport_edge_graph_operator_total_pair_weight_f_last_,
-                        shared_particle_transport_edge_graph_operator_total_conductance_weight_f_last_,
-                        shared_particle_transport_edge_graph_operator_min_node_preconditioner_last_,
-                        shared_particle_transport_edge_graph_operator_max_node_preconditioner_last_,
-                        shared_particle_transport_exchange_flux_matrix_a_))
-                {
-                    last_error_message_ =
-                        "Failed to write shared particle transport domain json to: " +
-                        shared_particle_transport_domain_path.string();
-                    return false;
-                }
-            }
-
-            auto global_particle_domain_path = csv_path;
-            global_particle_domain_path.replace_extension(".global_particle_domain.json");
-            if (!writeGlobalSurfaceParticleDomainJson(
-                    global_particle_domain_path, config_, circuit_model_.get(), history_time_,
-                    global_particle_domain_state_,
-                    history_shared_surface_particle_transport_charge_c_,
-                    history_shared_surface_particle_transport_reference_shift_v_,
-                    history_surface_node_potentials_, history_surface_node_shared_runtime_enabled_,
-                    history_surface_node_shared_reference_potentials_,
-                    history_surface_node_distributed_particle_transport_charges_,
-                    history_surface_node_distributed_particle_transport_reference_shifts_,
-                    history_surface_node_distributed_particle_transport_net_fluxes_,
-                    shared_particle_transport_edge_charge_matrix_c_,
-                    shared_particle_transport_edge_target_charge_matrix_c_,
-                    shared_particle_transport_edge_operator_drive_matrix_c_,
-                    shared_particle_transport_edge_graph_operator_iterations_last_,
-                    shared_particle_transport_edge_graph_operator_converged_last_ >= 0.5,
-                    shared_particle_transport_edge_graph_operator_max_balance_residual_c_last_,
-                    shared_particle_transport_edge_graph_operator_branch_graph_edge_count_last_,
-                    shared_particle_transport_edge_graph_operator_branch_graph_pair_count_last_,
-                    shared_particle_transport_edge_graph_operator_effective_pair_count_last_,
-                    shared_particle_transport_edge_graph_operator_total_pair_weight_f_last_,
-                    shared_particle_transport_edge_graph_operator_total_conductance_weight_f_last_,
-                    shared_particle_transport_edge_graph_operator_min_node_preconditioner_last_,
-                    shared_particle_transport_edge_graph_operator_max_node_preconditioner_last_,
-                    shared_particle_transport_exchange_flux_matrix_a_))
-            {
-                last_error_message_ =
-                    "Failed to write global particle domain json to: " +
-                    global_particle_domain_path.string();
-                return false;
-            }
-
-            auto global_particle_repository_path = csv_path;
-            global_particle_repository_path.replace_extension(".global_particle_repository.json");
-            if (!writeGlobalParticleRepositoryJson(
-                    global_particle_repository_path, config_, history_time_,
-                    global_particle_repository_state_))
-            {
-                last_error_message_ =
-                    "Failed to write global particle repository json to: " +
-                    global_particle_repository_path.string();
-                return false;
-            }
-
-            auto global_sheath_field_solve_path = csv_path;
-            global_sheath_field_solve_path.replace_extension(".global_sheath_field_solve.json");
-            if (!writeGlobalSurfaceSheathFieldSolveJson(
-                    global_sheath_field_solve_path, config_, circuit_model_.get(), history_time_,
-                    global_sheath_field_solve_state_, global_particle_domain_state_,
-                    history_shared_surface_effective_sheath_length_,
-                    history_shared_surface_particle_transport_charge_c_,
-                    history_surface_node_potentials_, history_surface_node_shared_runtime_enabled_,
-                    history_surface_node_shared_reference_potentials_,
-                    history_surface_node_normal_electric_fields_,
-                    history_surface_node_local_charge_densities_,
-                    history_surface_node_distributed_particle_transport_charges_,
-                    history_surface_node_distributed_particle_transport_reference_shifts_,
-                    history_surface_node_distributed_particle_transport_net_fluxes_,
-                    history_shared_surface_global_coupled_solve_active_,
-                    history_shared_surface_global_coupled_solve_iterations_,
-                    history_shared_surface_global_coupled_solve_converged_,
-                    history_shared_surface_global_coupled_solve_max_delta_v_))
-            {
-                last_error_message_ =
-                    "Failed to write global sheath-field solve json to: " +
-                    global_sheath_field_solve_path.string();
-                return false;
-            }
-        }
-
-        auto graph_matrix_path = csv_path;
-        graph_matrix_path.replace_extension(".graph_matrix.csv");
-        if (!writeSurfaceGraphMatrixSnapshotCsv(graph_matrix_path, config_, circuit_model_.get(),
-                                                graph_capacitance_matrix_provider_.get()))
+                        history_surface_node_total_currents_,
+                        history_surface_node_normal_electric_fields_,
+                        history_surface_node_local_charge_densities_,
+                        history_surface_node_graph_capacitance_diagonals_,
+                        history_surface_node_graph_capacitance_row_sums_,
+                        history_surface_node_field_solver_capacitance_scales_,
+                        history_surface_branch_currents_);
+                },
+                [&](const std::filesystem::path& field_result_template_path) {
+                    return writeExternalFieldSolveResultTemplateJson(
+                        field_result_template_path, circuit_model_.get());
+                },
+                [&](const std::filesystem::path& field_result_path) {
+                    return writeExternalFieldSolveResultJson(
+                        field_result_path, config_, circuit_model_.get(),
+                        history_surface_node_field_solver_reference_potentials_,
+                        history_surface_node_normal_electric_fields_,
+                        history_surface_node_local_charge_densities_,
+                        history_surface_node_field_solver_capacitance_scales_);
+                },
+                [&](const std::filesystem::path& volume_stub_path) {
+                    return writeExternalVolumeMeshStubJson(
+                        volume_stub_path, config_, circuit_model_.get(),
+                        history_surface_node_potentials_,
+                        history_surface_node_field_solver_reference_potentials_,
+                        history_surface_node_normal_electric_fields_,
+                        history_surface_node_local_charge_densities_,
+                        history_surface_node_field_solver_capacitance_scales_,
+                        history_surface_node_volume_potentials_,
+                        history_surface_node_deposited_charges_,
+                        history_surface_node_poisson_residuals_);
+                },
+                [&](const std::filesystem::path& volume_mesh_stub_path) {
+                    return writeVolumeMeshSkeletonJson(
+                        volume_mesh_stub_path, config_, circuit_model_.get(),
+                        volumetric_solver_adapter_.get());
+                },
+                [&](const std::filesystem::path& field_bridge_manifest_path) {
+                    return writeExternalFieldBridgeManifestJson(
+                        field_bridge_manifest_path, csv_path, config_, circuit_model_.get(),
+                        field_solver_adapter_.get(), graph_capacitance_matrix_provider_.get());
+                },
+                [&](const std::filesystem::path& surface_volume_projection_path) {
+                    return writeSurfaceVolumeProjectionJson(
+                        surface_volume_projection_path, config_, circuit_model_.get(),
+                        volumetric_solver_adapter_.get());
+                },
+                last_error_message_))
         {
-            last_error_message_ =
-                "Failed to write surface graph matrix snapshot to: " +
-                graph_matrix_path.string();
             return false;
         }
 
-        auto graph_matrix_json_path = csv_path;
-        graph_matrix_json_path.replace_extension(".graph_matrix.json");
-        if (!writeSurfaceGraphMatrixSnapshotJson(graph_matrix_json_path, config_,
-                                                 circuit_model_.get(),
-                                                 graph_capacitance_matrix_provider_.get()))
+        if (!exportVolumetricArtifactSuite(
+                csv_path,
+                [&](const std::filesystem::path& volumetric_adapter_path) {
+                    return writeVolumetricSolverAdapterContractJson(
+                        volumetric_adapter_path, config_, volumetric_solver_adapter_.get(),
+                        circuit_model_.get());
+                },
+                [&](const std::filesystem::path& volume_request_path) {
+                    return writeExternalVolumeSolveRequestJson(
+                        volume_request_path, csv_path, config_, circuit_model_.get(),
+                        volumetric_solver_adapter_.get());
+                },
+                [&](const std::filesystem::path& volume_result_template_path) {
+                    return writeExternalVolumeSolveResultTemplateJson(
+                        volume_result_template_path, circuit_model_.get(),
+                        volumetric_solver_adapter_.get());
+                },
+                [&](const std::filesystem::path& volume_result_path) {
+                    return writeExternalVolumeSolveResultJson(
+                        volume_result_path, config_, circuit_model_.get(),
+                        volumetric_solver_adapter_.get(),
+                        history_surface_node_potentials_,
+                        history_surface_node_volume_potentials_,
+                        history_surface_node_field_solver_reference_potentials_,
+                        history_surface_node_normal_electric_fields_,
+                        history_surface_node_local_charge_densities_,
+                        history_surface_node_field_solver_capacitance_scales_,
+                        history_surface_node_volume_projection_weight_sums_,
+                        history_surface_node_volume_mesh_coupling_gains_,
+                        history_surface_node_effective_sheath_lengths_);
+                },
+                [&](const std::filesystem::path& volume_history_path) {
+                    return writeVolumeHistoryJson(
+                        volume_history_path, circuit_model_.get(), history_time_,
+                        history_surface_node_potentials_,
+                        history_surface_node_volume_potentials_,
+                        history_surface_node_deposited_charges_,
+                        history_surface_node_poisson_residuals_,
+                        history_surface_node_pseudo_volumes_,
+                        history_surface_node_volume_projection_weight_sums_,
+                        history_surface_node_volume_mesh_coupling_gains_,
+                        history_surface_node_volume_solver_mode_ids_,
+                        history_surface_node_volume_solver_iterations_,
+                        history_surface_node_volume_solver_linear_iterations_,
+                        history_surface_node_volume_solver_converged_,
+                        history_surface_node_volume_solver_residual_norms_,
+                        history_surface_node_volume_solver_max_deltas_,
+                        history_surface_node_volume_solver_matrix_nnzs_,
+                        history_surface_node_volume_solver_cell_counts_,
+                        history_surface_node_field_volume_coupling_iterations_,
+                        history_surface_node_field_volume_coupling_converged_,
+                        history_surface_node_field_volume_coupling_max_deltas_,
+                        history_surface_node_field_volume_coupling_relaxation_used_,
+                        history_surface_node_external_volume_feedback_blend_factors_,
+                        history_surface_node_external_volume_feedback_mismatch_metrics_,
+                        history_surface_node_external_volume_feedback_applied_);
+                },
+                last_error_message_))
         {
-            last_error_message_ =
-                "Failed to write surface graph matrix snapshot json to: " +
-                graph_matrix_json_path.string();
-            return false;
-        }
-
-        auto field_adapter_path = csv_path;
-        field_adapter_path.replace_extension(".field_adapter.txt");
-        if (!writeSurfaceFieldSolverAdapterContractReport(field_adapter_path, field_solver_adapter_.get(),
-                                                          graph_capacitance_matrix_provider_.get(),
-                                                          circuit_model_.get()))
-        {
-            last_error_message_ =
-                "Failed to write surface field-solver adapter report to: " +
-                field_adapter_path.string();
-            return false;
-        }
-
-        auto field_adapter_json_path = csv_path;
-        field_adapter_json_path.replace_extension(".field_adapter.json");
-        if (!writeSurfaceFieldSolverAdapterContractJson(field_adapter_json_path,
-                                                        field_solver_adapter_.get(),
-                                                        graph_capacitance_matrix_provider_.get(),
-                                                        circuit_model_.get()))
-        {
-            last_error_message_ =
-                "Failed to write surface field-solver adapter json to: " +
-                field_adapter_json_path.string();
-            return false;
-        }
-
-        auto boundary_mapping_path = csv_path;
-        boundary_mapping_path.replace_extension(".boundary_mapping.json");
-        if (!writeSurfaceBoundaryMappingJson(boundary_mapping_path, config_, circuit_model_.get(),
-                                            buildSurfaceCircuitMappingState()))
-        {
-            last_error_message_ =
-                "Failed to write surface boundary mapping json to: " +
-                boundary_mapping_path.string();
-            return false;
-        }
-
-        auto field_request_path = csv_path;
-        field_request_path.replace_extension(".field_request.json");
-        if (!writeExternalFieldSolveRequestJson(
-                field_request_path, config_, circuit_model_.get(),
-                graph_capacitance_matrix_provider_.get(), field_solver_adapter_.get(),
-                history_surface_node_potentials_, history_surface_node_total_currents_,
-                history_surface_node_normal_electric_fields_,
-                history_surface_node_local_charge_densities_,
-                history_surface_node_graph_capacitance_diagonals_,
-                history_surface_node_graph_capacitance_row_sums_,
-                history_surface_node_field_solver_capacitance_scales_,
-                history_surface_branch_currents_))
-        {
-            last_error_message_ =
-                "Failed to write external field solve request json to: " +
-                field_request_path.string();
-            return false;
-        }
-
-        auto field_result_template_path = csv_path;
-        field_result_template_path.replace_extension(".field_result_template.json");
-        if (!writeExternalFieldSolveResultTemplateJson(field_result_template_path,
-                                                       circuit_model_.get()))
-        {
-            last_error_message_ =
-                "Failed to write external field solve result template json to: " +
-                field_result_template_path.string();
-            return false;
-        }
-
-        auto field_result_path = csv_path;
-        field_result_path.replace_extension(".field_result.json");
-        if (!writeExternalFieldSolveResultJson(field_result_path, config_, circuit_model_.get(),
-                                               history_surface_node_field_solver_reference_potentials_,
-                                               history_surface_node_normal_electric_fields_,
-                                               history_surface_node_local_charge_densities_,
-                                               history_surface_node_field_solver_capacitance_scales_))
-        {
-            last_error_message_ =
-                "Failed to write external field solve result json to: " +
-                field_result_path.string();
-            return false;
-        }
-
-        auto volume_stub_path = csv_path;
-        volume_stub_path.replace_extension(".volume_stub.json");
-        if (!writeExternalVolumeMeshStubJson(
-                volume_stub_path, config_, circuit_model_.get(),
-                history_surface_node_potentials_,
-                  history_surface_node_field_solver_reference_potentials_,
-                  history_surface_node_normal_electric_fields_,
-                  history_surface_node_local_charge_densities_,
-                  history_surface_node_field_solver_capacitance_scales_,
-                  history_surface_node_volume_potentials_,
-                  history_surface_node_deposited_charges_,
-                  history_surface_node_poisson_residuals_))
-        {
-            last_error_message_ =
-                "Failed to write external volume stub json to: " + volume_stub_path.string();
-            return false;
-        }
-
-        auto volume_mesh_stub_path = csv_path;
-        volume_mesh_stub_path.replace_extension(".volume_mesh_stub.json");
-        if (!writeVolumeMeshSkeletonJson(volume_mesh_stub_path, config_, circuit_model_.get(),
-                                         volumetric_solver_adapter_.get()))
-        {
-            last_error_message_ =
-                "Failed to write volume mesh skeleton json to: " + volume_mesh_stub_path.string();
-            return false;
-        }
-
-        auto field_bridge_manifest_path = csv_path;
-        field_bridge_manifest_path.replace_extension(".field_bridge_manifest.json");
-        if (!writeExternalFieldBridgeManifestJson(field_bridge_manifest_path, csv_path, config_,
-                                                  circuit_model_.get(),
-                                                  field_solver_adapter_.get(),
-                                                  graph_capacitance_matrix_provider_.get()))
-        {
-            last_error_message_ =
-                "Failed to write external field bridge manifest json to: " +
-                field_bridge_manifest_path.string();
-            return false;
-        }
-
-        auto surface_volume_projection_path = csv_path;
-        surface_volume_projection_path.replace_extension(".surface_volume_projection.json");
-        if (!writeSurfaceVolumeProjectionJson(surface_volume_projection_path, config_,
-                                              circuit_model_.get(),
-                                              volumetric_solver_adapter_.get()))
-        {
-            last_error_message_ =
-                "Failed to write surface-volume projection json to: " +
-                surface_volume_projection_path.string();
-            return false;
-        }
-
-        auto volumetric_adapter_path = csv_path;
-        volumetric_adapter_path.replace_extension(".volumetric_adapter.json");
-        if (!writeVolumetricSolverAdapterContractJson(volumetric_adapter_path, config_,
-                                                      volumetric_solver_adapter_.get(),
-                                                      circuit_model_.get()))
-        {
-            last_error_message_ =
-                "Failed to write volumetric adapter contract json to: " +
-                volumetric_adapter_path.string();
-            return false;
-        }
-
-        auto volume_request_path = csv_path;
-        volume_request_path.replace_extension(".volume_request.json");
-        if (!writeExternalVolumeSolveRequestJson(volume_request_path, csv_path, config_,
-                                                 circuit_model_.get(),
-                                                 volumetric_solver_adapter_.get()))
-        {
-            last_error_message_ =
-                "Failed to write external volume solve request json to: " +
-                volume_request_path.string();
-            return false;
-        }
-
-        auto volume_result_template_path = csv_path;
-        volume_result_template_path.replace_extension(".volume_result_template.json");
-        if (!writeExternalVolumeSolveResultTemplateJson(volume_result_template_path,
-                                                        circuit_model_.get(),
-                                                        volumetric_solver_adapter_.get()))
-        {
-            last_error_message_ =
-                "Failed to write external volume solve result template json to: " +
-                volume_result_template_path.string();
-            return false;
-        }
-
-        auto volume_result_path = csv_path;
-        volume_result_path.replace_extension(".volume_result.json");
-        if (!writeExternalVolumeSolveResultJson(volume_result_path, config_, circuit_model_.get(),
-                                                volumetric_solver_adapter_.get(),
-                                                history_surface_node_potentials_,
-                                                history_surface_node_volume_potentials_,
-                                                history_surface_node_field_solver_reference_potentials_,
-                                                history_surface_node_normal_electric_fields_,
-                                                history_surface_node_local_charge_densities_,
-                                                history_surface_node_field_solver_capacitance_scales_,
-                                                history_surface_node_volume_projection_weight_sums_,
-                                                history_surface_node_volume_mesh_coupling_gains_,
-                                                history_surface_node_effective_sheath_lengths_))
-        {
-            last_error_message_ =
-                "Failed to write external volume solve result json to: " +
-                volume_result_path.string();
-            return false;
-        }
-
-        auto volume_history_path = csv_path;
-        volume_history_path.replace_extension(".volume_history.json");
-        if (!writeVolumeHistoryJson(volume_history_path, circuit_model_.get(), history_time_,
-                                    history_surface_node_potentials_,
-                                    history_surface_node_volume_potentials_,
-                                    history_surface_node_deposited_charges_,
-                                    history_surface_node_poisson_residuals_,
-                                    history_surface_node_pseudo_volumes_,
-                                    history_surface_node_volume_projection_weight_sums_,
-                                    history_surface_node_volume_mesh_coupling_gains_,
-                                    history_surface_node_volume_solver_mode_ids_,
-                                    history_surface_node_volume_solver_iterations_,
-                                    history_surface_node_volume_solver_linear_iterations_,
-                                    history_surface_node_volume_solver_converged_,
-                                    history_surface_node_volume_solver_residual_norms_,
-                                    history_surface_node_volume_solver_max_deltas_,
-                                    history_surface_node_volume_solver_matrix_nnzs_,
-                                    history_surface_node_volume_solver_cell_counts_,
-                                    history_surface_node_field_volume_coupling_iterations_,
-                                    history_surface_node_field_volume_coupling_converged_,
-                                    history_surface_node_field_volume_coupling_max_deltas_,
-                                    history_surface_node_field_volume_coupling_relaxation_used_,
-                                    history_surface_node_external_volume_feedback_blend_factors_,
-                                    history_surface_node_external_volume_feedback_mismatch_metrics_,
-                                    history_surface_node_external_volume_feedback_applied_))
-        {
-            last_error_message_ =
-                "Failed to write volume history json to: " + volume_history_path.string();
             return false;
         }
     }
@@ -13473,57 +13950,8 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
     }();
     const double total_live_pic_collision_events =
         Basic::sumValue(history_live_pic_collision_count_);
-    const std::string benchmark_case_id = !config_.reference_matrix_case_id.empty()
-                                              ? config_.reference_matrix_case_id
-                                          : !config_.reference_case_id.empty()
-                                              ? config_.reference_case_id
-                                          : resolved_benchmark_source != SurfaceBenchmarkSource::None
-                                              ? benchmarkSourceName(resolved_benchmark_source)
-                                              : csv_path.stem().string();
-    const double benchmark_patch_relative_rmse = [&]() {
-        if (!benchmark_patch_metrics.valid ||
-            benchmark_case_definition.patch_reference_curve.empty())
-        {
-            return 0.0;
-        }
-
-        double min_potential_v =
-            benchmark_case_definition.patch_reference_curve.front().potential_v;
-        double max_potential_v = min_potential_v;
-        for (const auto& sample : benchmark_case_definition.patch_reference_curve)
-        {
-            min_potential_v = std::min(min_potential_v, sample.potential_v);
-            max_potential_v = std::max(max_potential_v, sample.potential_v);
-        }
-        const double scale_v =
-            std::max({1.0, std::abs(max_potential_v - min_potential_v),
-                      std::abs(max_potential_v), std::abs(min_potential_v)});
-        return benchmark_patch_metrics.rmse_v / scale_v;
-    }();
-    const double benchmark_body_relative_rmse = [&]() {
-        if (!benchmark_body_metrics.valid || benchmark_case_definition.body_reference_curve.empty())
-        {
-            return 0.0;
-        }
-
-        double min_potential_v = benchmark_case_definition.body_reference_curve.front().potential_v;
-        double max_potential_v = min_potential_v;
-        for (const auto& sample : benchmark_case_definition.body_reference_curve)
-        {
-            min_potential_v = std::min(min_potential_v, sample.potential_v);
-            max_potential_v = std::max(max_potential_v, sample.potential_v);
-        }
-        const double scale_v =
-            std::max({1.0, std::abs(max_potential_v - min_potential_v),
-                      std::abs(max_potential_v), std::abs(min_potential_v)});
-        return benchmark_body_metrics.rmse_v / scale_v;
-    }();
-    const double benchmark_curve_relative_rmse_max =
-        std::max(benchmark_patch_relative_rmse, benchmark_body_relative_rmse);
-    const double benchmark_rmse_tolerance_v =
-        std::max(benchmark_acceptance.patch_rmse_v_max, benchmark_acceptance.body_rmse_v_max);
-    const double benchmark_absolute_tolerance_v =
-        std::max(1.0e-6, benchmark_rmse_tolerance_v);
+    const double final_normal_electric_field_v_per_m =
+        history_normal_electric_field_.empty() ? 0.0 : history_normal_electric_field_.back();
 
     Coupling::Contracts::SimulationArtifact artifact;
     artifact.module = "Surface Charging";
@@ -13555,7 +13983,7 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
     artifact.particle_metrics["global_particle_field_coupled_residual_v"] =
         global_particle_field_coupled_residual_v;
     artifact.field_metrics["final_normal_electric_field_v_per_m"] =
-        history_normal_electric_field_.empty() ? 0.0 : history_normal_electric_field_.back();
+        final_normal_electric_field_v_per_m;
     artifact.field_metrics["final_local_charge_density_c_per_m3"] =
         history_local_charge_density_.empty() ? 0.0 : history_local_charge_density_.back();
     artifact.field_metrics["global_sheath_field_residual_v_per_m"] =
@@ -13630,8 +14058,52 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
     artifact.metadata["runtime_kernel_conductivity_scale"] =
         std::to_string(config_.material.deriveSurfaceConductivityScaleFactor());
     artifact.metadata["surface_material_model_family"] = surfaceMaterialModelFamily(config_);
+    const auto artifact_interactor_family_view =
+        surface_interaction_.interactorFamilyView(config_.material);
+    artifact.metadata["surface_interactor_family"] =
+        surface_interaction_.interactorFamily(config_.material);
+    artifact.metadata["surface_interactor_supported_family_count"] =
+        std::to_string(artifact_interactor_family_view.supported_family_count);
+    artifact.metadata["surface_interactor_active_family_count"] =
+        std::to_string(artifact_interactor_family_view.active_family_count);
+    artifact.metadata["surface_interactor_supported_family_signature"] =
+        artifact_interactor_family_view.supported_family_signature;
+    artifact.metadata["surface_interactor_active_family_signature"] =
+        artifact_interactor_family_view.active_family_signature;
     artifact.metadata["distribution_family"] = distributionFamily(config_);
     artifact.metadata["barrier_scaler_family"] = barrierScalerFamily(config_);
+    if (config_.runtime_route != SurfaceRuntimeRoute::LegacyBenchmark)
+    {
+        FieldSolver::SurfaceBarrierState neutral_state;
+        neutral_state.emission_temperature_ev =
+            std::max(1.0e-3, config_.material.getPhotoelectronTemperatureEv());
+        const auto photo_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+            config_.material, neutral_state, "surface_photo_barrier_scaler_kind",
+            FieldSolver::SurfaceBarrierScalerKind::VariableBarrier);
+        const auto secondary_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+            config_.material, neutral_state, "surface_secondary_barrier_scaler_kind",
+            FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+        const auto ion_secondary_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+            config_.material, neutral_state, "surface_ion_secondary_barrier_scaler_kind",
+            FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+        const auto backscatter_decision = FieldSolver::resolveSurfaceBarrierScalerDecision(
+            config_.material, neutral_state, "surface_backscatter_barrier_scaler_kind",
+            FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+        artifact.metadata["photo_barrier_scaler_family"] = photo_decision.configured_family;
+        artifact.metadata["photo_barrier_scaler_resolved_family"] = photo_decision.resolved_family;
+        artifact.metadata["secondary_barrier_scaler_family"] =
+            secondary_decision.configured_family;
+        artifact.metadata["secondary_barrier_scaler_resolved_family"] =
+            secondary_decision.resolved_family;
+        artifact.metadata["ion_secondary_barrier_scaler_family"] =
+            ion_secondary_decision.configured_family;
+        artifact.metadata["ion_secondary_barrier_scaler_resolved_family"] =
+            ion_secondary_decision.resolved_family;
+        artifact.metadata["backscatter_barrier_scaler_family"] =
+            backscatter_decision.configured_family;
+        artifact.metadata["backscatter_barrier_scaler_resolved_family"] =
+            backscatter_decision.resolved_family;
+    }
     artifact.metadata["reference_completion_used"] =
         referenceCompletionUsed(config_, latest_live_pic_artifact_kernel_snapshot) ? "1" : "0";
     artifact.metadata["native_component_assembly_family"] =
@@ -13671,137 +14143,34 @@ bool DensePlasmaSurfaceCharging::exportResults(const std::filesystem::path& csv_
                                   : artifact_error;
         return false;
     }
-        last_error_message_.clear();
-    Coupling::Contracts::BenchmarkCase benchmark_case;
-    benchmark_case.id = benchmark_case_id;
-    benchmark_case.module = "surface";
-    benchmark_case.reference_family =
-        config_.reference_family.empty() ? "native" : config_.reference_family;
-    benchmark_case.validation_metrics.push_back(
-        {"final_surface_potential_v", final_surface_potential_v, "V"});
-    benchmark_case.validation_metrics.push_back(
-        {"final_surface_charge_density_c_per_m2", final_surface_charge_c_per_m2, "C/m2"});
-    benchmark_case.validation_metrics.push_back(
-        {"final_total_current_density_a_per_m2", final_total_current_density_a_per_m2, "A/m2"});
-    benchmark_case.validation_metrics.push_back(
-        {"final_current_derivative_a_per_m2_per_v",
-         final_current_derivative_a_per_m2_per_v, "A/m2/V"});
-    benchmark_case.validation_metrics.push_back(
-        {"final_capacitance_per_area_f_per_m2", final_capacitance_per_area_f_per_m2, "F/m2"});
-    benchmark_case.validation_metrics.push_back(
-        {"final_effective_conductivity_s_per_m", final_effective_conductivity_s_per_m, "S/m"});
-    benchmark_case.validation_metrics.push_back(
-        {"final_normal_electric_field_v_per_m",
-         history_normal_electric_field_.empty() ? 0.0 : history_normal_electric_field_.back(),
-         "V/m"});
-    benchmark_case.validation_metrics.push_back(
-        {"live_pic_collision_event_total", total_live_pic_collision_events, "count"});
-    benchmark_case.validation_metrics.push_back(
-        {"charge_conservation_drift_ratio", charge_conservation_drift_ratio, "ratio"});
-    benchmark_case.validation_metrics.push_back(
-        {"shared_global_coupled_convergence_failure_rate",
-         shared_global_coupled_convergence_failure_rate, "ratio"});
-    benchmark_case.validation_metrics.push_back(
-        {"global_sheath_field_residual_v_per_m", global_sheath_field_residual_v_per_m, "V/m"});
-    benchmark_case.validation_metrics.push_back(
-        {"global_particle_field_coupled_residual_v", global_particle_field_coupled_residual_v, "V"});
-    benchmark_case.validation_metrics.push_back(
-        {"global_sheath_field_linear_residual_norm_v", global_sheath_field_linear_residual_norm_v,
-         "V"});
-    if (benchmark_patch_metrics.valid)
+    last_error_message_.clear();
+    const BenchmarkCaseArtifactInputs benchmark_case_inputs{
+        config_,
+        csv_path,
+        benchmark_case_path,
+        resolved_benchmark_source,
+        benchmark_case_definition,
+        benchmark_patch_metrics,
+        benchmark_body_metrics,
+        benchmark_acceptance,
+        benchmark_acceptance_gate,
+        benchmark_process_validation_metrics,
+        have_benchmark_definition,
+        final_surface_potential_v,
+        final_surface_charge_c_per_m2,
+        final_total_current_density_a_per_m2,
+        final_current_derivative_a_per_m2_per_v,
+        final_capacitance_per_area_f_per_m2,
+        final_effective_conductivity_s_per_m,
+        final_normal_electric_field_v_per_m,
+        total_live_pic_collision_events,
+        charge_conservation_drift_ratio,
+        shared_global_coupled_convergence_failure_rate,
+        global_sheath_field_residual_v_per_m,
+        global_particle_field_coupled_residual_v,
+        global_sheath_field_linear_residual_norm_v};
+    if (!writeSurfaceBenchmarkCaseArtifact(benchmark_case_inputs, last_error_message_))
     {
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_patch_rmse_v", benchmark_patch_metrics.rmse_v, "V"});
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_patch_relative_rmse", benchmark_patch_relative_rmse, "ratio"});
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_patch_terminal_delta_v",
-             benchmark_patch_metrics.terminal_potential_delta_v, "V"});
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_patch_compared_sample_count",
-             static_cast<double>(benchmark_patch_metrics.compared_sample_count), "count"});
-    }
-    if (benchmark_body_metrics.valid)
-    {
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_body_rmse_v", benchmark_body_metrics.rmse_v, "V"});
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_body_relative_rmse", benchmark_body_relative_rmse, "ratio"});
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_body_terminal_delta_v",
-             benchmark_body_metrics.terminal_potential_delta_v, "V"});
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_body_compared_sample_count",
-             static_cast<double>(benchmark_body_metrics.compared_sample_count), "count"});
-    }
-    benchmark_case.validation_metrics.insert(benchmark_case.validation_metrics.end(),
-                                             benchmark_process_validation_metrics.begin(),
-                                             benchmark_process_validation_metrics.end());
-    if (benchmark_acceptance_gate.applicable)
-    {
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_acceptance_gate_pass", benchmark_acceptance_gate.pass ? 1.0 : 0.0,
-             "flag"});
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_acceptance_gate_checks_failed",
-             static_cast<double>(benchmark_acceptance_gate.checks_failed), "count"});
-    }
-    if (benchmark_patch_metrics.valid || benchmark_body_metrics.valid)
-    {
-        benchmark_case.validation_metrics.push_back(
-            {"benchmark_curve_relative_rmse_max", benchmark_curve_relative_rmse_max, "ratio"});
-    }
-
-    benchmark_case.tolerance_profile.relative_tolerance =
-        benchmark_case.reference_family == "native" ? 0.0 : 0.10;
-    benchmark_case.tolerance_profile.absolute_tolerance = benchmark_absolute_tolerance_v;
-    benchmark_case.tolerance_profile.rmse_tolerance = benchmark_absolute_tolerance_v;
-    benchmark_case.tolerance_profile.drift_tolerance = 5.0e-3;
-
-    if (have_benchmark_definition)
-    {
-        const std::string baseline_source =
-            legacyBenchmarkBaselineFamilyName(resolved_benchmark_source);
-        const std::string baseline_origin =
-            legacyBenchmarkBaselineOriginName(resolved_benchmark_source);
-        const auto append_reference_dataset =
-            [&](const std::string& id_suffix, const std::filesystem::path& path,
-                const std::string& citation_suffix) {
-                if (path.empty())
-                {
-                    return;
-                }
-                benchmark_case.reference_datasets.push_back(
-                    {benchmark_case_id + "_" + id_suffix, baseline_source,
-                     baseline_origin + ":" + citation_suffix, path.string(), true});
-            };
-        append_reference_dataset("patch_curve", benchmark_case_definition.paths.patch_reference_curve_path,
-                                 "patch_curve");
-        append_reference_dataset("body_curve", benchmark_case_definition.paths.body_reference_curve_path,
-                                 "body_curve");
-        append_reference_dataset("input_deck", benchmark_case_definition.paths.input_path,
-                                 "input_deck");
-        append_reference_dataset("environment_table", benchmark_case_definition.paths.environment_path,
-                                 "environment_table");
-        append_reference_dataset("structure_material_table",
-                                 benchmark_case_definition.paths.structure_material_path,
-                                 "structure_material_table");
-        append_reference_dataset("dielectric_patch_material_table",
-                                 benchmark_case_definition.paths.dielectric_patch_material_path,
-                                 "dielectric_patch_material_table");
-        append_reference_dataset("metal_patch_material_table",
-                                 benchmark_case_definition.paths.metal_patch_material_path,
-                                 "metal_patch_material_table");
-    }
-
-    std::string benchmark_case_error;
-    if (!Coupling::Contracts::writeBenchmarkCaseJson(
-            benchmark_case_path, benchmark_case, &benchmark_case_error))
-    {
-        last_error_message_ = benchmark_case_error.empty()
-                                  ? "Failed to write benchmark case json to: " +
-                                        benchmark_case_path.string()
-                                  : benchmark_case_error;
         return false;
     }
 

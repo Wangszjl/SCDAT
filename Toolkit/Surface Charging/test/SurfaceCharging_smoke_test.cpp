@@ -2,6 +2,7 @@
 #include "LegacyBenchmarkSupport.h"
 #include "ReferenceCurrentBalanceModel.h"
 #include "SurfaceChargingCases.h"
+#include "SurfaceRuntimePlan.h"
 #include "../../../Tools/FieldSolver/include/SurfaceBarrierModels.h"
 #include "../../../Tools/Material/include/SurfaceMaterialModel.h"
 #include "../../../Tools/Particle/include/SurfaceDistributionFunction.h"
@@ -21,6 +22,7 @@
 
 using SCDAT::Toolkit::SurfaceCharging::DensePlasmaSurfaceCharging;
 using SCDAT::Toolkit::SurfaceCharging::SurfaceChargingScenarioPreset;
+using SCDAT::Toolkit::SurfaceCharging::compileSurfaceRuntimePlan;
 
 namespace
 {
@@ -213,6 +215,11 @@ std::filesystem::path locateSiblingScdatExecutable()
     auto cursor = std::filesystem::current_path();
     while (true)
     {
+        const auto build_bin_debug = cursor / "build" / "bin" / "SCDAT.exe";
+        if (std::filesystem::exists(build_bin_debug))
+        {
+            return build_bin_debug;
+        }
         const auto build_bin = cursor / "build_codex" / "bin" / "SCDAT.exe";
         if (std::filesystem::exists(build_bin))
         {
@@ -1054,6 +1061,159 @@ TEST(SurfaceChargingSmokeTest,
               baseline_status.transition_runtime_max_delta_potential_v_per_step);
     EXPECT_LT(evolved_status.transition_runtime_solver_relaxation_factor,
               baseline_status.transition_runtime_solver_relaxation_factor);
+}
+
+TEST(SurfaceChargingSmokeTest,
+     SheathOrPresheathPoissonBCUpdaterEventSwitchesBoundaryScaleWhenEnabled)
+{
+    auto buildConfig = []() {
+        SurfaceChargingScenarioPreset preset;
+        EXPECT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+            "geo_ecss_kapton_pic_circuit", preset));
+        auto config = preset.config;
+        config.enable_pic_calibration = false;
+        config.enable_live_pic_window = false;
+        config.enable_live_pic_mcc = false;
+        config.derive_sheath_length_from_plasma = true;
+        config.minimum_sheath_length_m = 1.0e-6;
+        config.maximum_sheath_length_m = 1.0e6;
+        return config;
+    };
+
+    DensePlasmaSurfaceCharging baseline;
+    auto baseline_config = buildConfig();
+    ASSERT_TRUE(baseline.initialize(baseline_config));
+    ASSERT_TRUE(baseline.advance(0.5));
+    const auto baseline_status = baseline.getStatus();
+
+    DensePlasmaSurfaceCharging evolved;
+    auto evolved_config = buildConfig();
+    evolved_config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_updater_enabled", 1.0);
+    evolved_config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_mode", 1.0);
+    evolved_config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_base_scale", 1.0);
+    evolved_config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_sheath_scale", 1.0);
+    evolved_config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_presheath_scale", 4.0);
+    evolved_config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_min_scale", 1.0e-3);
+    evolved_config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_max_scale", 1.0e3);
+    evolved_config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_time_slope_per_day", 0.0);
+    evolved_config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_sun_flux_coupling", 0.0);
+
+    ASSERT_TRUE(evolved.initialize(evolved_config));
+    ASSERT_TRUE(evolved.advance(0.5));
+    const auto evolved_status = evolved.getStatus();
+
+    EXPECT_TRUE(std::isfinite(baseline_status.transition_poisson_bc_length_scale));
+    EXPECT_TRUE(std::isfinite(evolved_status.transition_poisson_bc_length_scale));
+    EXPECT_TRUE(std::isfinite(
+        baseline_status.transition_poisson_bc_effective_sheath_length_m));
+    EXPECT_TRUE(std::isfinite(
+        evolved_status.transition_poisson_bc_effective_sheath_length_m));
+    EXPECT_FALSE(baseline_status.transition_poisson_bc_presheath_mode);
+    EXPECT_TRUE(evolved_status.transition_poisson_bc_presheath_mode);
+    EXPECT_NEAR(baseline_status.transition_poisson_bc_length_scale, 1.0, 1.0e-12);
+    EXPECT_GT(evolved_status.transition_poisson_bc_length_scale,
+              baseline_status.transition_poisson_bc_length_scale * 2.0);
+    EXPECT_GT(evolved_status.transition_poisson_bc_effective_sheath_length_m,
+              baseline_status.transition_poisson_bc_effective_sheath_length_m * 1.2);
+}
+
+TEST(SurfaceChargingSmokeTest,
+     ExtendedTransitionEventsA6CanBeEnabledIndependently)
+{
+    auto buildConfig = []() {
+        SurfaceChargingScenarioPreset preset;
+        EXPECT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+            "geo_ecss_kapton_pic_circuit", preset));
+        auto config = preset.config;
+        config.enable_pic_calibration = false;
+        config.enable_live_pic_window = false;
+        config.enable_live_pic_mcc = false;
+        config.enable_photoelectron = true;
+        config.emission.photon_flux_m2_s =
+            std::max(config.emission.photon_flux_m2_s, 5.0e13);
+        return config;
+    };
+
+    auto runOnce = [](const SCDAT::Toolkit::SurfaceCharging::SurfaceChargingConfig& config) {
+        DensePlasmaSurfaceCharging charging;
+        EXPECT_TRUE(charging.initialize(config));
+        EXPECT_TRUE(charging.advance(0.5));
+        return charging.getStatus();
+    };
+
+    const auto baseline_status = runOnce(buildConfig());
+    EXPECT_NEAR(baseline_status.transition_rccabs_sc_scale, 1.0, 1.0e-12);
+    EXPECT_NEAR(baseline_status.transition_vcross_bfield_scale, 1.0, 1.0e-12);
+    EXPECT_NEAR(baseline_status.transition_basic_eclipse_exit_photo_scale, 1.0, 1.0e-12);
+    EXPECT_NEAR(baseline_status.transition_transient_artificial_sources_scale, 1.0, 1.0e-12);
+    EXPECT_NEAR(
+        baseline_status.transition_transient_artificial_source_current_density_a_per_m2,
+        0.0, 1.0e-18);
+    EXPECT_NEAR(baseline_status.transition_langmuir_probe_derivative_scale, 1.0, 1.0e-12);
+
+    auto rccabs_config = buildConfig();
+    rccabs_config.material.setScalarProperty("transition_rccabs_sc_updater_enabled", 1.0);
+    rccabs_config.material.setScalarProperty("transition_rccabs_sc_updater_base_scale", 1.8);
+    const auto rccabs_status = runOnce(rccabs_config);
+    EXPECT_GT(rccabs_status.transition_rccabs_sc_scale, 1.5);
+    EXPECT_GT(rccabs_status.transition_conductivity_scale,
+              baseline_status.transition_conductivity_scale * 1.2);
+    EXPECT_NEAR(rccabs_status.transition_vcross_bfield_scale, 1.0, 1.0e-12);
+
+    auto vcross_config = buildConfig();
+    vcross_config.material.setScalarProperty("transition_vcross_bfield_updater_enabled", 1.0);
+    vcross_config.material.setScalarProperty("transition_vcross_bfield_updater_base_scale", 1.7);
+    const auto vcross_status = runOnce(vcross_config);
+    EXPECT_GT(vcross_status.transition_vcross_bfield_scale, 1.5);
+    EXPECT_NEAR(vcross_status.transition_rccabs_sc_scale, 1.0, 1.0e-12);
+
+    auto eclipse_config = buildConfig();
+    eclipse_config.material.setScalarProperty("transition_basic_eclipse_exit_enabled", 1.0);
+    eclipse_config.material.setScalarProperty("transition_local_time_enabled", 1.0);
+    eclipse_config.material.setScalarProperty("transition_local_time_base_hour", 12.0);
+    eclipse_config.material.setScalarProperty("transition_local_time_daylight_start_hour", 6.0);
+    eclipse_config.material.setScalarProperty("transition_local_time_daylight_end_hour", 18.0);
+    eclipse_config.material.setScalarProperty("transition_basic_eclipse_exit_base_scale", 1.0);
+    eclipse_config.material.setScalarProperty("transition_basic_eclipse_exit_exit_scale", 2.5);
+    eclipse_config.material.setScalarProperty("transition_basic_eclipse_exit_eclipse_scale", 0.2);
+    const auto eclipse_status = runOnce(eclipse_config);
+    EXPECT_GT(eclipse_status.transition_basic_eclipse_exit_photo_scale, 2.0);
+    EXPECT_NEAR(eclipse_status.transition_transient_artificial_sources_scale, 1.0, 1.0e-12);
+
+    auto transient_config = buildConfig();
+    transient_config.material.setScalarProperty(
+        "transition_transient_artificial_sources_enabled", 1.0);
+    transient_config.material.setScalarProperty(
+        "transition_transient_artificial_sources_base_scale", 1.6);
+    transient_config.material.setScalarProperty(
+        "transition_transient_artificial_sources_pulse_period_s", 1.0);
+    transient_config.material.setScalarProperty(
+        "transition_transient_artificial_sources_pulse_duty_cycle", 1.0);
+    transient_config.material.setScalarProperty(
+        "transition_transient_artificial_sources_current_density_a_per_m2", 2.0e-6);
+    const auto transient_status = runOnce(transient_config);
+    EXPECT_GT(transient_status.transition_transient_artificial_sources_scale, 1.4);
+    EXPECT_GT(
+        transient_status.transition_transient_artificial_source_current_density_a_per_m2,
+        1.0e-6);
+
+    auto langmuir_config = buildConfig();
+    langmuir_config.material.setScalarProperty(
+        "transition_langmuir_probe_transition_enabled", 1.0);
+    langmuir_config.material.setScalarProperty(
+        "transition_langmuir_probe_transition_base_scale", 1.9);
+    const auto langmuir_status = runOnce(langmuir_config);
+    EXPECT_GT(langmuir_status.transition_langmuir_probe_derivative_scale, 1.7);
+    EXPECT_NEAR(langmuir_status.transition_rccabs_sc_scale, 1.0, 1.0e-12);
 }
 
 TEST(SurfaceChargingSmokeTest, ThrusterPlumePresetRemainsFinite)
@@ -4259,6 +4419,44 @@ TEST(SurfaceChargingSmokeTest, SurfaceReferenceAndRuntimeContractsExportMetadata
     EXPECT_EQ(surface_preset.config.benchmark_source,
               SCDAT::Toolkit::SurfaceCharging::SurfaceBenchmarkSource::CGeo);
 
+    surface_preset.config.material.setScalarProperty("transition_conductivity_evolution_enabled",
+                                                     1.0);
+    surface_preset.config.material.setScalarProperty("transition_local_time_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty("transition_local_time_base_hour", 12.0);
+    surface_preset.config.material.setScalarProperty("transition_local_time_daylight_start_hour",
+                                                     6.0);
+    surface_preset.config.material.setScalarProperty("transition_local_time_daylight_end_hour",
+                                                     18.0);
+    surface_preset.config.material.setScalarProperty("transition_spinning_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty("transition_spin_period_s",
+                                                     24.0 * 3600.0);
+    surface_preset.config.material.setScalarProperty("transition_sun_flux_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty("transition_sun_flux_base_scale", 1.2);
+    surface_preset.config.material.setScalarProperty("transition_sun_flux_night_scale", 0.1);
+    surface_preset.config.material.setScalarProperty("transition_sun_flux_spin_amplitude", 0.2);
+    surface_preset.config.material.setScalarProperty(
+        "transition_sun_flux_pic_recalibration_min_scale", 0.5);
+    surface_preset.config.material.setScalarProperty("transition_finalization_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty("transition_finalization_trigger_time_s", 0.0);
+    surface_preset.config.material.setScalarProperty("transition_finalization_duration_s", 600.0);
+    surface_preset.config.material.setScalarProperty(
+        "transition_finalization_validity_renormalization", 0.25);
+    surface_preset.config.material.setScalarProperty("transition_source_flux_updater_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty(
+        "transition_simulation_param_updater_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_updater_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty("transition_rccabs_sc_updater_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty("transition_vcross_bfield_updater_enabled",
+                                                     1.0);
+    surface_preset.config.material.setScalarProperty("transition_basic_eclipse_exit_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty(
+        "transition_transient_artificial_sources_enabled", 1.0);
+    surface_preset.config.material.setScalarProperty(
+        "transition_langmuir_probe_transition_enabled", 1.0);
+    surface_preset.config.enable_pic_calibration = true;
+    surface_preset.config.pic_recalibration_interval_steps = 1;
+
     EXPECT_EQ(legacy_preset.config.legacy_input_adapter_kind,
               SCDAT::Toolkit::SurfaceCharging::SurfaceLegacyInputAdapterKind::
                   CTextReferenceDeck);
@@ -4270,6 +4468,19 @@ TEST(SurfaceChargingSmokeTest, SurfaceReferenceAndRuntimeContractsExportMetadata
     {
         ASSERT_TRUE(charging.advance(surface_preset.time_step_s));
     }
+    const auto lifecycle_status = charging.getStatus();
+    EXPECT_TRUE(lifecycle_status.transition_observer_active);
+    EXPECT_TRUE(lifecycle_status.transition_observer_local_time_window_active);
+    EXPECT_TRUE(lifecycle_status.transition_observer_spinning_spacecraft_active);
+    EXPECT_TRUE(lifecycle_status.transition_observer_sun_flux_updater_active);
+    EXPECT_TRUE(lifecycle_status.transition_observer_pic_recalibration_requested);
+    EXPECT_GT(lifecycle_status.transition_observer_sun_flux_scale, 1.0);
+    EXPECT_TRUE(lifecycle_status.transition_sun_flux_intensity_active);
+    EXPECT_GT(lifecycle_status.transition_sun_flux_intensity_normalized, 1.0);
+    EXPECT_GE(lifecycle_status.transition_sun_flux_intensity_daylight_factor, 1.0);
+    EXPECT_GT(lifecycle_status.transition_sun_flux_intensity_spin_factor, 1.0);
+    EXPECT_TRUE(lifecycle_status.transition_finalization_active);
+    EXPECT_TRUE(lifecycle_status.transition_finalization_shared_surface_pic_runtime);
 
     const auto csv_path =
         std::filesystem::temp_directory_path() / "surface_contract_metadata_smoke.csv";
@@ -4288,6 +4499,67 @@ TEST(SurfaceChargingSmokeTest, SurfaceReferenceAndRuntimeContractsExportMetadata
     EXPECT_NE(sidecar.find("\"benchmark_reference_source_resolved\": \"C-GEO\""),
               std::string::npos);
     EXPECT_NE(sidecar.find("\"surface_instrument_contract_id\": \"surface-instrument-observer-v1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_observability_profile\": "
+                           "\"runtime_observer+metadata_catalog+aggregated_post_sensors\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_runtime_class_signature\": "
+                           "\"LangmuirProbe+MonitorInstrument+NumericsMonitor+TotalCurrentOnSC+"
+                           "MultipleESNPotentialSensors+MultipleESNTotalCurrentMonitor\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_pending_observability_class_signature\": "
+                           "\"PotentialPS+PotentialLPS+PointPS+LinePS+SphericalPS+"
+                           "ParticleDetector+VirtualParticleDetector+ParticleSPS+"
+                           "VelocityDistFunctionPS+EnergyDistFuncPS+SurfaceFluxDistFunctionPS+"
+                           "VolDistribMomentPS\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_spatial_post_sensor_artifact\": "
+                           "\"surface_contract_metadata_smoke.shared_runtime_observer.json\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_monitor_artifact\": "
+                           "\"surface_contract_metadata_smoke.monitor.json\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_distribution_sensor_artifact\": "
+                           "\"surface_contract_metadata_smoke.csv.metadata.json\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_particle_detector_artifact\": "
+                           "\"surface_contract_metadata_smoke.shared_runtime_observer.json\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_metadata_catalog_artifact\": "
+                           "\"surface_contract_metadata_smoke.csv.metadata.json\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_monitor_class_signature\": "
+                           "\"LangmuirProbe+MonitorInstrument+NumericsMonitor+TotalCurrentOnSC+"
+                           "MultipleESNTotalCurrentMonitor\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_spatial_post_sensor_class_signature\": "
+                           "\"PotentialPS+PotentialLPS+PointPS+LinePS+SphericalPS+"
+                           "MultipleESNPotentialSensors+MultipleESNPotentialSensorsSCFrame\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_particle_detector_class_signature\": "
+                           "\"AbstractParticleDetector+ParticleDetector+ParticleDetectorInterface+"
+                           "VirtualParticleDetector+ParticleSPS+TotalSuperParticlePS\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_distribution_sensor_class_signature\": "
+                           "\"DensityPS+DistFuncOfOneVariable+EnergyDistFuncPS+"
+                           "TotalEnergyDistFuncPS+VelocityDistFunctionPS+"
+                           "SurfaceFluxDistFunctionPS+VolDistribMomentPS+"
+                           "KineticEnergyPS+TotalEnergyPS\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_spatial_post_sensor_observability\": "
+                           "\"shared_runtime_observer+node_potential_histories\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_particle_detector_observability\": "
+                           "\"computeSurfaceCurrents+node_level_current_histories\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_distribution_sensor_observability\": "
+                           "\"aggregated_sampler_distribution_metadata\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_monitor_observability\": "
+                           "\"monitor_json+probe_current_voltage_series\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_instrument_metadata_catalog_observability\": "
+                           "\"metadata_sidecar+class_signature_catalog\""),
               std::string::npos);
     EXPECT_NE(sidecar.find("\"benchmark_case_contract_id\": \"benchmark-case-v1\""),
               std::string::npos);
@@ -4324,6 +4596,88 @@ TEST(SurfaceChargingSmokeTest, SurfaceReferenceAndRuntimeContractsExportMetadata
     EXPECT_NE(sidecar.find("\"surface_pic_runtime_global_particle_repository_contract_id\": \"surface-pic-global-particle-repository-v1\""),
               std::string::npos);
     EXPECT_NE(sidecar.find("\"surface_pic_runtime_global_sheath_field_solve_mode\": \"explicit_global_sheath_field_linear_system_v2\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_conductivity_evolution_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_source_flux_updater_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_simulation_param_updater_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_sheath_or_presheath_poisson_bc_updater_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_rccabs_sc_updater_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_vcross_bfield_updater_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_basic_eclipse_exit_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_transient_artificial_sources_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_langmuir_probe_transition_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_local_time_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_spinning_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_event_sun_flux_enabled\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_conductivity_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_source_flux_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_simulation_param_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_poisson_bc_length_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_poisson_bc_presheath_mode_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_poisson_bc_effective_sheath_length_m_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_rccabs_sc_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_vcross_bfield_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_basic_eclipse_exit_photo_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_transient_artificial_sources_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_transient_artificial_source_current_density_a_per_m2_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_langmuir_probe_derivative_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_observer_active_latest\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_observer_local_time_window_active_latest\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_observer_spinning_spacecraft_active_latest\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_observer_sun_flux_updater_active_latest\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_observer_pic_recalibration_requested_latest\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_observer_local_time_hour_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_observer_spinning_phase_rad_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_observer_sun_flux_scale_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_sun_flux_intensity_active_latest\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_sun_flux_intensity_normalized_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_sun_flux_intensity_daylight_factor_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_sun_flux_intensity_spin_factor_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_finalization_active_latest\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_finalization_shared_surface_pic_runtime_latest\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_finalization_shared_global_coupled_iteration_limit_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_finalization_fixed_iteration_policy_latest\":"),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_transition_finalization_residual_guarded_policy_latest\":"),
               std::string::npos);
 
     auto benchmark_case_path = csv_path;
@@ -4591,6 +4945,497 @@ TEST(SurfaceChargingSmokeTest, SurfaceConfigCliAppliesBodyAndPhotoOverrides)
               std::string::npos);
     EXPECT_NE(sidecar.find("\"surface_ion_collection_coefficient\": \"0.000000\""),
               std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, SurfaceConfigCliAcceptsSurfaceInteractorFamilyOverrideKeys)
+{
+    const auto scdat_exe = locateSiblingScdatExecutable();
+    ASSERT_FALSE(scdat_exe.empty());
+    ASSERT_TRUE(std::filesystem::exists(scdat_exe));
+
+    const auto temp_dir = std::filesystem::temp_directory_path();
+    const auto csv_path = temp_dir / "surface_config_cli_interactor_family_smoke.csv";
+    const auto json_path = temp_dir / "surface_config_cli_interactor_family_smoke.surface.json";
+
+    std::ofstream config(json_path);
+    ASSERT_TRUE(config.is_open());
+    config << "{\n"
+           << "  \"schema_version\": \"v1\",\n"
+           << "  \"module\": \"surface\",\n"
+           << "  \"base_preset\": \"geo_ecss_kapton_ref\",\n"
+           << "  \"run\": {\n"
+           << "    \"steps\": 1,\n"
+            << "    \"adaptive_time_stepping\": false,\n"
+            << "    \"time_step_s\": 5.0e-6,\n"
+            << "    \"output_csv\": \"" << csv_path.generic_string() << "\"\n"
+            << "  },\n"
+           << "  \"config\": {\n"
+           << "    \"surface_runtime_route\": \"unified\",\n"
+            << "    \"current_algorithm_mode\": \"unified\",\n"
+           << "    \"surface_interactor_family\": \"reflection\",\n"
+           << "    \"material\": {\n"
+           << "      \"surface_interactor_family\": \"tabulated_sey\",\n"
+           << "      \"scalar_properties\": {\n"
+           << "        \"surface_tabulated_sey_energy_count\": 3,\n"
+           << "        \"surface_tabulated_sey_energy_0_ev\": 50.0,\n"
+           << "        \"surface_tabulated_sey_energy_1_ev\": 100.0,\n"
+           << "        \"surface_tabulated_sey_energy_2_ev\": 200.0,\n"
+           << "        \"surface_tabulated_sey_value_0\": 0.1,\n"
+           << "        \"surface_tabulated_sey_value_1\": 0.4,\n"
+           << "        \"surface_tabulated_sey_value_2\": 0.8\n"
+           << "      }\n"
+           << "    }\n"
+           << "  }\n"
+           << "}\n";
+    config.close();
+
+    const std::string command =
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& '" +
+        scdat_exe.generic_string() + "' surface-config '" +
+        json_path.generic_string() + "' '" + csv_path.generic_string() + "'\"";
+    ASSERT_EQ(std::system(command.c_str()), 0);
+
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find("\"runtime_route\": \"SCDATUnified\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_interactor_family\": \"spis_tabulated_sey_surface_interactor_v1\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, SurfaceConfigCliCarriesSpisImportSweepAndComparisonMetadata)
+{
+    const auto scdat_exe = locateSiblingScdatExecutable();
+    ASSERT_FALSE(scdat_exe.empty());
+    ASSERT_TRUE(std::filesystem::exists(scdat_exe));
+
+    const auto temp_dir = std::filesystem::temp_directory_path();
+    const auto csv_path = temp_dir / "surface_config_cli_spis_import_metadata.csv";
+    const auto json_path = temp_dir / "surface_config_cli_spis_import_metadata.surface.json";
+
+    std::ofstream config(json_path);
+    ASSERT_TRUE(config.is_open());
+    config << "{\n"
+           << "  \"schema_version\": \"v1\",\n"
+           << "  \"module\": \"surface\",\n"
+           << "  \"base_preset\": \"geo_ecss_kapton_pic_circuit\",\n"
+           << "  \"run\": {\n"
+           << "    \"steps\": 1,\n"
+           << "    \"adaptive_time_stepping\": false,\n"
+           << "    \"time_step_s\": 1.0e-7,\n"
+           << "    \"output_csv\": \"" << csv_path.generic_string() << "\"\n"
+           << "  },\n"
+           << "  \"config\": {\n"
+           << "    \"body_floating\": false,\n"
+           << "    \"body_initial_potential_v\": 0.0,\n"
+           << "    \"enable_live_pic_window\": false,\n"
+           << "    \"enable_live_pic_mcc\": false,\n"
+           << "    \"enable_pic_calibration\": false,\n"
+           << "    \"internal_substeps\": 1,\n"
+           << "    \"spis_import\": {\n"
+           << "      \"case_name\": \"Child_Langmuir\",\n"
+           << "      \"case_id\": \"child_langmuir\",\n"
+           << "      \"case_root\": \"ref/SPIS/Child_Langmuir.spis5\",\n"
+           << "      \"model_xml_path\": \"ref/SPIS/Child_Langmuir.spis5/model.xml\",\n"
+           << "      \"import_manifest_path\": \"results/spis_import/child_langmuir/import_manifest.json\",\n"
+           << "      \"scan_plan_path\": \"results/spis_import/child_langmuir/scan_plan.json\"\n"
+           << "    },\n"
+           << "    \"potential_sweep\": {\n"
+           << "      \"mode\": \"pwl_timeline\",\n"
+           << "      \"active_point_index\": 0,\n"
+           << "      \"points\": [\n"
+           << "        {\"time_s\": 0.0, \"value\": 0.0, \"label\": \"v0\"},\n"
+           << "        {\"time_s\": 1.0e-6, \"value\": 5.0, \"label\": \"v5\"}\n"
+           << "      ]\n"
+           << "    },\n"
+           << "    \"circuit_waveform\": [\n"
+           << "      {\n"
+           << "        \"name\": \"probe_bias\",\n"
+           << "        \"target_kind\": \"branch_bias\",\n"
+           << "        \"target_index\": 0,\n"
+           << "        \"waveform\": \"pwl\",\n"
+           << "        \"pwl_points\": [\n"
+           << "          {\"time_s\": 0.0, \"value\": 0.0},\n"
+           << "          {\"time_s\": 1.0e-6, \"value\": 5.0}\n"
+           << "        ]\n"
+           << "      }\n"
+           << "    ],\n"
+           << "    \"comparison_targets\": [\n"
+           << "      {\"name\": \"Average_surface_potential_of_node_0\", \"source_family\": \"DataFieldMonitored\", \"source_pattern\": \"Average_surface_potential_of_node_0*.nc\", \"unit\": \"V\"},\n"
+           << "      {\"name\": \"Total_current_on_spacecraft\", \"source_family\": \"DataFieldMonitored\", \"source_pattern\": \"Total_current_on_spacecraft*.nc\", \"unit\": \"A\"}\n"
+           << "    ],\n"
+           << "    \"spis_reference_output\": {\n"
+           << "      \"output_root\": \"ref/SPIS/Child_Langmuir.spis5/DefaultStudy/Simulations/Run1/OutputFolder\",\n"
+           << "      \"monitored_root\": \"ref/SPIS/Child_Langmuir.spis5/DefaultStudy/Simulations/Run1/OutputFolder/DataFieldMonitored\",\n"
+           << "      \"extracted_root\": \"ref/SPIS/Child_Langmuir.spis5/DefaultStudy/Simulations/Run1/OutputFolder/DataFieldExtracted\",\n"
+           << "      \"comparison_csv_path\": \"results/spis_import/child_langmuir/comparison.csv\",\n"
+           << "      \"comparison_summary_path\": \"results/spis_import/child_langmuir/comparison.md\",\n"
+           << "      \"comparison_json_path\": \"results/spis_import/child_langmuir/comparison.json\"\n"
+           << "    },\n"
+           << "    \"surface_nodes\": [\n"
+           << "      {\"name\": \"sc_ground\", \"area_m2\": 1.0e-4, \"is_patch\": false, \"initial_potential_v\": 0.0, \"capacitance_f\": 1.0e-10, \"fixed_potential\": true, \"fixed_value_v\": 0.0},\n"
+           << "      {\"name\": \"probe\", \"area_m2\": 1.0e-4, \"is_patch\": true, \"initial_potential_v\": 0.0, \"capacitance_f\": 1.0e-10, \"fixed_potential\": false, \"fixed_value_v\": 0.0}\n"
+           << "    ],\n"
+           << "    \"surface_branches\": [\n"
+           << "      {\"from_node\": 1, \"to_node\": 0, \"conductance_s\": 1.0e-9, \"bias_v\": 0.0}\n"
+           << "    ]\n"
+           << "  }\n"
+           << "}\n";
+    config.close();
+
+    const std::string command =
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& '" +
+        scdat_exe.generic_string() + "' surface-config '" +
+        json_path.generic_string() + "' '" + csv_path.generic_string() + "'\"";
+    ASSERT_EQ(std::system(command.c_str()), 0);
+
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find("\"surface_spis_import_case_name\": \"Child_Langmuir\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_spis_import_case_id\": \"child_langmuir\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_potential_sweep_mode\": \"pwl_timeline\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_potential_sweep_point_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_circuit_waveform_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_comparison_target_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_spis_reference_comparison_csv_path\": "
+                            "\"results/spis_import/child_langmuir/comparison.csv\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_circ_active_circuit_family_signature\": "
+                            "\"Circuit+ElecComponent+SurfaceComponent+RCCabsCirc+RLCCirc+SIN+PULSE+PWL+EXP\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, SurfaceConfigCliRejectsUnsupportedSurfaceInteractorFamilyOverride)
+{
+    const auto scdat_exe = locateSiblingScdatExecutable();
+    ASSERT_FALSE(scdat_exe.empty());
+    ASSERT_TRUE(std::filesystem::exists(scdat_exe));
+
+    const auto temp_dir = std::filesystem::temp_directory_path();
+    const auto csv_path = temp_dir / "surface_config_cli_invalid_interactor_family_smoke.csv";
+    const auto json_path = temp_dir / "surface_config_cli_invalid_interactor_family_smoke.surface.json";
+
+    std::ofstream config(json_path);
+    ASSERT_TRUE(config.is_open());
+    config << "{\n"
+           << "  \"schema_version\": \"v1\",\n"
+           << "  \"module\": \"surface\",\n"
+           << "  \"base_preset\": \"geo_ecss_kapton_ref\",\n"
+           << "  \"run\": {\n"
+           << "    \"steps\": 1,\n"
+           << "    \"adaptive_time_stepping\": false,\n"
+           << "    \"time_step_s\": 5.0e-6,\n"
+           << "    \"output_csv\": \"" << csv_path.generic_string() << "\"\n"
+           << "  },\n"
+           << "  \"config\": {\n"
+           << "    \"material\": {\n"
+           << "      \"surface_interactor_family\": \"unsupported_surface_interactor_family\"\n"
+           << "    }\n"
+           << "  }\n"
+           << "}\n";
+    config.close();
+
+    if (std::filesystem::exists(csv_path))
+    {
+        std::filesystem::remove(csv_path);
+    }
+
+    const std::string command =
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& '" +
+        scdat_exe.generic_string() + "' surface-config '" +
+        json_path.generic_string() + "' '" + csv_path.generic_string() + "'\"";
+    EXPECT_NE(std::system(command.c_str()), 0);
+    EXPECT_FALSE(std::filesystem::exists(csv_path));
+}
+
+TEST(SurfaceChargingSmokeTest, SurfaceConfigCliAcceptsCanonicalDefaultInteractorFamilyAlias)
+{
+    const auto scdat_exe = locateSiblingScdatExecutable();
+    ASSERT_FALSE(scdat_exe.empty());
+    ASSERT_TRUE(std::filesystem::exists(scdat_exe));
+
+    const auto temp_dir = std::filesystem::temp_directory_path();
+    const auto csv_path = temp_dir / "surface_config_cli_default_interactor_alias_smoke.csv";
+    const auto json_path =
+        temp_dir / "surface_config_cli_default_interactor_alias_smoke.surface.json";
+
+    std::ofstream config(json_path);
+    ASSERT_TRUE(config.is_open());
+    config << "{\n"
+           << "  \"schema_version\": \"v1\",\n"
+           << "  \"module\": \"surface\",\n"
+           << "  \"base_preset\": \"geo_ecss_kapton_ref\",\n"
+           << "  \"run\": {\n"
+           << "    \"steps\": 1,\n"
+           << "    \"adaptive_time_stepping\": false,\n"
+           << "    \"time_step_s\": 5.0e-6,\n"
+           << "    \"output_csv\": \"" << csv_path.generic_string() << "\"\n"
+           << "  },\n"
+           << "  \"config\": {\n"
+           << "    \"surface_runtime_route\": \"unified\",\n"
+           << "    \"current_algorithm_mode\": \"unified\",\n"
+           << "    \"material\": {\n"
+           << "      \"surface_interactor_family\": \"spis_default_erosion_model_v1\",\n"
+           << "      \"scalar_properties\": {\n"
+           << "        \"erosion_yield_scale\": 0.35\n"
+           << "      }\n"
+           << "    }\n"
+           << "  }\n"
+           << "}\n";
+    config.close();
+
+    const std::string command =
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& '" +
+        scdat_exe.generic_string() + "' surface-config '" +
+        json_path.generic_string() + "' '" + csv_path.generic_string() + "'\"";
+    ASSERT_EQ(std::system(command.c_str()), 0);
+
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find("\"runtime_route\": \"SCDATUnified\""), std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_interactor_family\": \"spis_default_erosion_model_v1\""),
+              std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"surface_material_model_family\": \"spis_erosion_surface_material_model_v1\""),
+        std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, SurfaceConfigCliAcceptsCanonicalSurfDistribFamilyAlias)
+{
+    const auto scdat_exe = locateSiblingScdatExecutable();
+    ASSERT_FALSE(scdat_exe.empty());
+    ASSERT_TRUE(std::filesystem::exists(scdat_exe));
+
+    const auto temp_dir = std::filesystem::temp_directory_path();
+    const auto csv_path = temp_dir / "surface_config_cli_distribution_family_alias_smoke.csv";
+    const auto json_path =
+        temp_dir / "surface_config_cli_distribution_family_alias_smoke.surface.json";
+
+    std::ofstream config(json_path);
+    ASSERT_TRUE(config.is_open());
+    config << "{\n"
+           << "  \"schema_version\": \"v1\",\n"
+           << "  \"module\": \"surface\",\n"
+           << "  \"base_preset\": \"geo_ecss_kapton_ref\",\n"
+           << "  \"run\": {\n"
+           << "    \"steps\": 1,\n"
+           << "    \"adaptive_time_stepping\": false,\n"
+           << "    \"time_step_s\": 5.0e-6,\n"
+           << "    \"output_csv\": \"" << csv_path.generic_string() << "\"\n"
+           << "  },\n"
+           << "  \"config\": {\n"
+           << "    \"surface_runtime_route\": \"unified\",\n"
+           << "    \"current_algorithm_mode\": \"unified\",\n"
+           << "    \"distribution_model\": \"global_maxwell_boltzmann2\"\n"
+           << "  }\n"
+           << "}\n";
+    config.close();
+
+    const std::string command =
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& '" +
+        scdat_exe.generic_string() + "' surface-config '" +
+        json_path.generic_string() + "' '" + csv_path.generic_string() + "'\"";
+    ASSERT_EQ(std::system(command.c_str()), 0);
+
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find("\"runtime_route\": \"SCDATUnified\""), std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_distribution_family\": \"spis_global_maxwell_boltzmann2_surface_flux_v1\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, SurfaceConfigCliAcceptsPicSurfDistribAlias)
+{
+    const auto scdat_exe = locateSiblingScdatExecutable();
+    ASSERT_FALSE(scdat_exe.empty());
+    ASSERT_TRUE(std::filesystem::exists(scdat_exe));
+
+    const auto temp_dir = std::filesystem::temp_directory_path();
+    const auto csv_path = temp_dir / "surface_config_cli_pic_surf_alias_smoke.csv";
+    const auto json_path =
+        temp_dir / "surface_config_cli_pic_surf_alias_smoke.surface.json";
+
+    std::ofstream config(json_path);
+    ASSERT_TRUE(config.is_open());
+    config << "{\n"
+           << "  \"schema_version\": \"v1\",\n"
+           << "  \"module\": \"surface\",\n"
+           << "  \"base_preset\": \"geo_ecss_kapton_ref\",\n"
+           << "  \"run\": {\n"
+           << "    \"steps\": 1,\n"
+           << "    \"adaptive_time_stepping\": false,\n"
+           << "    \"time_step_s\": 5.0e-6,\n"
+           << "    \"output_csv\": \"" << csv_path.generic_string() << "\"\n"
+           << "  },\n"
+           << "  \"config\": {\n"
+           << "    \"surface_runtime_route\": \"unified\",\n"
+           << "    \"current_algorithm_mode\": \"unified\",\n"
+           << "    \"distribution_model\": \"pic_surf\"\n"
+           << "  }\n"
+           << "}\n";
+    config.close();
+
+    const std::string command =
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& '" +
+        scdat_exe.generic_string() + "' surface-config '" +
+        json_path.generic_string() + "' '" + csv_path.generic_string() + "'\"";
+    ASSERT_EQ(std::system(command.c_str()), 0);
+
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find("\"runtime_route\": \"SCDATUnified\""), std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_distribution_family\": \"spis_pic_surface_flux_v1\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, SurfaceConfigCliAcceptsNativeVolumeFamilyOverrideKeys)
+{
+    const auto scdat_exe = locateSiblingScdatExecutable();
+    ASSERT_FALSE(scdat_exe.empty());
+    ASSERT_TRUE(std::filesystem::exists(scdat_exe));
+
+    const auto temp_dir = std::filesystem::temp_directory_path();
+    const auto csv_path = temp_dir / "surface_config_cli_native_volume_family_override_smoke.csv";
+    const auto json_path =
+        temp_dir / "surface_config_cli_native_volume_family_override_smoke.surface.json";
+
+    std::ofstream config(json_path);
+    ASSERT_TRUE(config.is_open());
+    config << "{\n"
+           << "  \"schema_version\": \"v1\",\n"
+           << "  \"module\": \"surface\",\n"
+           << "  \"base_preset\": \"geo_ecss_kapton_ref\",\n"
+           << "  \"run\": {\n"
+           << "    \"steps\": 1,\n"
+           << "    \"adaptive_time_stepping\": false,\n"
+           << "    \"time_step_s\": 5.0e-6,\n"
+           << "    \"output_csv\": \"" << csv_path.generic_string() << "\"\n"
+           << "  },\n"
+           << "  \"config\": {\n"
+           << "    \"surface_runtime_route\": \"unified\",\n"
+           << "    \"current_algorithm_mode\": \"unified\",\n"
+           << "    \"native_volume_boundary_condition_families\": [\n"
+           << "      \"voltage_dependent_mbc\",\n"
+           << "      \"fourier_poisson_bc\",\n"
+           << "      \"capacitive_voltage_generator\"\n"
+           << "    ],\n"
+           << "    \"native_volume_field_families\": [\n"
+           << "      \"uniform_b_field\",\n"
+           << "      \"dipolar_b_field\",\n"
+           << "      \"em_field\"\n"
+           << "    ],\n"
+           << "    \"native_volume_distribution_families\": [\n"
+           << "      \"global_maxwell_boltzmann_vol_distrib\",\n"
+           << "      \"analytic_vol_distrib\",\n"
+           << "      \"pic_boltzmann_vol_distrib\"\n"
+           << "    ],\n"
+           << "    \"native_volume_interaction_families\": [\n"
+           << "      \"mcc_interactor\",\n"
+           << "      \"photo_ionization\",\n"
+           << "      \"spinning_spacecraft_trajectory\"\n"
+           << "    ]\n"
+           << "  }\n"
+           << "}\n";
+    config.close();
+
+    const std::string command =
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& '" +
+        scdat_exe.generic_string() + "' surface-config '" +
+        json_path.generic_string() + "' '" + csv_path.generic_string() + "'\"";
+    ASSERT_EQ(std::system(command.c_str()), 0);
+
+    const auto sidecar = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(sidecar.find("\"surface_native_volume_parity_mode\": \"native_minimal\""),
+              std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"surface_native_volume_parity_boundary_condition_route\": \"config_override\""),
+        std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_native_volume_parity_boundary_condition_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_native_volume_parity_boundary_condition_family_signature\": "
+                  "\"VoltageDependentMBC+FourierPoissonBC+CapacitiveVoltageGenerator\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_native_volume_parity_active_boundary_condition_family_signature\": "
+                  "\"VoltageDependentMBC+FourierPoissonBC+CapacitiveVoltageGenerator\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_parity_field_route\": \"config_override\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_parity_field_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_native_volume_parity_field_family_signature\": "
+                  "\"UniformBField+DipolarBField+EMField\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_native_volume_parity_active_field_family_signature\": "
+                  "\"UniformBField+DipolarBField+EMField\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_field_route\": \"config_override\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_field_family_count\": \"9\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_field_active_family_count\": \"9\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_native_volume_field_family_signature\": "
+                  "\"VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_native_volume_field_active_family_signature\": "
+                  "\"VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_distribution_route\": "
+                           "\"config_override\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_distribution_family_count\": \"14\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_distribution_active_family_count\": \"7\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_distribution_family_signature\": "
+                           "\"VolDistrib+NonPICVolDistrib+AnalyticVolDistrib+MultipleVolDistrib+LocalMaxwellVolDistrib+LocalMaxwellBoltzmannVolDistrib+GlobalMaxwellBoltzmannVolDistrib+PICBoltzmannVolDistrib+SteadyMaxwellBoltzmannVolDistrib+UnlimitedGlobalMaxwellBoltzmannVolDistrib+SurfaceLimitedGlobalMaxwellBoltzmannVolDistrib+TrunckatedGlobalMaxwellBoltzmannVolDistrib+ImplicitableVolDistrib+Updatable\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_distribution_active_family_signature\": "
+                           "\"VolDistrib+NonPICVolDistrib+AnalyticVolDistrib+GlobalMaxwellBoltzmannVolDistrib+ImplicitableVolDistrib+Updatable+PICBoltzmannVolDistrib\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_parity_interaction_route\": "
+                           "\"config_override\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_active_interaction_route\": "
+                           "\"config_override\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_parity_interaction_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_parity_interaction_family_signature\": "
+                           "\"MCCInteractor+PhotoIonization+SpinningSpacecraftTrajectory\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_active_interaction_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_active_interaction_family_signature\": "
+                           "\"MCCInteractor+PhotoIonization+SpinningSpacecraftTrajectory\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_interaction_long_tail_route\": "
+                           "\"config_override\""),
+              std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"surface_native_volume_interaction_long_tail_family_count\": \"5\""),
+        std::string::npos);
+    EXPECT_NE(sidecar.find(
+                  "\"surface_native_volume_interaction_long_tail_active_family_count\": \"5\""),
+              std::string::npos);
+    EXPECT_NE(sidecar.find("\"surface_native_volume_interaction_long_tail_family_signature\": "
+                           "\"VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor\""),
+              std::string::npos);
+    EXPECT_NE(
+        sidecar.find("\"surface_native_volume_interaction_long_tail_active_family_signature\": "
+                     "\"VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor\""),
+        std::string::npos);
 }
 
 TEST(SurfaceChargingSmokeTest, BenchmarkComparisonCsvIncludesResolvedInitialRuntimeSamples)
@@ -6182,6 +7027,110 @@ TEST(SurfaceChargingSmokeTest, LivePicSamplerDiscreteSpectrumPathRemainsDetermin
                      second.current_derivative_a_per_m2_per_v);
 }
 
+TEST(SurfaceChargingSmokeTest, LivePicSamplerSingleSourceResolvedSlotCarriesAttributedAggregate)
+{
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_surface_pic_direct", preset));
+
+    SCDAT::Toolkit::SurfaceCharging::PicMccSurfaceSamplerConfig sampler_config;
+    sampler_config.surface_area_m2 = preset.config.surface_area_m2;
+    sampler_config.gap_distance_m = std::max(1.0e-4, preset.config.sheath_length_m);
+    sampler_config.node_name = "patch:kapton_ram";
+    sampler_config.boundary_group_id = "bg_patch";
+    sampler_config.linked_boundary_face_count = 3;
+    sampler_config.projection_weight_sum = 2.5;
+    sampler_config.surface_aspect_ratio = 1.8;
+    sampler_config.surface_potential_v = 5.0;
+    sampler_config.plasma_reference_potential_v = 0.0;
+    sampler_config.electron_flow_coupling = preset.config.electron_flow_coupling;
+    sampler_config.bulk_flow_velocity_m_per_s = preset.config.bulk_flow_velocity_m_per_s;
+    sampler_config.flow_alignment_cosine = preset.config.flow_alignment_cosine;
+    sampler_config.flow_angle_deg = preset.config.patch_flow_angle_deg;
+    sampler_config.ion_directed_velocity_m_per_s = preset.config.ion_directed_velocity_m_per_s;
+    sampler_config.z_layers = 6;
+    sampler_config.particles_per_element = 2;
+    sampler_config.window_steps = 6;
+    sampler_config.enable_mcc = true;
+    sampler_config.collision_cross_section_set_id = "surface_pic_v1";
+    sampler_config.deposition_scheme = "pic_window_tsc";
+    sampler_config.seed = 123456u;
+    sampler_config.sampling_policy = "deterministic";
+    sampler_config.plasma = preset.config.plasma;
+    sampler_config.electron_spectrum = preset.config.electron_spectrum;
+    sampler_config.ion_spectrum = preset.config.ion_spectrum;
+    sampler_config.has_electron_spectrum = preset.config.has_electron_spectrum;
+    sampler_config.has_ion_spectrum = preset.config.has_ion_spectrum;
+    sampler_config.material = preset.config.material;
+    sampler_config.source_keys = {"source1"};
+
+    SCDAT::Toolkit::SurfaceCharging::PicMccSurfaceCurrentSampler sampler;
+    const auto sample = sampler.sample(sampler_config);
+
+    ASSERT_TRUE(sample.valid);
+    ASSERT_EQ(sample.source_resolved_samples.size(), 1u);
+    const auto& source_sample = sample.source_resolved_samples.front();
+    EXPECT_EQ(source_sample.source_key, "source1");
+    EXPECT_TRUE(source_sample.strictly_attributed);
+    EXPECT_DOUBLE_EQ(source_sample.collected_current_density_a_per_m2,
+                     sample.electron_collection_current_density_a_per_m2 +
+                         sample.ion_collection_current_density_a_per_m2);
+    EXPECT_GT(source_sample.superparticle_count, 0.0);
+}
+
+TEST(SurfaceChargingSmokeTest, LivePicSamplerMultiSourceResolvedSlotsPreserveStableOrder)
+{
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_surface_pic_direct", preset));
+
+    SCDAT::Toolkit::SurfaceCharging::PicMccSurfaceSamplerConfig sampler_config;
+    sampler_config.surface_area_m2 = preset.config.surface_area_m2;
+    sampler_config.gap_distance_m = std::max(1.0e-4, preset.config.sheath_length_m);
+    sampler_config.node_name = "patch:kapton_ram";
+    sampler_config.boundary_group_id = "bg_patch";
+    sampler_config.linked_boundary_face_count = 3;
+    sampler_config.projection_weight_sum = 2.5;
+    sampler_config.surface_aspect_ratio = 1.8;
+    sampler_config.surface_potential_v = 5.0;
+    sampler_config.plasma_reference_potential_v = 0.0;
+    sampler_config.electron_flow_coupling = preset.config.electron_flow_coupling;
+    sampler_config.bulk_flow_velocity_m_per_s = preset.config.bulk_flow_velocity_m_per_s;
+    sampler_config.flow_alignment_cosine = preset.config.flow_alignment_cosine;
+    sampler_config.flow_angle_deg = preset.config.patch_flow_angle_deg;
+    sampler_config.ion_directed_velocity_m_per_s = preset.config.ion_directed_velocity_m_per_s;
+    sampler_config.z_layers = 6;
+    sampler_config.particles_per_element = 2;
+    sampler_config.window_steps = 6;
+    sampler_config.enable_mcc = true;
+    sampler_config.collision_cross_section_set_id = "surface_pic_v1";
+    sampler_config.deposition_scheme = "pic_window_tsc";
+    sampler_config.seed = 123456u;
+    sampler_config.sampling_policy = "deterministic";
+    sampler_config.plasma = preset.config.plasma;
+    sampler_config.electron_spectrum = preset.config.electron_spectrum;
+    sampler_config.ion_spectrum = preset.config.ion_spectrum;
+    sampler_config.has_electron_spectrum = preset.config.has_electron_spectrum;
+    sampler_config.has_ion_spectrum = preset.config.has_ion_spectrum;
+    sampler_config.material = preset.config.material;
+    sampler_config.source_keys = {" sourceA ", "sourceB", "sourceA", "", "sourceC"};
+
+    SCDAT::Toolkit::SurfaceCharging::PicMccSurfaceCurrentSampler sampler;
+    const auto sample = sampler.sample(sampler_config);
+
+    ASSERT_TRUE(sample.valid);
+    ASSERT_EQ(sample.source_resolved_samples.size(), 3u);
+    EXPECT_EQ(sample.source_resolved_samples[0].source_key, "sourceA");
+    EXPECT_EQ(sample.source_resolved_samples[1].source_key, "sourceB");
+    EXPECT_EQ(sample.source_resolved_samples[2].source_key, "sourceC");
+    for (const auto& source_sample : sample.source_resolved_samples)
+    {
+        EXPECT_FALSE(source_sample.strictly_attributed);
+        EXPECT_DOUBLE_EQ(source_sample.collected_current_density_a_per_m2, 0.0);
+        EXPECT_DOUBLE_EQ(source_sample.superparticle_count, 0.0);
+    }
+}
+
 TEST(SurfaceChargingSmokeTest, SurfacePicRouteExportsUnifiedKernelSnapshotMetadata)
 {
     DensePlasmaSurfaceCharging charging;
@@ -6247,7 +7196,13 @@ TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsUnifiedKernelMetadata)
                   "\"surface_material_model_family\": \"spis_basic_surface_material_model_v1\""),
               std::string::npos);
     EXPECT_NE(metadata.find(
-                  "\"surface_barrier_scaler_family\": \"spis_variable_barrier_scaler_v1\""),
+                  "\"surface_barrier_scaler_family\": \"spis_component_barrier_scaler_bundle_v1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_photo_barrier_scaler_family\": \"spis_variable_barrier_scaler_v1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_secondary_barrier_scaler_family\": \"spis_secondary_recollection_scaler_v1\""),
               std::string::npos);
 }
 
@@ -6276,6 +7231,885 @@ TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsErosionMaterialModelFamil
     const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
     EXPECT_NE(metadata.find(
                   "\"surface_material_model_family\": \"spis_erosion_surface_material_model_v1\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsTabulatedSeyInteractorFamilyMetadata)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.runtime_route =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SCDATUnified;
+    config.current_algorithm_mode =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    config.material.setScalarProperty("surface_interactor_family_code", 12.0);
+    config.material.setScalarProperty("surface_tabulated_sey_energy_count", 3.0);
+    config.material.setScalarProperty("surface_tabulated_sey_energy_0_ev", 50.0);
+    config.material.setScalarProperty("surface_tabulated_sey_energy_1_ev", 100.0);
+    config.material.setScalarProperty("surface_tabulated_sey_energy_2_ev", 200.0);
+    config.material.setScalarProperty("surface_tabulated_sey_value_0", 0.1);
+    config.material.setScalarProperty("surface_tabulated_sey_value_1", 0.4);
+    config.material.setScalarProperty("surface_tabulated_sey_value_2", 0.8);
+
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_unified_kernel_tabulated_sey_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find(
+                  "\"surface_interactor_family\": \"spis_tabulated_sey_surface_interactor_v1\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsMultipleInteractorFamilyMetadata)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.runtime_route =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SCDATUnified;
+    config.current_algorithm_mode =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    config.material.setPhotoelectronYield(2.0e-5);
+    config.material.setPhotoelectronTemperatureEv(2.0);
+    config.material.setDarkConductivitySPerM(5.0e-10);
+    config.material.setSurfaceConductivitySPerM(4.0e-9);
+    config.material.setSurfaceConductivityScale(3.0);
+    config.material.setScalarProperty("surface_interactor_family_code", 5.0);
+    config.material.setScalarProperty("surface_multiple_yield_weight", 0.4);
+    config.material.setScalarProperty("surface_multiple_reflection_weight", 0.1);
+    config.material.setScalarProperty("surface_multiple_photo_weight", 0.3);
+    config.material.setScalarProperty("surface_multiple_conduction_weight", 0.2);
+
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_unified_kernel_multiple_interactor_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find(
+                  "\"surface_interactor_family\": \"spis_multiple_surface_interactor_v1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_interactor_supported_family_count\": \"19\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_interactor_active_family_signature\": \"spis_multiple_surface_interactor_v1\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsInteractorFamilyViewMetadata)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.runtime_route =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SCDATUnified;
+    config.current_algorithm_mode =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_interactor_family_view_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find(
+                  "\"surface_interactor_family\": \"spis_material_model_surface_interactor_v1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_interactor_supported_family_count\": \"19\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_interactor_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_interactor_active_family_signature\": \"spis_material_model_surface_interactor_v1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_interactor_supported_family_signature\": "
+                  "\"spis_material_model_surface_interactor_v1+"
+                  "spis_material_df_surface_interactor_v1+"
+                  "spis_generic_df_surface_interactor_v1+"
+                  "spis_maxwellian_surface_interactor_v1+"
+                  "spis_maxwellian_surface_interactor_with_recollection_v1+"
+                  "spis_multiple_surface_interactor_v1+"
+                  "spis_multiple_maxwellian_surface_interactor_v1+"
+                  "spis_yield_surface_interactor_v1+"
+                  "spis_reflection_surface_interactor_v1+"
+                  "spis_erosion_surface_interactor_v1+"
+                  "spis_improved_photo_emission_surface_interactor_v1+"
+                  "spis_basic_induced_conduct_surface_interactor_v1+"
+                  "spis_tabulated_sey_surface_interactor_v1+"
+                  "spis_recollected_sey_surface_interactor_v1+"
+                  "spis_default_pee_model_v1+spis_default_seeey_model_v1+"
+                  "spis_default_seep_model_v1+spis_default_erosion_model_v1+"
+                  "spis_device_surface_interactor_v1\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsAutomaticAndMultipleBarrierMetadata)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.runtime_route =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SCDATUnified;
+    config.current_algorithm_mode =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    config.material.setPhotoelectronTemperatureEv(3.0);
+    config.material.setScalarProperty("surface_photo_barrier_scaler_kind", 5.0);
+    config.material.setScalarProperty("surface_secondary_barrier_scaler_kind", 6.0);
+    config.material.setScalarProperty("surface_secondary_multiple_current_primary_scaler_kind", 1.0);
+    config.material.setScalarProperty("surface_secondary_multiple_current_secondary_scaler_kind", 2.0);
+    config.material.setScalarProperty("surface_secondary_multiple_current_tertiary_scaler_kind", 3.0);
+    config.material.setScalarProperty("surface_secondary_multiple_current_primary_weight", 0.5);
+    config.material.setScalarProperty("surface_secondary_multiple_current_secondary_weight", 0.3);
+    config.material.setScalarProperty("surface_secondary_multiple_current_tertiary_weight", 0.2);
+
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_barrier_scaler_metadata_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find(
+                  "\"surface_barrier_scaler_family\": \"spis_component_barrier_scaler_bundle_v1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_photo_barrier_scaler_family\": \"spis_automatic_barrier_current_scaler_v1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_photo_barrier_scaler_resolved_family\":"),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_secondary_barrier_scaler_family\": \"spis_multiple_current_scaler_v1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_secondary_barrier_scaler_resolved_family\": \"spis_multiple_current_scaler_v1["),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsNativeVolumeParityMetadata)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.runtime_route =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SCDATUnified;
+    config.current_algorithm_mode =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    config.enable_external_field_solver_bridge = false;
+    config.enable_external_volume_solver_bridge = false;
+
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_native_volume_parity_metadata_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find("\"surface_external_volume_solver_bridge_enabled\": \"0\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_mode\": \"native_minimal\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_boundary_condition_route\": "
+                            "\"native_minimal\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_field_route\": "
+                            "\"native_minimal\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_bridge_compatible\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_boundary_condition_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_boundary_condition_family_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_boundary_condition_family_signature\": "
+                            "\"FourierPoissonBC+SurfDistribMatterBC\""),
+              std::string::npos);
+    EXPECT_NE(
+        metadata.find("\"surface_native_volume_parity_active_boundary_condition_family_count\": \"2\""),
+        std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_native_volume_parity_active_boundary_condition_family_signature\": "
+                  "\"FourierPoissonBC+SurfDistribMatterBC\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_bc_abstract_route\": "
+                            "\"native_minimal\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_bc_abstract_family_count\": \"5\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_bc_abstract_active_family_count\": \"4\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_bc_abstract_family_signature\": "
+                            "\"BC+DirichletPoissonBC+MatterBC+TestableMatterBC+VoltageGenerator\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_bc_abstract_active_family_signature\": "
+                            "\"BC+DirichletPoissonBC+MatterBC+VoltageGenerator\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_field_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_field_family_signature\": "
+                            "\"UniformBField+MultipleEField+EMField\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_active_field_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_native_volume_parity_active_field_family_signature\": "
+                  "\"UniformBField+MultipleEField+EMField\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_field_route\": "
+                            "\"native_minimal\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_field_family_count\": \"9\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_field_active_family_count\": \"9\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_field_family_signature\": "
+                            "\"VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_field_active_family_signature\": "
+                            "\"VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_distribution_route\": "
+                            "\"distribution_model_inference\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_distribution_family_count\": \"14\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_distribution_active_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_distribution_family_signature\": "
+                            "\"VolDistrib+NonPICVolDistrib+AnalyticVolDistrib+MultipleVolDistrib+LocalMaxwellVolDistrib+LocalMaxwellBoltzmannVolDistrib+GlobalMaxwellBoltzmannVolDistrib+PICBoltzmannVolDistrib+SteadyMaxwellBoltzmannVolDistrib+UnlimitedGlobalMaxwellBoltzmannVolDistrib+SurfaceLimitedGlobalMaxwellBoltzmannVolDistrib+TrunckatedGlobalMaxwellBoltzmannVolDistrib+ImplicitableVolDistrib+Updatable\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_distribution_active_family_signature\": "
+                            "\"VolDistrib+MultipleVolDistrib+ImplicitableVolDistrib\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_distribution_channel_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_distribution_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_distribution_family_signature\": "
+                            "\"PICVolDistrib+PICVolDistribUpdatable+CompositeVolDistrib\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_interactor_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_interaction_family_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_parity_interaction_family_signature\": "
+                            "\"MCCInteractor+TrajectoryInteractionFromField\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_interaction_long_tail_route\": "
+                            "\"native_minimal\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_interaction_long_tail_family_count\": "
+                            "\"5\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_native_volume_interaction_long_tail_active_family_count\": "
+                  "\"4\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_native_volume_interaction_long_tail_family_signature\": "
+                            "\"VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "\"surface_native_volume_interaction_long_tail_active_family_signature\": "
+                  "\"VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsTopTransitionFamilyMetadata)
+{
+    DensePlasmaSurfaceCharging charging;
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.runtime_route =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SCDATUnified;
+    config.current_algorithm_mode =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceCurrentAlgorithmMode::UnifiedKernelAligned;
+    config.material.setScalarProperty("transition_local_time_enabled", 1.0);
+    config.material.setScalarProperty("transition_local_time_base_hour", 8.0);
+    config.material.setScalarProperty("transition_local_time_daylight_start_hour", 6.0);
+    config.material.setScalarProperty("transition_local_time_daylight_end_hour", 18.0);
+    config.material.setScalarProperty("transition_spinning_enabled", 1.0);
+    config.material.setScalarProperty("transition_spin_period_s", 24.0 * 3600.0);
+    config.material.setScalarProperty("transition_sun_flux_enabled", 1.0);
+    config.material.setScalarProperty("transition_sun_flux_base_scale", 1.3);
+    config.material.setScalarProperty("transition_observer_enabled", 1.0);
+    config.material.setScalarProperty("transition_observer_checkpoint_dt_s", 60.0);
+    config.material.setScalarProperty("transition_finalization_enabled", 1.0);
+    config.material.setScalarProperty("transition_finalization_trigger_time_s", 0.0);
+    config.material.setScalarProperty("transition_finalization_duration_s", 120.0);
+
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_top_transition_metadata_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find("\"surface_top_transition_route\": \"SCDATUnified\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_interface_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_active_interface_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_interface_family_signature\": "
+                            "\"TransitionInterface+Transition+SimulationParamUpdater\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_active_interface_family_signature\": "
+                            "\"TransitionInterface+Transition+SimulationParamUpdater\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_family_count\": \"15\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_active_family_count\": \"7\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_family_signature\": "
+                            "\"LocalTimeTransition+SpinningSpacecraft+SunFluxUpdater+"
+                            "ConductivityEvolution+SourceFluxUpdater+SimulationParamUpdater+"
+                            "SheathOrPresheathPoissonBCUpdater+RCCabsSCUpdater+"
+                            "VcrossBfieldUpdater+BasicEclipseExit+"
+                            "TransientArtificialSources+LangmuirProbeTransition+"
+                            "TransitionObserver+Finalization+SunFluxIntensityUpdater\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_active_family_signature\": "
+                            "\"LocalTimeTransition+SpinningSpacecraft+SunFluxUpdater+"
+                            "SimulationParamUpdater+TransitionObserver+Finalization+"
+                            "SunFluxIntensityUpdater\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_lifecycle_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_active_lifecycle_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_lifecycle_family_signature\": "
+                            "\"TransitionObserver+Finalization+SunFluxIntensityUpdater\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_transition_active_lifecycle_family_signature\": "
+                            "\"TransitionObserver+Finalization+SunFluxIntensityUpdater\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_simulation_route\": \"SCDATUnified\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_simulation_family_count\": \"5\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_simulation_active_family_count\": \"4\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_simulation_family_signature\": "
+                            "\"Simulation+PlasmaScSimulation+SimulationFromUIParams+"
+                            "SimulationListener+BundleAPI_SimulationInit\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_plasma_route\": \"SCDATUnified\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_plasma_family_count\": \"7\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_plasma_active_family_count\": \"5\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_plasma_family_signature\": "
+                            "\"Plasma+Environment+ExtendedEnvironment+TimeDependentEnvironment+"
+                            "BiMaxwellianEnvironment+MeshedPlasma+MmfPlasma\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_plasma_active_family_signature\": "
+                            "\"Plasma+Environment+BiMaxwellianEnvironment+ExtendedEnvironment+"
+                            "TimeDependentEnvironment\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_sc_route\": \"SCDATUnified\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_sc_family_count\": \"4\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_sc_active_family_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_sc_family_signature\": "
+                            "\"SC+InteractSC+RCCabsSC+RLCSC\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_sc_active_family_signature\": "
+                            "\"SC+RCCabsSC\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_grid_route\": \"SCDATUnified\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_grid_family_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_grid_family_signature\": "
+                            "\"Grid+InteractGrid\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_grid_active_family_signature\": "
+                            "\"Grid\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_default_route\": \"SCDATUnified\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_default_family_count\": \"25\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_default_active_family_count\": \"16\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_default_family_signature\": "
+                            "\"ActiveZone+Common+Credits+Distribution+Duplicable+Field+"
+                            "GlobalParameter+InstrumentParameter+Interactor+Listener+"
+                            "LocalParameter+MaterialProperty+Mesh+NamedObject+"
+                            "ObjectWithBoundaries+ObjectWithTemperature+Parameter+PlasmaIO+"
+                            "ScalableObject+SimulationObject+Solver+SpisDefaultPartTypes+"
+                            "SpisDefaultSampling+ThermalElement+ThreadManager\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_default_active_family_signature\": "
+                            "\"Common+Distribution+Field+GlobalParameter+Interactor+"
+                            "LocalParameter+MaterialProperty+Mesh+NamedObject+Parameter+"
+                            "ScalableObject+SimulationObject+Solver+ObjectWithTemperature+"
+                            "ThermalElement+Listener\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, PresetCatalogRouteExportsTopTopFamilyMetadata)
+{
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_pic_circuit", preset));
+
+    auto runtime_plan = compileSurfaceRuntimePlan(preset);
+    DensePlasmaSurfaceCharging charging;
+    ASSERT_TRUE(charging.initialize(runtime_plan));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_top_top_metadata_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find("\"surface_top_top_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_top_entrypoint_mode\": \"preset_catalog\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_top_family_count\": \"5\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_top_active_family_count\": \"4\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_top_family_signature\": "
+                            "\"Scenario+PotentialSweep+UIInvokable+SpisTopMenu+NumTopFromUI\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_top_top_active_family_signature\": "
+                            "\"Scenario+PotentialSweep+UIInvokable+SpisTopMenu\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsSurfMeshFamilyMetadata)
+{
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_ref", preset));
+
+    auto config = preset.config;
+    config.runtime_route =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SCDATUnified;
+    config.bodies = {{"body", 1.0e-2, true, 0.0, 1.0e-10, 0.0, false, 0.0}};
+    config.patches = {{"patch", "body", 5.0e-3, 0.0, 0.0}};
+    config.interfaces.clear();
+    config.body_boundary_groups = {{"bg_body", "body", "body_group", {1, 2}}};
+    config.patch_boundary_groups = {{"bg_patch", "patch", "patch_group", {10, 11}}};
+    config.boundary_mappings = {{"patch", "bg_patch", true}};
+    config.surface_nodes.clear();
+    config.surface_branches.clear();
+
+    DensePlasmaSurfaceCharging charging;
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_surf_mesh_metadata_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find("\"surface_surf_mesh_route\": \"structured_topology\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_surf_mesh_family_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_surf_mesh_active_family_count\": \"2\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_surf_mesh_family_signature\": "
+                            "\"SurfMesh+ThreeDUnstructSurfMesh\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_surf_mesh_active_family_signature\": "
+                            "\"SurfMesh+ThreeDUnstructSurfMesh\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_surf_mesh_body_boundary_group_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_surf_mesh_patch_boundary_group_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_surf_mesh_boundary_mapping_count\": \"1\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsUtilFamilyMetadata)
+{
+    SurfaceChargingScenarioPreset preset;
+    ASSERT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+        "geo_ecss_kapton_pic_circuit", preset));
+
+    auto config = preset.config;
+    config.runtime_route = SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SurfacePic;
+    config.enable_live_pic_window = true;
+    config.enable_live_pic_mcc = true;
+    config.enable_pic_calibration = true;
+    config.surface_pic_runtime_kind =
+        SCDAT::Toolkit::SurfaceCharging::SurfacePicRuntimeKind::GraphCoupledSharedSurface;
+    config.surface_instrument_set_kind =
+        SCDAT::Toolkit::SurfaceCharging::SurfaceInstrumentSetKind::SurfacePicObserverSet;
+
+    DensePlasmaSurfaceCharging charging;
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_util_family_metadata_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find("\"surface_util_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_family_count\": \"15\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_active_family_count\": \"15\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_family_signature\": "
+                            "\"DistribFunc+Exception+Func+Instrument+io+List+Matrix+Monitor+"
+                            "OcTree+OcTreeMesh+Part+Phys+Sampler+Table+Vect\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_active_family_signature\": "
+                            "\"DistribFunc+Exception+Func+io+List+Matrix+Monitor+Part+Phys+"
+                            "Sampler+Table+Vect+OcTree+OcTreeMesh+Instrument\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_func_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_func_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_func_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_func_family_signature\": \"Func\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_func_active_family_signature\": \"Func\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_distrib_func_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_distrib_func_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_distrib_func_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_distrib_func_family_signature\": \"DistribFunc\""),
+              std::string::npos);
+    EXPECT_NE(
+        metadata.find("\"surface_util_distrib_func_active_family_signature\": \"DistribFunc\""),
+        std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_exception_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_exception_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_exception_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_exception_family_signature\": \"Exception\""),
+              std::string::npos);
+    EXPECT_NE(
+        metadata.find("\"surface_util_exception_active_family_signature\": \"Exception\""),
+        std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_instrument_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_instrument_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_instrument_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_instrument_family_signature\": \"Instrument\""),
+              std::string::npos);
+    EXPECT_NE(
+        metadata.find("\"surface_util_instrument_active_family_signature\": \"Instrument\""),
+        std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_sampler_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_sampler_family_signature\": \"Sampler\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_sampler_active_family_signature\": \"Sampler\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_monitor_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_monitor_family_signature\": \"Monitor\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_monitor_active_family_signature\": \"Monitor\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_io_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_io_family_signature\": \"io\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_io_active_family_signature\": \"io\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_list_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_list_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_list_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_list_family_signature\": \"List\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_list_active_family_signature\": \"List\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_part_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_part_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_part_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_part_family_signature\": \"Part\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_part_active_family_signature\": \"Part\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_phys_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_phys_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_phys_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_phys_family_signature\": \"Phys\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_phys_active_family_signature\": \"Phys\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_table_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_table_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_table_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_table_family_signature\": \"Table\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_table_active_family_signature\": \"Table\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_matrix_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_matrix_family_signature\": \"Matrix\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_matrix_active_family_signature\": \"Matrix\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_octree_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_octree_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_octree_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_octree_family_signature\": \"OcTree\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_octree_active_family_signature\": \"OcTree\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_octree_mesh_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_octree_mesh_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_octree_mesh_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_octree_mesh_family_signature\": \"OcTreeMesh\""),
+              std::string::npos);
+    EXPECT_NE(
+        metadata.find("\"surface_util_octree_mesh_active_family_signature\": \"OcTreeMesh\""),
+        std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_vect_route\": \"SurfacePic\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_vect_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_vect_active_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_vect_family_signature\": \"Vect\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_util_vect_active_family_signature\": \"Vect\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsCircFamilyMetadata)
+{
+    auto buildConfig = []() {
+        SurfaceChargingScenarioPreset preset;
+        EXPECT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+            "geo_ecss_kapton_pic_circuit", preset));
+
+        auto config = preset.config;
+        config.runtime_route =
+            SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SCDATUnified;
+        config.surface_pic_runtime_kind =
+            SCDAT::Toolkit::SurfaceCharging::SurfacePicRuntimeKind::GraphCoupledSharedSurface;
+        config.surface_instrument_set_kind =
+            SCDAT::Toolkit::SurfaceCharging::SurfaceInstrumentSetKind::SurfacePicObserverSet;
+        config.enable_body_patch_circuit = true;
+        config.use_reference_current_balance = true;
+        config.internal_substeps = 2;
+        config.body_floating = false;
+        config.body_initial_potential_v = 0.0;
+        config.enable_live_pic_window = false;
+        config.enable_pic_calibration = false;
+        config.enable_live_pic_mcc = false;
+        config.surface_nodes = {
+            {"body", 4.0e-2, false, 0.0, config.body_capacitance_f, true, 0.0},
+            {"patch_a", 1.0e-2, true, 1.0, 0.0, false, 0.0},
+            {"patch_b", 1.5e-2, true, 3.0, 0.0, false, 0.0},
+        };
+        config.surface_branches = {
+            {1, 0, 8.0e-11, 0.0, 0.0},
+            {2, 0, 5.0e-11, 0.0, 0.0},
+        };
+        config.material.setScalarProperty("shared_surface_reference_blend", 0.85);
+        config.material.setScalarProperty("shared_surface_sheath_coupling_weight", 0.90);
+        config.material.setScalarProperty("shared_surface_global_coupled_iterations", 4.0);
+        config.material.setScalarProperty("shared_surface_global_coupled_tolerance_v", 1.0e-4);
+        config.material.setScalarProperty("shared_surface_global_coupled_relaxation", 0.95);
+        config.material.setScalarProperty("shared_surface_live_pic_coupled_refresh", 0.0);
+        config.material.setScalarProperty("shared_surface_particle_transport_weight", 0.0);
+        config.solver_config.coupling_mode = "field_particle_implicit";
+        config.solver_config.convergence_policy = "residual_norm_guarded";
+        return config;
+    };
+
+    DensePlasmaSurfaceCharging charging;
+    auto config = buildConfig();
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_circ_family_metadata_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find("\"surface_circ_circuit_family_count\": \"9\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_active_circuit_family_count\": \"5\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_circuit_family_signature\": "
+                            "\"Circuit+ElecComponent+SurfaceComponent+RCCabsCirc+"
+                            "RLCCirc+SIN+PULSE+PWL+EXP\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_active_circuit_family_signature\": "
+                            "\"Circuit+ElecComponent+SurfaceComponent+RCCabsCirc+RLCCirc\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_field_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_active_field_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_field_family_signature\": "
+                            "\"CircField+CurrentDistribution+DirCircField\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_active_field_family_signature\": "
+                            "\"CircField+DirCircField+CurrentDistribution\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_didv_family_count\": \"12\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_active_didv_family_count\": \"7\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_didv_family_signature\": "
+                            "\"DIDV+SurfDIDV+SurfDIDVFromCurrentVariation+"
+                            "SurfDIDVFromLocalCurrentVariation+SurfDIDVFromMatrices+"
+                            "WeightedSurfDIDV+MultipleSurfDIDV+MultipleDIDV+"
+                            "ReducableDIDV+RedDIDVFromSurfDIDV+RedDIDVFromRegDIDV+"
+                            "DIDVOnCirc\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_circ_active_didv_family_signature\": "
+                            "\"DIDV+SurfDIDV+SurfDIDVFromCurrentVariation+"
+                            "SurfDIDVFromLocalCurrentVariation+DIDVOnCirc+"
+                            "MultipleSurfDIDV+MultipleDIDV\""),
+              std::string::npos);
+}
+
+TEST(SurfaceChargingSmokeTest, ScdatUnifiedRouteExportsSolverFamilyMetadata)
+{
+    auto buildConfig = []() {
+        SurfaceChargingScenarioPreset preset;
+        EXPECT_TRUE(SCDAT::Toolkit::SurfaceCharging::tryGetSurfaceChargingScenarioPreset(
+            "geo_ecss_kapton_pic_circuit", preset));
+
+        auto config = preset.config;
+        config.runtime_route =
+            SCDAT::Toolkit::SurfaceCharging::SurfaceRuntimeRoute::SCDATUnified;
+        config.surface_pic_runtime_kind =
+            SCDAT::Toolkit::SurfaceCharging::SurfacePicRuntimeKind::GraphCoupledSharedSurface;
+        config.surface_instrument_set_kind =
+            SCDAT::Toolkit::SurfaceCharging::SurfaceInstrumentSetKind::SurfacePicObserverSet;
+        config.enable_body_patch_circuit = true;
+        config.use_reference_current_balance = true;
+        config.enable_live_pic_window = true;
+        config.enable_live_pic_mcc = true;
+        config.enable_pic_calibration = false;
+        config.internal_substeps = 2;
+        config.body_floating = false;
+        config.body_initial_potential_v = 0.0;
+        config.surface_nodes = {
+            {"body", 4.0e-2, false, 0.0, config.body_capacitance_f, true, 0.0},
+            {"patch_a", 1.0e-2, true, 1.0, 0.0, false, 0.0},
+            {"patch_b", 1.5e-2, true, 3.0, 0.0, false, 0.0},
+        };
+        config.surface_branches = {
+            {1, 0, 8.0e-11, 0.0, 0.0},
+            {2, 0, 5.0e-11, 0.0, 0.0},
+        };
+        config.material.setScalarProperty("shared_surface_global_coupled_iterations", 4.0);
+        config.solver_config.coupling_mode = "field_particle_implicit";
+        config.solver_config.convergence_policy = "residual_norm_guarded";
+        return config;
+    };
+
+    DensePlasmaSurfaceCharging charging;
+    auto config = buildConfig();
+    ASSERT_TRUE(charging.initialize(config));
+    ASSERT_TRUE(charging.advance(5.0e-6));
+
+    const auto csv_path =
+        std::filesystem::temp_directory_path() / "scdat_solver_family_metadata_snapshot.csv";
+    ASSERT_TRUE(charging.exportResults(csv_path));
+
+    const auto metadata = readTextFile(csv_path.string() + ".metadata.json");
+    EXPECT_NE(metadata.find("\"surface_solver_circuit_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_active_circuit_family_count\": \"1\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_circuit_family_signature\": \"CircSolve\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_active_circuit_family_signature\": \"CircSolve\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_electromag_family_count\": \"5\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_active_electromag_family_count\": \"3\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_electromag_family_signature\": "
+                            "\"AbstractEMSolver+PoissonSolver+PotPoissonSolver+"
+                            "ConjGrad3DUnstructPoissonSolver+PoissonMagnetostaticSolver\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_active_electromag_family_signature\": "
+                            "\"AbstractEMSolver+PoissonSolver+PotPoissonSolver\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_matter_family_count\": \"9\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_active_matter_family_count\": \"4\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_matter_family_signature\": "
+                            "\"ParticlePusher+PICPusher+CrossTetrahedron+"
+                            "CrossTetraUniformEnoB+CrossTetraUniformEwithB+"
+                            "CrossTetraUniformEAndB+CrossTetraUniformEwithDichotomy+"
+                            "CrossTetraVaryingE+AnalyticalCrossTetra\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find("\"surface_solver_active_matter_family_signature\": "
+                            "\"ParticlePusher+PICPusher+CrossTetrahedron+"
+                            "CrossTetraUniformEnoB\""),
               std::string::npos);
 }
 
@@ -6792,6 +8626,20 @@ TEST(SurfaceChargingSmokeTest, DistributionModelSwitchRebalancesReferencePatchCu
     config.has_electron_spectrum = true;
     config.has_ion_spectrum = true;
 
+    const auto exportDistributionMetadata =
+        [&config](SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind model,
+                  const char* stem) {
+            auto export_config = config;
+            export_config.distribution_model = model;
+
+            DensePlasmaSurfaceCharging charging;
+            EXPECT_TRUE(charging.initialize(export_config));
+            const auto csv_path =
+                std::filesystem::temp_directory_path() / (std::string(stem) + ".csv");
+            EXPECT_TRUE(charging.exportResults(csv_path));
+            return readTextFile(csv_path.string() + ".metadata.json");
+        };
+
     config.distribution_model =
         SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::MaxwellianProjected;
     DensePlasmaSurfaceCharging maxwellian;
@@ -6810,11 +8658,124 @@ TEST(SurfaceChargingSmokeTest, DistributionModelSwitchRebalancesReferencePatchCu
     ASSERT_TRUE(hybrid.initialize(config));
     const auto hybrid_currents = hybrid.computeSurfaceCurrents(-12.0);
 
+    config.distribution_model =
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::MultipleSurf;
+    DensePlasmaSurfaceCharging multiple_surf;
+    ASSERT_TRUE(multiple_surf.initialize(config));
+    const auto multiple_surf_currents = multiple_surf.computeSurfaceCurrents(-12.0);
+
+    config.distribution_model =
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::LocalModifiedPearsonIV;
+    DensePlasmaSurfaceCharging pearson_iv;
+    ASSERT_TRUE(pearson_iv.initialize(config));
+    const auto pearson_iv_currents = pearson_iv.computeSurfaceCurrents(-12.0);
+
+    config.distribution_model =
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::PICSurf;
+    DensePlasmaSurfaceCharging pic_surf;
+    ASSERT_TRUE(pic_surf.initialize(config));
+    const auto pic_surf_currents = pic_surf.computeSurfaceCurrents(-12.0);
+
+    config.distribution_model =
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::NonPICSurf;
+    DensePlasmaSurfaceCharging nonpic_surf;
+    ASSERT_TRUE(nonpic_surf.initialize(config));
+    const auto nonpic_surf_currents = nonpic_surf.computeSurfaceCurrents(-12.0);
+
     EXPECT_GT(maxwellian_currents.ion_current_a_per_m2, wake_currents.ion_current_a_per_m2);
     EXPECT_TRUE(std::isfinite(hybrid_currents.electron_current_a_per_m2));
     EXPECT_TRUE(std::isfinite(maxwellian_currents.electron_current_a_per_m2));
     EXPECT_TRUE(std::isfinite(hybrid_currents.total_current_a_per_m2));
     EXPECT_TRUE(std::isfinite(maxwellian_currents.total_current_a_per_m2));
+    EXPECT_TRUE(std::isfinite(multiple_surf_currents.total_current_a_per_m2));
+    EXPECT_TRUE(std::isfinite(pearson_iv_currents.total_current_a_per_m2));
+    EXPECT_TRUE(std::isfinite(pic_surf_currents.total_current_a_per_m2));
+    EXPECT_TRUE(std::isfinite(nonpic_surf_currents.total_current_a_per_m2));
+    EXPECT_GT(std::abs(pic_surf_currents.electron_current_a_per_m2),
+              std::abs(nonpic_surf_currents.electron_current_a_per_m2));
+
+    const auto multiple_surf_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::MultipleSurf,
+        "surface_distribution_multiple_surf_smoke");
+    const auto pearson_iv_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::LocalModifiedPearsonIV,
+        "surface_distribution_pearson_iv_smoke");
+    const auto local_tabulated_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::LocalTabulated,
+        "surface_distribution_local_tabulated_smoke");
+    const auto two_axes_velocity_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::TwoAxesTabulatedVelocity,
+        "surface_distribution_two_axes_velocity_smoke");
+    const auto axisym_velocity_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::AxisymTabulatedVelocity,
+        "surface_distribution_axisym_velocity_smoke");
+    const auto uniform_velocity_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::UniformVelocity,
+        "surface_distribution_uniform_velocity_smoke");
+    const auto fluid_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::Fluid,
+        "surface_distribution_fluid_smoke");
+    const auto fn_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::FowlerNordheim,
+        "surface_distribution_fowler_nordheim_smoke");
+    const auto pic_surf_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::PICSurf,
+        "surface_distribution_pic_surf_smoke");
+    const auto nonpic_surf_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::NonPICSurf,
+        "surface_distribution_nonpic_surf_smoke");
+    const auto generic_surf_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::GenericSurf,
+        "surface_distribution_generic_surf_smoke");
+    const auto global_surf_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::GlobalSurf,
+        "surface_distribution_global_surf_smoke");
+    const auto local_generic_surf_metadata = exportDistributionMetadata(
+        SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind::LocalGenericSurf,
+        "surface_distribution_local_generic_surf_smoke");
+
+    EXPECT_NE(multiple_surf_metadata.find(
+                  "\"surface_distribution_family\": \"spis_multiple_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(pearson_iv_metadata.find(
+                  "\"surface_distribution_family\": "
+                  "\"spis_local_modified_pearson_iv_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(local_tabulated_metadata.find(
+                  "\"surface_distribution_family\": \"spis_local_tabulated_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(two_axes_velocity_metadata.find(
+                  "\"surface_distribution_family\": "
+                  "\"spis_two_axes_tabulated_velocity_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(axisym_velocity_metadata.find(
+                  "\"surface_distribution_family\": "
+                  "\"spis_axisym_tabulated_velocity_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(uniform_velocity_metadata.find(
+                  "\"surface_distribution_family\": \"spis_uniform_velocity_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(fluid_metadata.find(
+                  "\"surface_distribution_family\": \"spis_fluid_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(fn_metadata.find(
+                  "\"surface_distribution_family\": \"spis_fowler_nordheim_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(pic_surf_metadata.find(
+                  "\"surface_distribution_family\": \"spis_pic_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(nonpic_surf_metadata.find(
+                  "\"surface_distribution_family\": \"spis_nonpic_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(generic_surf_metadata.find(
+                  "\"surface_distribution_family\": \"spis_generic_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(global_surf_metadata.find(
+                  "\"surface_distribution_family\": \"spis_global_surface_flux_v1\""),
+              std::string::npos);
+    EXPECT_NE(local_generic_surf_metadata.find(
+                  "\"surface_distribution_family\": \"spis_local_generic_surface_flux_v1\""),
+              std::string::npos);
 }
 
 TEST(SurfaceChargingSmokeTest, SurfaceMaterialLibraryImportOverridesPrimaryMaterial)

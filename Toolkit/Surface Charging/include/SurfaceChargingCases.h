@@ -18,6 +18,7 @@ struct SurfaceChargingScenarioPreset
 {
     std::string name;
     std::string description;
+    std::string top_top_entrypoint = "preset_catalog";
     SurfaceChargingConfig config;
     double time_step_s = 1.0e-9;
     std::size_t steps = 10;

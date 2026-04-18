@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cmath>
+#include <memory>
 
 using SCDAT::Material::MaterialDatabase;
 using SCDAT::Material::BasicSurfaceMaterialModel;
@@ -64,6 +65,39 @@ SurfaceRolePhotoConductFixture makeSurfaceRolePhotoConductFixture()
 
     return fixture;
 }
+
+class ConstantSurfaceInteractor final : public SCDAT::Material::SurfaceInteractorPlugin
+{
+  public:
+    const char* interactorFamily() const override
+    {
+        return "test_constant_surface_interactor_v1";
+    }
+
+    SCDAT::Material::SurfaceInteractionResult evaluate(
+        const SCDAT::Material::MaterialProperty& material,
+        const SCDAT::Material::SurfaceImpactState& impact,
+        const SCDAT::Material::SurfaceInteractorEvaluationContext& context) const override
+    {
+        (void)material;
+        (void)context;
+
+        SCDAT::Material::SurfaceInteractionResult result;
+        result.absorbed_charge_coulomb = impact.particle_charge_coulomb * 0.5;
+        result.reflected_energy_ev = impact.incident_energy_ev * 0.25;
+        result.secondary_emitted_electrons = 0.5;
+        result.ion_secondary_emitted_electrons = 0.1;
+        result.backscattered_electrons = 0.2;
+        result.photoelectron_current_a_per_m2 = 1.0e-7;
+        result.induced_conduction_current_a_per_m2 = 2.0e-8;
+        result.deposited_heat_j_per_m2 = 1.0;
+        result.component_currents.electron_collection_a_per_m2 = 2.0e-6;
+        result.component_currents.secondary_electron_emission_a_per_m2 = 1.0e-6;
+        result.component_currents.net_current_a_per_m2 = -1.0e-6;
+        result.material_model_family = interactorFamily();
+        return result;
+    }
+};
 
 } // namespace
 
@@ -333,6 +367,31 @@ TEST(SurfaceMaterialModelVariantTest, ResolvesModelFamilyFromMaterialProperties)
               SurfaceMaterialModelVariant::Erosion);
 }
 
+TEST(MaterialEmissionHelperTest, ResolvesErosionParamSetDefaultsAndOverrides)
+{
+    SCDAT::Material::MaterialProperty kapton(
+        33, SCDAT::Mesh::MaterialType::DIELECTRIC, "Kapton HN");
+    const auto kapton_defaults = SCDAT::Material::resolveErosionParamSet(kapton);
+    EXPECT_NEAR(kapton_defaults.yield_scale, 0.20, 1.0e-12);
+    EXPECT_NEAR(kapton_defaults.threshold_energy_ev, 60.0, 1.0e-12);
+    EXPECT_NEAR(kapton_defaults.backscatter_gain, 0.30, 1.0e-12);
+
+    SCDAT::Material::MaterialProperty ptfe(
+        34, SCDAT::Mesh::MaterialType::DIELECTRIC, "teflon");
+    const auto ptfe_defaults = SCDAT::Material::resolveErosionParamSet(ptfe);
+    EXPECT_NEAR(ptfe_defaults.yield_scale, 0.16, 1.0e-12);
+    EXPECT_NEAR(ptfe_defaults.characteristic_energy_ev, 260.0, 1.0e-12);
+
+    SCDAT::Material::MaterialProperty aluminum(
+        35, SCDAT::Mesh::MaterialType::CONDUCTOR, "aluminum");
+    aluminum.setScalarProperty("surface_erosion_yield_scale", 0.14);
+    aluminum.setScalarProperty("erosion_conductivity_suppression", 1.4);
+    const auto overridden = SCDAT::Material::resolveErosionParamSet(aluminum);
+    EXPECT_NEAR(overridden.yield_scale, 0.14, 1.0e-12);
+    EXPECT_NEAR(overridden.threshold_energy_ev, 120.0, 1.0e-12);
+    EXPECT_NEAR(overridden.conductivity_suppression, 1.0, 1.0e-12);
+}
+
 TEST(MaterialEmissionHelperTest, FieldEmissionUsesFieldThreshold)
 {
     SCDAT::Material::MaterialProperty material(
@@ -348,6 +407,25 @@ TEST(MaterialEmissionHelperTest, FieldEmissionUsesFieldThreshold)
     EXPECT_GT(above_threshold, 0.0);
 }
 
+TEST(MaterialEmissionHelperTest, FieldEmissionResolvesFnAliasThresholdAndSheathFloor)
+{
+    SCDAT::Material::MaterialProperty material(
+        36, SCDAT::Mesh::MaterialType::CONDUCTOR, "field_emission_aliases");
+    material.setWorkFunctionEv(4.3);
+    material.setScalarProperty("fn_threshold_field_v_per_m", 5.0e6);
+    material.setScalarProperty("fn_decay_coefficient_v_per_m_ev_1p5", 1.0e5);
+    material.setScalarProperty("fn_effective_sheath_floor_m", 2.0e-7);
+
+    const double enabled = SCDAT::Material::evaluateSurfaceFieldEmissionCurrentDensity(
+        material, -4.0, 0.0, 1.0e5, 0.0);
+    EXPECT_GT(enabled, 0.0);
+
+    material.setScalarProperty("fn_threshold_field_v_per_m", 3.0e7);
+    const double disabled = SCDAT::Material::evaluateSurfaceFieldEmissionCurrentDensity(
+        material, -4.0, 0.0, 1.0e5, 0.0);
+    EXPECT_DOUBLE_EQ(disabled, 0.0);
+}
+
 TEST(MaterialEmissionHelperTest, ThermionicEmissionIncreasesWithTemperature)
 {
     SCDAT::Material::MaterialProperty material(
@@ -361,6 +439,37 @@ TEST(MaterialEmissionHelperTest, ThermionicEmissionIncreasesWithTemperature)
 
     EXPECT_GE(low_temperature, 0.0);
     EXPECT_GT(high_temperature, low_temperature);
+}
+
+TEST(MaterialEmissionHelperTest, TabulatedBackscatterGridInterpolatesEnergyAndAngle)
+{
+    SCDAT::Material::MaterialProperty material(
+        37, SCDAT::Mesh::MaterialType::DIELECTRIC, "backscatter_table");
+    material.setSecondaryElectronYieldMax(0.0);
+    material.setElectronBackscatterYield(0.0);
+    material.setScalarProperty("backscatter_table_energy_count", 2.0);
+    material.setScalarProperty("backscatter_table_angle_count", 2.0);
+    material.setScalarProperty("backscatter_table_energy_0_ev", 100.0);
+    material.setScalarProperty("backscatter_table_energy_1_ev", 200.0);
+    material.setScalarProperty("backscatter_table_angle_0_deg", 0.0);
+    material.setScalarProperty("backscatter_table_angle_1_deg", 60.0);
+    material.setScalarProperty("backscatter_table_value_0_0", 0.10);
+    material.setScalarProperty("backscatter_table_value_0_1", 0.20);
+    material.setScalarProperty("backscatter_table_value_1_0", 0.30);
+    material.setScalarProperty("backscatter_table_value_1_1", 0.40);
+
+    SCDAT::Material::SurfaceModelContext context;
+    context.incident_particle = SCDAT::Material::SurfaceIncidentParticle::Electron;
+    context.incident_energy_ev = 150.0;
+    context.incident_angle_rad = std::acos(std::sqrt(3.0) / 2.0);
+
+    SCDAT::Material::BasicSurfaceMaterialModel model;
+    const auto currents = model.evaluateCurrents(material, context);
+
+    ASSERT_GT(currents.electron_collection_a_per_m2, 0.0);
+    EXPECT_NEAR(currents.backscatter_emission_a_per_m2 / currents.electron_collection_a_per_m2,
+                0.25, 1.0e-12);
+    EXPECT_NEAR(SCDAT::Material::evaluateLegacyBackscatterYield(material, 150.0), 0.20, 1.0e-12);
 }
 
 TEST(MaterialEmissionHelperTest, EffectiveConductivityTracksFieldAndSpaceChargeEnhancement)
@@ -590,6 +699,38 @@ TEST(BasicSurfaceMaterialModelTest, MaxwellianYieldIntegratorReturnsWeightedAver
     EXPECT_LT(ramp_yield, 1.0);
 }
 
+TEST(MaterialEmissionHelperTest, DebyeLengthOmLAndSheathHelpersExposeNamedPhysicsBridges)
+{
+    const double warm_sparse_debye_length =
+        SCDAT::Material::evaluateDebyeLengthM(8.0, 2.0e11);
+    const double cold_dense_debye_length =
+        SCDAT::Material::evaluateDebyeLengthM(2.0, 8.0e12);
+    const double electron_repelled_factor =
+        SCDAT::Material::evaluateOmlLikeCollectionFactor(
+            6.0, 2.0, SCDAT::Material::LegacyCollectionParticle::Electron);
+    const double electron_attracted_factor =
+        SCDAT::Material::evaluateOmlLikeCollectionFactor(
+            -6.0, 2.0, SCDAT::Material::LegacyCollectionParticle::Electron);
+    const double ion_repelled_factor =
+        SCDAT::Material::evaluateOmlLikeCollectionFactor(
+            -6.0, 2.0, SCDAT::Material::LegacyCollectionParticle::Ion);
+    const double sheath_field =
+        SCDAT::Material::evaluateSimpleSheathFieldVPerM(-12.0, 3.0, 0.0, 2.0e-3);
+    const double low_energy_weight =
+        SCDAT::Material::evaluateMaxwellianEnergyWeight(1.0, 6.0);
+    const double high_energy_weight =
+        SCDAT::Material::evaluateMaxwellianEnergyWeight(18.0, 6.0);
+
+    EXPECT_GT(warm_sparse_debye_length, cold_dense_debye_length);
+    EXPECT_GT(cold_dense_debye_length, 0.0);
+    EXPECT_LT(electron_repelled_factor, 1.0);
+    EXPECT_GT(electron_attracted_factor, 1.0);
+    EXPECT_LT(ion_repelled_factor, 1.0);
+    EXPECT_NEAR(sheath_field, 7.5e3, 1.0e-6);
+    EXPECT_GT(low_energy_weight, high_energy_weight);
+    EXPECT_GT(high_energy_weight, 0.0);
+}
+
 TEST(BasicSurfaceMaterialModelTest, LegacyEmissionIntegralBundleResolvesAllComponents)
 {
     SCDAT::Material::MaterialProperty material(20, SCDAT::Mesh::MaterialType::DIELECTRIC,
@@ -702,9 +843,331 @@ TEST(SurfaceInteractionTest, ExportsMaterialModelFamilyAndComponentBundle)
     impact.incident_angle_rad = 0.4;
 
     const auto result = interaction.evaluate(material, impact);
+    EXPECT_STREQ(interaction.interactorFamily(material), "spis_material_model_surface_interactor_v1");
     EXPECT_EQ(result.material_model_family, "spis_basic_surface_material_model_v1");
     EXPECT_TRUE(std::isfinite(result.component_currents.net_current_a_per_m2));
     EXPECT_GE(result.backscattered_electrons, 0.0);
+}
+
+TEST(SurfaceInteractionTest, PluggableInteractorOverridesEvaluationAndCanResetToDefault)
+{
+    SCDAT::Material::MaterialProperty material(40, SCDAT::Mesh::MaterialType::DIELECTRIC,
+                                               "interactor_plugin_test");
+    material.setSecondaryElectronYieldMax(1.4);
+    material.setPhotoelectronYield(2.0e-5);
+
+    SurfaceInteraction interaction;
+    EXPECT_STREQ(interaction.interactorFamily(), "spis_material_model_surface_interactor_v1");
+
+    SurfaceImpactState impact;
+    impact.incident_energy_ev = 120.0;
+    impact.particle_charge_coulomb = -1.602176634e-19;
+    impact.incident_angle_rad = 0.3;
+
+    const auto baseline = interaction.evaluate(material, impact);
+
+    interaction.setInteractorPlugin(std::make_shared<ConstantSurfaceInteractor>());
+    EXPECT_STREQ(interaction.interactorFamily(), "test_constant_surface_interactor_v1");
+
+    const auto overridden = interaction.evaluate(material, impact);
+    EXPECT_NEAR(overridden.absorbed_charge_coulomb, impact.particle_charge_coulomb * 0.5,
+                1.0e-30);
+    EXPECT_NEAR(overridden.reflected_energy_ev, impact.incident_energy_ev * 0.25, 1.0e-12);
+    EXPECT_DOUBLE_EQ(overridden.deposited_heat_j_per_m2, 1.0);
+    EXPECT_EQ(overridden.material_model_family, "test_constant_surface_interactor_v1");
+
+    interaction.resetInteractorPlugin();
+    EXPECT_STREQ(interaction.interactorFamily(), "spis_material_model_surface_interactor_v1");
+
+    const auto reset = interaction.evaluate(material, impact);
+    EXPECT_NEAR(reset.absorbed_charge_coulomb, baseline.absorbed_charge_coulomb, 1.0e-30);
+    EXPECT_NEAR(reset.reflected_energy_ev, baseline.reflected_energy_ev, 1.0e-12);
+}
+
+TEST(SurfaceInteractionTest, ResolvesConfiguredInteractorFamiliesFromMaterialFlagsAndCodes)
+{
+    SCDAT::Material::MaterialProperty material(
+        41, SCDAT::Mesh::MaterialType::DIELECTRIC, "family_resolution");
+
+    EXPECT_EQ(SCDAT::Material::resolveSurfaceInteractorModelVariant(material),
+              SCDAT::Material::SurfaceInteractorModelVariant::MaterialModel);
+    EXPECT_STREQ(SCDAT::Material::resolveSurfaceInteractorModelFamily(material),
+                 "spis_material_model_surface_interactor_v1");
+
+    material.setScalarProperty("surface_interactor_use_reflection_model", 1.0);
+    EXPECT_EQ(SCDAT::Material::resolveSurfaceInteractorModelVariant(material),
+              SCDAT::Material::SurfaceInteractorModelVariant::Reflection);
+    EXPECT_STREQ(SCDAT::Material::resolveSurfaceInteractorModelFamily(material),
+                 "spis_reflection_surface_interactor_v1");
+
+    material.setScalarProperty("surface_interactor_use_reflection_model", 0.0);
+    material.setScalarProperty("surface_interactor_family_code", 12.0);
+    EXPECT_EQ(SCDAT::Material::resolveSurfaceInteractorModelVariant(material),
+              SCDAT::Material::SurfaceInteractorModelVariant::TabulatedSey);
+    EXPECT_STREQ(SCDAT::Material::resolveSurfaceInteractorModelFamily(material),
+                 "spis_tabulated_sey_surface_interactor_v1");
+}
+
+TEST(SurfaceInteractionTest, BuiltinTabulatedSeyInteractorUsesConfiguredLookupTable)
+{
+    SCDAT::Material::MaterialProperty material(
+        42, SCDAT::Mesh::MaterialType::DIELECTRIC, "tabulated_interactor");
+    material.setSecondaryElectronYieldMax(0.2);
+    material.setScalarProperty("surface_interactor_family_code", 12.0);
+    material.setScalarProperty("surface_tabulated_sey_energy_count", 3.0);
+    material.setScalarProperty("surface_tabulated_sey_energy_0_ev", 50.0);
+    material.setScalarProperty("surface_tabulated_sey_energy_1_ev", 100.0);
+    material.setScalarProperty("surface_tabulated_sey_energy_2_ev", 200.0);
+    material.setScalarProperty("surface_tabulated_sey_value_0", 0.1);
+    material.setScalarProperty("surface_tabulated_sey_value_1", 0.4);
+    material.setScalarProperty("surface_tabulated_sey_value_2", 0.8);
+
+    SurfaceInteraction interaction;
+    EXPECT_STREQ(interaction.interactorFamily(material), "spis_tabulated_sey_surface_interactor_v1");
+
+    SurfaceImpactState impact;
+    impact.incident_energy_ev = 150.0;
+    impact.particle_charge_coulomb = -1.602176634e-19;
+    impact.incident_angle_rad = 0.2;
+
+    const auto result = interaction.evaluate(material, impact);
+    EXPECT_NEAR(result.secondary_emitted_electrons, 0.6, 1.0e-12);
+    EXPECT_NEAR(result.component_currents.secondary_electron_emission_a_per_m2,
+                0.6 * result.component_currents.electron_collection_a_per_m2, 1.0e-12);
+    EXPECT_EQ(result.material_model_family, "spis_basic_surface_material_model_v1");
+}
+
+TEST(SurfaceInteractionTest, BuiltinMultipleInteractorCombinesYieldPhotoAndConductionSemantics)
+{
+    SCDAT::Material::MaterialProperty material(
+        43, SCDAT::Mesh::MaterialType::DIELECTRIC, "multiple_interactor");
+    material.setSecondaryElectronYieldMax(1.8);
+    material.setPhotoelectronYield(2.0e-5);
+    material.setPhotoelectronTemperatureEv(2.0);
+    material.setDarkConductivitySPerM(5.0e-10);
+    material.setSurfaceConductivitySPerM(4.0e-9);
+    material.setSurfaceConductivityScale(3.0);
+    material.setScalarProperty("surface_interactor_family_code", 5.0);
+    material.setScalarProperty("surface_multiple_yield_weight", 0.4);
+    material.setScalarProperty("surface_multiple_reflection_weight", 0.1);
+    material.setScalarProperty("surface_multiple_photo_weight", 0.3);
+    material.setScalarProperty("surface_multiple_conduction_weight", 0.2);
+
+    SurfaceInteraction interaction;
+    SurfaceImpactState impact;
+    impact.incident_energy_ev = 180.0;
+    impact.particle_charge_coulomb = -1.602176634e-19;
+    impact.incident_angle_rad = 0.3;
+    impact.surface_potential_v = -5.0;
+    impact.reference_potential_v = 0.0;
+    impact.counterelectrode_potential_v = 8.0;
+    impact.normal_electric_field_v_per_m = 2.5e4;
+    impact.source_current_density_a_per_m2 = 1.0e-6;
+    impact.transport_length_m = 1.0e-4;
+
+    const auto result = interaction.evaluate(material, impact);
+    EXPECT_STREQ(interaction.interactorFamily(material), "spis_multiple_surface_interactor_v1");
+    EXPECT_GT(result.secondary_emitted_electrons, 0.0);
+    EXPECT_GT(result.photoelectron_current_a_per_m2, 0.0);
+    EXPECT_GT(result.induced_conduction_current_a_per_m2, 0.0);
+    EXPECT_EQ(result.material_model_family, "spis_basic_surface_material_model_v1");
+}
+
+TEST(SurfaceInteractionTest, BuiltinRecollectedSeyInteractorReducesEmissionWithStrongerBarrier)
+{
+    SCDAT::Material::MaterialProperty material(
+        44, SCDAT::Mesh::MaterialType::DIELECTRIC, "recollected_sey_interactor");
+    material.setSecondaryElectronYieldMax(0.3);
+    material.setScalarProperty("surface_interactor_family_code", 13.0);
+    material.setScalarProperty("surface_tabulated_sey_energy_count", 3.0);
+    material.setScalarProperty("surface_tabulated_sey_energy_0_ev", 80.0);
+    material.setScalarProperty("surface_tabulated_sey_energy_1_ev", 160.0);
+    material.setScalarProperty("surface_tabulated_sey_energy_2_ev", 320.0);
+    material.setScalarProperty("surface_tabulated_sey_value_0", 0.25);
+    material.setScalarProperty("surface_tabulated_sey_value_1", 0.7);
+    material.setScalarProperty("surface_tabulated_sey_value_2", 1.1);
+
+    SurfaceInteraction interaction;
+    EXPECT_STREQ(interaction.interactorFamily(material),
+                 "spis_recollected_sey_surface_interactor_v1");
+
+    SurfaceImpactState weak_barrier_impact;
+    weak_barrier_impact.incident_energy_ev = 180.0;
+    weak_barrier_impact.particle_charge_coulomb = -1.602176634e-19;
+    weak_barrier_impact.incident_angle_rad = 0.25;
+    weak_barrier_impact.surface_potential_v = -1.0;
+    weak_barrier_impact.reference_potential_v = 0.0;
+    weak_barrier_impact.normal_electric_field_v_per_m = 8.0e3;
+
+    SurfaceImpactState strong_barrier_impact = weak_barrier_impact;
+    strong_barrier_impact.surface_potential_v = -15.0;
+    strong_barrier_impact.normal_electric_field_v_per_m = 8.0e4;
+
+    const auto weak_result = interaction.evaluate(material, weak_barrier_impact);
+    const auto strong_result = interaction.evaluate(material, strong_barrier_impact);
+
+    EXPECT_GT(weak_result.secondary_emitted_electrons, strong_result.secondary_emitted_electrons);
+    EXPECT_GT(std::abs(strong_result.absorbed_charge_coulomb),
+              std::abs(weak_result.absorbed_charge_coulomb));
+}
+
+TEST(SurfaceInteractionTest, BuiltinMultipleMaxwellianInteractorRespondsToEmissionTemperature)
+{
+    SCDAT::Material::MaterialProperty material(
+        45, SCDAT::Mesh::MaterialType::DIELECTRIC, "multiple_maxwellian_interactor");
+    material.setSecondaryElectronYieldMax(1.9);
+    material.setPhotoelectronYield(2.5e-5);
+    material.setPhotoelectronTemperatureEv(1.2);
+    material.setDarkConductivitySPerM(4.0e-10);
+    material.setSurfaceConductivitySPerM(3.5e-9);
+    material.setSurfaceConductivityScale(2.5);
+    material.setScalarProperty("surface_interactor_family_code", 6.0);
+    material.setScalarProperty("surface_multiple_yield_weight", 0.4);
+    material.setScalarProperty("surface_multiple_reflection_weight", 0.1);
+    material.setScalarProperty("surface_multiple_photo_weight", 0.3);
+    material.setScalarProperty("surface_multiple_conduction_weight", 0.2);
+
+    SurfaceInteraction interaction;
+    EXPECT_STREQ(interaction.interactorFamily(material),
+                 "spis_multiple_maxwellian_surface_interactor_v1");
+
+    SurfaceImpactState low_temp_impact;
+    low_temp_impact.incident_energy_ev = 190.0;
+    low_temp_impact.particle_charge_coulomb = -1.602176634e-19;
+    low_temp_impact.incident_angle_rad = 0.28;
+    low_temp_impact.surface_potential_v = -4.0;
+    low_temp_impact.reference_potential_v = 0.0;
+    low_temp_impact.counterelectrode_potential_v = 10.0;
+    low_temp_impact.normal_electric_field_v_per_m = 2.0e4;
+    low_temp_impact.source_current_density_a_per_m2 = 1.0e-6;
+    low_temp_impact.transport_length_m = 1.0e-4;
+    low_temp_impact.emission_temperature_ev = 1.0;
+
+    SurfaceImpactState high_temp_impact = low_temp_impact;
+    high_temp_impact.emission_temperature_ev = 16.0;
+
+    const auto low_temp_result = interaction.evaluate(material, low_temp_impact);
+    const auto high_temp_result = interaction.evaluate(material, high_temp_impact);
+
+    EXPECT_GT(high_temp_result.secondary_emitted_electrons,
+              low_temp_result.secondary_emitted_electrons);
+    EXPECT_GT(high_temp_result.photoelectron_current_a_per_m2,
+              low_temp_result.photoelectron_current_a_per_m2);
+}
+
+TEST(SurfaceInteractionTest, ExtendedInteractorFamiliesResolveCanonicalMetadata)
+{
+    struct FamilyCase
+    {
+        double family_code;
+        const char* interactor_family;
+        const char* material_model_family;
+    };
+
+    const std::vector<FamilyCase> cases{
+        {4.0, "spis_maxwellian_surface_interactor_with_recollection_v1",
+         "spis_basic_surface_material_model_v1"},
+        {6.0, "spis_multiple_maxwellian_surface_interactor_v1",
+         "spis_basic_surface_material_model_v1"},
+        {7.0, "spis_yield_surface_interactor_v1", "spis_basic_surface_material_model_v1"},
+        {8.0, "spis_reflection_surface_interactor_v1", "spis_basic_surface_material_model_v1"},
+        {9.0, "spis_erosion_surface_interactor_v1", "spis_erosion_surface_material_model_v1"},
+        {10.0, "spis_improved_photo_emission_surface_interactor_v1",
+         "spis_basic_surface_material_model_v1"},
+        {11.0, "spis_basic_induced_conduct_surface_interactor_v1",
+         "spis_basic_surface_material_model_v1"},
+        {13.0, "spis_recollected_sey_surface_interactor_v1",
+         "spis_basic_surface_material_model_v1"},
+        {14.0, "spis_default_pee_model_v1", "spis_basic_surface_material_model_v1"},
+        {15.0, "spis_default_seeey_model_v1", "spis_basic_surface_material_model_v1"},
+        {16.0, "spis_default_seep_model_v1", "spis_basic_surface_material_model_v1"},
+        {17.0, "spis_default_erosion_model_v1", "spis_erosion_surface_material_model_v1"},
+        {18.0, "spis_device_surface_interactor_v1", "spis_basic_surface_material_model_v1"},
+    };
+
+    SurfaceInteraction interaction;
+    SurfaceImpactState impact;
+    impact.incident_energy_ev = 220.0;
+    impact.particle_charge_coulomb = -1.602176634e-19;
+    impact.incident_angle_rad = 0.35;
+    impact.surface_potential_v = -5.0;
+    impact.reference_potential_v = 0.0;
+    impact.counterelectrode_potential_v = 9.0;
+    impact.normal_electric_field_v_per_m = 2.5e4;
+    impact.source_current_density_a_per_m2 = 1.0e-6;
+    impact.transport_length_m = 1.0e-4;
+
+    for (const auto& family_case : cases)
+    {
+        SCOPED_TRACE(family_case.interactor_family);
+
+        SCDAT::Material::MaterialProperty material(
+            static_cast<int>(200 + family_case.family_code),
+            SCDAT::Mesh::MaterialType::DIELECTRIC,
+            std::string("extended_interactor_") +
+                std::to_string(static_cast<int>(family_case.family_code)));
+        material.setSecondaryElectronYieldMax(1.7);
+        material.setSecondaryElectronPeakEnergyEv(280.0);
+        material.setElectronBackscatterYield(0.22);
+        material.setPhotoelectronYield(2.0e-5);
+        material.setPhotoelectronTemperatureEv(2.0);
+        material.setDarkConductivitySPerM(5.0e-10);
+        material.setSurfaceConductivitySPerM(4.0e-9);
+        material.setSurfaceConductivityScale(3.0);
+        material.setScalarProperty("surface_interactor_family_code", family_case.family_code);
+
+        const auto result = interaction.evaluate(material, impact);
+        EXPECT_STREQ(interaction.interactorFamily(material), family_case.interactor_family);
+        EXPECT_EQ(result.material_model_family, family_case.material_model_family);
+        EXPECT_TRUE(std::isfinite(result.component_currents.net_current_a_per_m2));
+        EXPECT_TRUE(std::isfinite(result.deposited_heat_j_per_m2));
+    }
+}
+
+TEST(SurfaceInteractionTest, ExposesSupportedAndActiveInteractorFamilyView)
+{
+    SCDAT::Material::MaterialProperty material(
+        260, SCDAT::Mesh::MaterialType::DIELECTRIC, "family_view");
+
+    SurfaceInteraction interaction;
+    const auto default_view = interaction.interactorFamilyView(material);
+    EXPECT_EQ(default_view.supported_family_count, 19u);
+    EXPECT_EQ(default_view.active_family_count, 1u);
+    EXPECT_EQ(default_view.supported_family_signature,
+              "spis_material_model_surface_interactor_v1+"
+              "spis_material_df_surface_interactor_v1+"
+              "spis_generic_df_surface_interactor_v1+"
+              "spis_maxwellian_surface_interactor_v1+"
+              "spis_maxwellian_surface_interactor_with_recollection_v1+"
+              "spis_multiple_surface_interactor_v1+"
+              "spis_multiple_maxwellian_surface_interactor_v1+"
+              "spis_yield_surface_interactor_v1+"
+              "spis_reflection_surface_interactor_v1+"
+              "spis_erosion_surface_interactor_v1+"
+              "spis_improved_photo_emission_surface_interactor_v1+"
+              "spis_basic_induced_conduct_surface_interactor_v1+"
+              "spis_tabulated_sey_surface_interactor_v1+"
+              "spis_recollected_sey_surface_interactor_v1+"
+              "spis_default_pee_model_v1+"
+              "spis_default_seeey_model_v1+"
+              "spis_default_seep_model_v1+"
+              "spis_default_erosion_model_v1+"
+              "spis_device_surface_interactor_v1");
+    EXPECT_EQ(default_view.active_family_signature,
+              "spis_material_model_surface_interactor_v1");
+
+    material.setScalarProperty("surface_interactor_family_code", 18.0);
+    const auto device_view = interaction.interactorFamilyView(material);
+    EXPECT_EQ(device_view.active_family_count, 1u);
+    EXPECT_EQ(device_view.active_family_signature,
+              "spis_device_surface_interactor_v1");
+
+    interaction.setInteractorPlugin(std::make_shared<ConstantSurfaceInteractor>());
+    const auto override_view = interaction.interactorFamilyView(material);
+    EXPECT_EQ(override_view.supported_family_count, 19u);
+    EXPECT_EQ(override_view.active_family_count, 1u);
+    EXPECT_EQ(override_view.active_family_signature,
+              "test_constant_surface_interactor_v1");
 }
 
 TEST(SurfaceInteractionTest, EmittedCountsTrackComponentCurrents)

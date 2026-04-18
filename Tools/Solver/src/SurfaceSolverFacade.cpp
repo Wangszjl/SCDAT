@@ -2,7 +2,9 @@
 #include "../../Basic/include/StringTokenUtils.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <string>
 #include <utility>
 
 namespace SCDAT
@@ -11,6 +13,53 @@ namespace Solver
 {
 namespace
 {
+constexpr std::array<const char*, 1> kSupportedCircuitSolverFamilies = {
+    "CircSolve",
+};
+constexpr std::array<const char*, 5> kSupportedElectroMagSolverFamilies = {
+    "AbstractEMSolver",
+    "PoissonSolver",
+    "PotPoissonSolver",
+    "ConjGrad3DUnstructPoissonSolver",
+    "PoissonMagnetostaticSolver",
+};
+constexpr std::array<const char*, 9> kSupportedMatterSolverFamilies = {
+    "ParticlePusher",
+    "PICPusher",
+    "CrossTetrahedron",
+    "CrossTetraUniformEnoB",
+    "CrossTetraUniformEwithB",
+    "CrossTetraUniformEAndB",
+    "CrossTetraUniformEwithDichotomy",
+    "CrossTetraVaryingE",
+    "AnalyticalCrossTetra",
+};
+
+template <typename Range>
+std::string joinFamilyRange(const Range& families)
+{
+    std::string signature;
+    bool first = true;
+    for (const auto& family : families)
+    {
+        if (!first)
+        {
+            signature += "+";
+        }
+        first = false;
+        signature += family;
+    }
+    return signature;
+}
+
+void appendUniqueFamily(std::vector<std::string>& families, const char* family)
+{
+    if (std::find(families.begin(), families.end(), family) == families.end())
+    {
+        families.emplace_back(family);
+    }
+}
+
 struct SparseLinearEntry
 {
     std::size_t column = 0;
@@ -77,6 +126,72 @@ double sparseLinearResidualNorm(const std::vector<SparseLinearRow>& rows,
     return std::sqrt(sum / std::max<std::size_t>(1, rhs.size()));
 }
 } // namespace
+
+SurfaceSolverFamilyView resolveSurfaceSolverFamilyView(
+    const SurfaceSolverFamilyRouteInput& input)
+{
+    SurfaceSolverFamilyView view;
+    view.circuit_family_count = kSupportedCircuitSolverFamilies.size();
+    view.circuit_family_signature = joinFamilyRange(kSupportedCircuitSolverFamilies);
+    view.electromag_family_count = kSupportedElectroMagSolverFamilies.size();
+    view.electromag_family_signature = joinFamilyRange(kSupportedElectroMagSolverFamilies);
+    view.matter_family_count = kSupportedMatterSolverFamilies.size();
+    view.matter_family_signature = joinFamilyRange(kSupportedMatterSolverFamilies);
+
+    std::vector<std::string> active_circuit_families;
+    std::vector<std::string> active_electromag_families;
+    std::vector<std::string> active_matter_families;
+
+    if (input.has_circuit_solver)
+    {
+        appendUniqueFamily(active_circuit_families, "CircSolve");
+    }
+
+    if (input.has_electromag_solver)
+    {
+        appendUniqueFamily(active_electromag_families, "AbstractEMSolver");
+        appendUniqueFamily(active_electromag_families, "PoissonSolver");
+    }
+    if (input.use_dense_electromag_solver)
+    {
+        appendUniqueFamily(active_electromag_families, "PotPoissonSolver");
+    }
+    if (input.use_iterative_electromag_solver)
+    {
+        appendUniqueFamily(active_electromag_families, "ConjGrad3DUnstructPoissonSolver");
+    }
+    if (input.has_magnetic_field)
+    {
+        appendUniqueFamily(active_electromag_families, "PoissonMagnetostaticSolver");
+    }
+
+    if (input.has_matter_solver)
+    {
+        appendUniqueFamily(active_matter_families, "ParticlePusher");
+        appendUniqueFamily(active_matter_families, "PICPusher");
+        appendUniqueFamily(active_matter_families, "CrossTetrahedron");
+    }
+    if (input.has_pic_particle_coupling)
+    {
+        if (input.has_magnetic_field)
+        {
+            appendUniqueFamily(active_matter_families, "CrossTetraUniformEwithB");
+            appendUniqueFamily(active_matter_families, "CrossTetraUniformEAndB");
+        }
+        else
+        {
+            appendUniqueFamily(active_matter_families, "CrossTetraUniformEnoB");
+        }
+    }
+
+    view.active_circuit_family_count = active_circuit_families.size();
+    view.active_circuit_family_signature = joinFamilyRange(active_circuit_families);
+    view.active_electromag_family_count = active_electromag_families.size();
+    view.active_electromag_family_signature = joinFamilyRange(active_electromag_families);
+    view.active_matter_family_count = active_matter_families.size();
+    view.active_matter_family_signature = joinFamilyRange(active_matter_families);
+    return view;
+}
 
 std::string normalizeSolverPolicyToken(std::string text)
 {

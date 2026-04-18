@@ -16,6 +16,8 @@ using SCDAT::Coupling::CircuitDidvSurfaceComposition;
 using SCDAT::Coupling::CircuitKernelTopologyState;
 using SCDAT::Coupling::CircuitDidvTerm;
 using SCDAT::Coupling::CircuitWeightedDidvTerm;
+using SCDAT::Coupling::CircuitSurfDidvMatrixInput;
+using SCDAT::Coupling::CircuitSurfDidvMatrixTerm;
 using SCDAT::Coupling::CircuitExcitationDescriptor;
 using SCDAT::Coupling::CircuitExcitationWaveformKind;
 using SCDAT::Coupling::CircuitElementDescriptor;
@@ -342,6 +344,112 @@ TEST(CouplingTest, CircuitDidvCompositionSupportsMultiSurfaceAggregation)
     EXPECT_NEAR(result.linearization.plasma_didv_a_per_v[0], 7.0e-12, 1.0e-27);
 }
 
+TEST(CouplingTest, SurfDidvFromMatricesBuildsExplicitNodeAndOffDiagonalRoute)
+{
+    CircuitSurfDidvMatrixInput input;
+    input.node_count = 2;
+    input.terms = {
+        CircuitSurfDidvMatrixTerm{"patch_a_collection", 0, 2.0e-9, -3.0e-11},
+        CircuitSurfDidvMatrixTerm{"patch_b_collection", 1, -1.0e-9, -5.0e-12},
+    };
+    input.off_diagonal_entries.push_back({0, 1, -2.0e-12});
+
+    const auto composition = SCDAT::Coupling::composeSurfDidvFromMatrices(input);
+    const auto result = SCDAT::Coupling::composeCircuitDidv(composition);
+
+    ASSERT_EQ(composition.nodes.size(), 2u);
+    ASSERT_EQ(result.node_summaries.size(), 2u);
+    EXPECT_NEAR(result.node_summaries[0].total_current_a, 2.0e-9, 1.0e-24);
+    EXPECT_NEAR(result.node_summaries[0].total_didv_a_per_v, -3.0e-11, 1.0e-27);
+    EXPECT_NEAR(result.node_summaries[1].total_current_a, -1.0e-9, 1.0e-24);
+    ASSERT_EQ(result.linearization.additional_off_diagonal_entries.size(), 1u);
+    EXPECT_EQ(result.linearization.additional_off_diagonal_entries[0].row_node, 0u);
+    EXPECT_EQ(result.linearization.additional_off_diagonal_entries[0].column_node, 1u);
+    EXPECT_NEAR(result.linearization.additional_off_diagonal_entries[0].coefficient_a_per_v,
+                -2.0e-12, 1.0e-27);
+}
+
+TEST(CouplingTest, ReducedRegularDidvAggregatesMappedNodesAndInternalCouplings)
+{
+    CircuitDidvCompositionInput input;
+    input.nodes.resize(3);
+    input.nodes[0].terms = {CircuitDidvTerm{"a", 2.0e-9, -1.0e-11}};
+    input.nodes[1].terms = {CircuitDidvTerm{"b", 1.0e-9, -2.0e-11}};
+    input.nodes[2].terms = {CircuitDidvTerm{"c", -5.0e-10, -4.0e-12}};
+    input.nodes[1].additional_rhs_a = 7.0e-10;
+    input.off_diagonal_entries.push_back({0, 1, -3.0e-12});
+    input.off_diagonal_entries.push_back({1, 2, -4.0e-12});
+
+    const auto reduced = SCDAT::Coupling::reduceCircuitDidvFromRegularDidv(
+        input, {0, 0, 1}, 2);
+    const auto result = SCDAT::Coupling::composeCircuitDidv(reduced);
+
+    ASSERT_EQ(reduced.nodes.size(), 2u);
+    EXPECT_NEAR(result.node_summaries[0].total_current_a, 3.0e-9, 1.0e-24);
+    EXPECT_NEAR(result.node_summaries[0].total_didv_a_per_v, -3.0e-11, 1.0e-27);
+    EXPECT_NEAR(reduced.nodes[0].additional_rhs_a, 7.0e-10, 1.0e-24);
+    EXPECT_NEAR(reduced.nodes[0].additional_diagonal_a_per_v, -3.0e-12, 1.0e-27);
+    ASSERT_EQ(reduced.off_diagonal_entries.size(), 1u);
+    EXPECT_EQ(reduced.off_diagonal_entries[0].row_node, 0u);
+    EXPECT_EQ(reduced.off_diagonal_entries[0].column_node, 1u);
+    EXPECT_NEAR(reduced.off_diagonal_entries[0].coefficient_a_per_v, -4.0e-12, 1.0e-27);
+}
+
+TEST(CouplingTest, ReducedSurfDidvAggregatesMappedSurfaceMatrices)
+{
+    CircuitSurfDidvMatrixInput input;
+    input.node_count = 3;
+    input.terms = {
+        CircuitSurfDidvMatrixTerm{"surf_a", 0, 3.0e-9, -2.0e-11},
+        CircuitSurfDidvMatrixTerm{"surf_b", 1, 2.0e-9, -3.0e-11},
+        CircuitSurfDidvMatrixTerm{"surf_c", 2, -1.0e-9, -1.0e-11},
+    };
+    input.off_diagonal_entries.push_back({0, 1, -2.5e-12});
+    input.off_diagonal_entries.push_back({1, 2, -1.5e-12});
+
+    const auto reduced = SCDAT::Coupling::reduceCircuitDidvFromSurfDidv(
+        input, {0, 0, 1}, 2);
+    const auto result = SCDAT::Coupling::composeCircuitDidv(reduced);
+
+    ASSERT_EQ(result.node_summaries.size(), 2u);
+    EXPECT_NEAR(result.node_summaries[0].total_current_a, 5.0e-9, 1.0e-24);
+    EXPECT_NEAR(result.node_summaries[0].total_didv_a_per_v, -5.0e-11, 1.0e-25);
+    EXPECT_NEAR(reduced.nodes[0].additional_diagonal_a_per_v, -2.5e-12, 1.0e-27);
+    ASSERT_EQ(reduced.off_diagonal_entries.size(), 1u);
+    EXPECT_NEAR(reduced.off_diagonal_entries[0].coefficient_a_per_v, -1.5e-12, 1.0e-27);
+}
+
+TEST(CouplingTest, ReducableDidvFrameworkKeepsComposedKernelInputUsable)
+{
+    CircuitSurfDidvMatrixInput surf_input;
+    surf_input.node_count = 3;
+    surf_input.terms = {
+        CircuitSurfDidvMatrixTerm{"left_patch", 0, 1.5e-9, -1.0e-11},
+        CircuitSurfDidvMatrixTerm{"mid_patch", 1, 2.0e-9, -1.5e-11},
+        CircuitSurfDidvMatrixTerm{"right_patch", 2, -8.0e-10, -5.0e-12},
+    };
+    surf_input.off_diagonal_entries.push_back({0, 1, -8.0e-13});
+    surf_input.off_diagonal_entries.push_back({1, 2, -6.0e-13});
+
+    const auto reduced = SCDAT::Coupling::reduceCircuitDidvFromSurfDidv(
+        surf_input, {0, 1, 1}, 2);
+
+    CircuitKernelTopologyState topology;
+    topology.node_capacitance_f = {1.0e-9, 2.0e-9};
+    topology.node_shunt_conductance_s = {0.0, 0.0};
+
+    const auto kernel_input = SCDAT::Coupling::composeCircuitKernelInput(reduced, topology);
+    ASSERT_EQ(kernel_input.nodes.size(), 2u);
+    EXPECT_TRUE(kernel_input.nodes[0].valid);
+    EXPECT_TRUE(kernel_input.nodes[1].valid);
+    EXPECT_NEAR(kernel_input.nodes[0].plasma_current_a, 1.5e-9, 1.0e-24);
+    EXPECT_NEAR(kernel_input.nodes[1].plasma_current_a, 1.2e-9, 1.0e-24);
+    EXPECT_NEAR(kernel_input.nodes[1].additional_diagonal_a_per_v, -6.0e-13, 1.0e-27);
+    ASSERT_EQ(kernel_input.off_diagonal_entries.size(), 1u);
+    EXPECT_EQ(kernel_input.off_diagonal_entries[0].row_node, 0u);
+    EXPECT_EQ(kernel_input.off_diagonal_entries[0].column_node, 1u);
+}
+
 TEST(CouplingTest, CircuitExcitationSamplingSupportsAllWaveforms)
 {
     std::vector<CircuitExcitationDescriptor> excitations;
@@ -458,6 +566,53 @@ TEST(CouplingTest, SurfaceAssemblyAppliesDynamicExcitationOverrides)
     EXPECT_NEAR(assembled.branches[0].bias_v, 3.0, 1.0e-15);
     EXPECT_TRUE(assembled.kernel_input.branches[0].valid);
     EXPECT_NEAR(assembled.kernel_input.branches[0].current_source_a, -4.0e-10, 1.0e-24);
+}
+
+TEST(CouplingTest, ResolveCircuitFamilyViewBuildsSupportedAndActiveSignatures)
+{
+    SCDAT::Coupling::CircuitFamilyRouteInput input;
+    input.has_circuit_model = true;
+    input.enable_reference_current_balance = true;
+    input.enable_body_patch_circuit = true;
+    input.has_dynamic_excitations = true;
+    input.has_weighted_didv_terms = true;
+    input.has_multi_surface_didv = true;
+    input.has_matrix_didv = true;
+    input.has_regular_reduction = true;
+    input.has_surface_reduction = true;
+    input.has_off_diagonal_coupling = true;
+    input.node_count = 3;
+    input.patch_count = 2;
+    input.branch_count = 2;
+
+    const auto view = SCDAT::Coupling::resolveCircuitFamilyView(input);
+
+    EXPECT_EQ(view.circ_family_count, 9u);
+    EXPECT_EQ(view.circ_family_signature,
+              "Circuit+ElecComponent+SurfaceComponent+RCCabsCirc+RLCCirc+SIN+PULSE+PWL+EXP");
+    EXPECT_EQ(view.active_circ_family_count, 9u);
+    EXPECT_EQ(view.active_circ_family_signature,
+              "Circuit+ElecComponent+SurfaceComponent+RCCabsCirc+RLCCirc+SIN+PULSE+PWL+EXP");
+
+    EXPECT_EQ(view.circfield_family_count, 3u);
+    EXPECT_EQ(view.circfield_family_signature,
+              "CircField+CurrentDistribution+DirCircField");
+    EXPECT_EQ(view.active_circfield_family_count, 3u);
+    EXPECT_EQ(view.active_circfield_family_signature,
+              "CircField+DirCircField+CurrentDistribution");
+
+    EXPECT_EQ(view.didv_family_count, 12u);
+    EXPECT_EQ(view.didv_family_signature,
+              "DIDV+SurfDIDV+SurfDIDVFromCurrentVariation+"
+              "SurfDIDVFromLocalCurrentVariation+SurfDIDVFromMatrices+"
+              "WeightedSurfDIDV+MultipleSurfDIDV+MultipleDIDV+ReducableDIDV+"
+              "RedDIDVFromSurfDIDV+RedDIDVFromRegDIDV+DIDVOnCirc");
+    EXPECT_EQ(view.active_didv_family_count, 12u);
+    EXPECT_EQ(view.active_didv_family_signature,
+              "DIDV+SurfDIDV+SurfDIDVFromCurrentVariation+"
+              "SurfDIDVFromLocalCurrentVariation+DIDVOnCirc+WeightedSurfDIDV+"
+              "MultipleSurfDIDV+MultipleDIDV+SurfDIDVFromMatrices+ReducableDIDV+"
+              "RedDIDVFromRegDIDV+RedDIDVFromSurfDIDV");
 }
 
 TEST(CouplingTest, SurfaceCircuitKernelInputAppliesBiasCapacitanceAndBranchSource)

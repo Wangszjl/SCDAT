@@ -313,6 +313,58 @@ struct SurfaceBoundaryMapping
     bool required = true;
 };
 
+enum class SurfacePotentialSweepMode
+{
+    None,
+    PwlTimeline,
+    DiscretePoints
+};
+
+struct SurfacePotentialSweepPoint
+{
+    double time_s = 0.0;
+    double value = 0.0;
+    std::string label;
+};
+
+struct SurfaceSpisImportConfig
+{
+    std::filesystem::path case_root;
+    std::filesystem::path model_xml_path;
+    std::filesystem::path study_root;
+    std::filesystem::path run_root;
+    std::filesystem::path global_parameters_path;
+    std::filesystem::path groups_path;
+    std::filesystem::path circuit_path;
+    std::filesystem::path import_manifest_path;
+    std::filesystem::path scan_plan_path;
+    std::filesystem::path numkernel_output_root;
+    std::string case_name;
+    std::string case_id;
+    std::vector<std::string> source_keys;
+};
+
+struct SurfaceComparisonTargetConfig
+{
+    std::string name;
+    std::string source_family;
+    std::string source_pattern;
+    std::string unit;
+    std::string alignment_axis = "time_s";
+    std::string source_key;
+    std::string scdat_series_hint;
+};
+
+struct SurfaceSpisReferenceOutputConfig
+{
+    std::filesystem::path output_root;
+    std::filesystem::path monitored_root;
+    std::filesystem::path extracted_root;
+    std::filesystem::path comparison_csv_path;
+    std::filesystem::path comparison_summary_path;
+    std::filesystem::path comparison_json_path;
+};
+
 using ExternalFieldSolveNodeResult = FieldSolver::ExternalFieldSolveNodeResult;
 
 struct ExternalFieldSolveRequest
@@ -459,6 +511,13 @@ struct SurfaceChargingConfig
     std::vector<BodyBoundaryGroup> body_boundary_groups;
     std::vector<PatchBoundaryGroup> patch_boundary_groups;
     std::vector<SurfaceBoundaryMapping> boundary_mappings;
+    SurfaceSpisImportConfig spis_import;
+    SurfacePotentialSweepMode potential_sweep_mode = SurfacePotentialSweepMode::None;
+    std::vector<SurfacePotentialSweepPoint> potential_sweep_points;
+    std::size_t active_potential_sweep_point_index = 0;
+    std::vector<Coupling::CircuitExcitationDescriptor> circuit_waveforms;
+    std::vector<SurfaceComparisonTargetConfig> comparison_targets;
+    SurfaceSpisReferenceOutputConfig spis_reference_output;
     bool enable_external_field_solver_bridge = false;
     bool enable_external_volume_solver_bridge = false;
     std::filesystem::path external_field_solver_request_path;
@@ -467,6 +526,12 @@ struct SurfaceChargingConfig
     std::filesystem::path external_volume_solver_result_path;
     std::filesystem::path external_volume_mesh_path;
     std::filesystem::path external_surface_volume_projection_path;
+    std::vector<FieldSolver::NativeVolumeBoundaryConditionFamily>
+        native_volume_boundary_condition_families;
+    std::vector<FieldSolver::NativeVolumeFieldFamily> native_volume_field_families;
+    std::vector<FieldSolver::NativeVolumeDistributionFamily>
+        native_volume_distribution_families;
+    std::vector<FieldSolver::NativeVolumeInteractionFamily> native_volume_interaction_families;
     VolumeLinearSolverPolicy volume_linear_solver_policy = VolumeLinearSolverPolicy::Auto;
     std::size_t volume_linear_max_iterations = 128;
     double volume_linear_tolerance_scale = 0.25;
@@ -498,9 +563,42 @@ struct SurfaceChargingStatus
     double transition_conductivity_scale = 1.0;
     double transition_source_flux_scale = 1.0;
     double transition_simulation_param_scale = 1.0;
+    double transition_poisson_bc_length_scale = 1.0;
+    bool transition_poisson_bc_presheath_mode = false;
+    double transition_poisson_bc_effective_sheath_length_m = 0.0;
+    double transition_rccabs_sc_scale = 1.0;
+    double transition_vcross_bfield_scale = 1.0;
+    double transition_basic_eclipse_exit_photo_scale = 1.0;
+    double transition_transient_artificial_sources_scale = 1.0;
+    double transition_transient_artificial_source_current_density_a_per_m2 = 0.0;
+    double transition_langmuir_probe_derivative_scale = 1.0;
     std::size_t transition_runtime_internal_substeps = 0;
     double transition_runtime_max_delta_potential_v_per_step = 0.0;
     double transition_runtime_solver_relaxation_factor = 0.0;
+    bool transition_observer_active = false;
+    std::size_t transition_observer_transition_count = 0;
+    double transition_observer_checkpoint_dt_s = 0.0;
+    double transition_observer_next_checkpoint_time_s = 0.0;
+    bool transition_observer_local_time_window_active = false;
+    bool transition_observer_spinning_spacecraft_active = false;
+    bool transition_observer_sun_flux_updater_active = false;
+    bool transition_observer_pic_recalibration_requested = false;
+    double transition_observer_local_time_hour = 0.0;
+    double transition_observer_spinning_phase_rad = 0.0;
+    double transition_observer_sun_flux_scale = 1.0;
+    bool transition_finalization_active = false;
+    double transition_finalization_trigger_time_s = 0.0;
+    double transition_finalization_duration_s = 0.0;
+    double transition_finalization_validity_renormalization = 1.0;
+    bool transition_finalization_shared_surface_pic_runtime = false;
+    std::size_t transition_finalization_shared_global_coupled_iteration_limit = 0;
+    bool transition_finalization_fixed_iteration_policy = false;
+    bool transition_finalization_residual_guarded_policy = false;
+    bool transition_sun_flux_intensity_active = false;
+    double transition_sun_flux_intensity_scale = 1.0;
+    double transition_sun_flux_intensity_normalized = 1.0;
+    double transition_sun_flux_intensity_daylight_factor = 1.0;
+    double transition_sun_flux_intensity_spin_factor = 1.0;
 };
 
 struct SurfaceModelRuntimeState
@@ -1052,6 +1150,7 @@ class DensePlasmaSurfaceCharging
         const SurfaceModelRuntimeState& state) const;
     double computeSharedSurfaceGlobalSheathFieldMultiStepStabilityMetricV() const;
     double computeTransitionSourceFluxScale() const;
+    SurfaceCurrents applyExtendedTransitionEventAdjustments(const SurfaceCurrents& currents) const;
     double computeLeakageCurrentDensity(double surface_potential_v) const;
     double computeNetCurrentDensity(double surface_potential_v) const;
     double computeRadiationInducedConductivity() const;
@@ -1121,6 +1220,14 @@ class DensePlasmaSurfaceCharging
     double transition_conductivity_scale_ = 1.0;
     double transition_source_flux_scale_ = 1.0;
     double transition_simulation_param_scale_ = 1.0;
+    double transition_poisson_bc_length_scale_ = 1.0;
+    bool transition_poisson_bc_presheath_mode_ = false;
+    double transition_rccabs_sc_scale_ = 1.0;
+    double transition_vcross_bfield_scale_ = 1.0;
+    double transition_basic_eclipse_exit_photo_scale_ = 1.0;
+    double transition_transient_artificial_sources_scale_ = 1.0;
+    double transition_transient_artificial_source_current_density_a_per_m2_ = 0.0;
+    double transition_langmuir_probe_derivative_scale_ = 1.0;
     std::size_t transition_runtime_internal_substeps_ = 1;
     double transition_runtime_max_delta_potential_v_per_step_ = 0.0;
     double transition_runtime_solver_relaxation_factor_ = 1.0;
@@ -1246,12 +1353,27 @@ class DensePlasmaSurfaceCharging
     std::vector<std::vector<double>> history_surface_node_live_pic_derivatives_;
     std::vector<std::vector<double>> history_surface_node_live_pic_collision_counts_;
     std::vector<std::vector<double>> history_surface_node_live_pic_mcc_enabled_;
+    std::vector<std::vector<std::vector<double>>> history_surface_node_source_collected_currents_;
+    std::vector<std::vector<std::vector<double>>> history_surface_node_source_interactor_currents_;
+    std::vector<std::vector<double>> history_surface_source_spacecraft_collected_currents_;
+    std::vector<std::vector<double>> history_surface_source_spacecraft_interactor_currents_;
+    std::vector<std::vector<double>> history_surface_source_superparticle_counts_;
+    bool source_resolved_bookkeeping_slots_complete_ = false;
+    bool source_resolved_bookkeeping_strict_ = false;
     std::vector<std::vector<double>> history_surface_branch_currents_;
     std::vector<std::vector<double>> history_surface_branch_conductances_;
     std::vector<std::vector<double>> history_surface_branch_voltage_drops_;
     std::vector<std::vector<double>> history_surface_branch_power_w_;
     std::vector<std::vector<double>> history_surface_branch_mutual_capacitances_;
     std::vector<double> circuit_node_potentials_;
+    std::string top_top_source_name_;
+    std::string top_top_source_description_;
+    std::string top_top_entrypoint_mode_ = "direct_config";
+    std::size_t top_top_scheduled_steps_ = 0;
+    bool top_top_adaptive_time_stepping_ = false;
+    double top_top_total_duration_s_ = 0.0;
+    double top_top_minimum_time_step_s_ = 0.0;
+    double top_top_maximum_time_step_s_ = 0.0;
     std::unique_ptr<SurfaceScenarioOrchestrator> orchestrator_;
     std::unique_ptr<SurfaceCurrentModel> current_model_;
     std::unique_ptr<SurfaceVoltageModel> voltage_model_;

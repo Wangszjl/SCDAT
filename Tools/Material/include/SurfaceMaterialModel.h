@@ -44,6 +44,26 @@ struct SurfaceComponentCurrents
     double net_current_a_per_m2 = 0.0;
 };
 
+struct ErosionParamSet
+{
+    double yield_scale = 0.0;
+    double threshold_energy_ev = 80.0;
+    double characteristic_energy_ev = 500.0;
+    double secondary_gain = 0.35;
+    double ion_secondary_gain = 0.80;
+    double backscatter_gain = 0.25;
+    double photo_suppression = 0.25;
+    double conductivity_suppression = 0.40;
+};
+
+struct SurfaceFieldEmissionParameters
+{
+    double work_function_ev = 4.5;
+    double fn_decay_coefficient_v_per_m_ev_1p5 = 5.0e5;
+    double threshold_field_v_per_m = 1.0e7;
+    double effective_sheath_floor_m = 1.0e-6;
+};
+
 enum class SurfaceCurrentRole
 {
     Patch,
@@ -218,6 +238,9 @@ SurfaceRoleCurrentBundle evaluateSurfaceRoleCurrentBundle(
     const SurfaceMaterialModel& model);
 SurfaceRoleCurrentBundle evaluateSurfaceRoleCurrentBundle(
     const MaterialProperty& material, const SurfaceRoleCurrentInputs& inputs);
+ErosionParamSet resolveErosionParamSet(const MaterialProperty& material);
+SurfaceFieldEmissionParameters resolveSurfaceFieldEmissionParameters(
+    const MaterialProperty& material);
 double evaluateLegacySecondaryElectronYield(const MaterialProperty& material,
                                             LegacySecondaryYieldModel model,
                                             double incident_energy_ev,
@@ -236,6 +259,17 @@ double evaluateLegacyRamBodyCurrentDensity(double surface_potential_v,
                                            double ion_temperature_ev,
                                            double ion_mass_amu,
                                            double flow_speed_m_per_s);
+double evaluateDebyeLengthM(double electron_temperature_ev,
+                            double electron_density_m3);
+double evaluateSimpleSheathFieldVPerM(double surface_potential_v,
+                                      double reference_potential_v,
+                                      double effective_sheath_length_m,
+                                      double sheath_floor_m = 1.0e-6);
+double evaluateOmlLikeCollectionFactor(double surface_potential_v,
+                                       double characteristic_energy_ev,
+                                       LegacyCollectionParticle particle);
+double evaluateMaxwellianEnergyWeight(double energy_ev,
+                                      double temperature_ev);
 double integrateMaxwellianYield(double temperature_ev,
                                 const std::function<double(double)>& yield_evaluator);
 double evaluateLegacyEmissionEscapeProbability(const MaterialProperty& material,

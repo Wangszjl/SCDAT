@@ -3,6 +3,7 @@
 #include "DensePlasmaSurfaceCharging.h"
 
 #include <cstddef>
+#include <string>
 
 namespace SCDAT
 {
@@ -33,6 +34,47 @@ struct SurfaceTransitionExtendedEvents
     bool langmuir_probe_transition_active = false;
 };
 
+struct SurfaceTransitionObserverState
+{
+    bool active = false;
+    std::size_t observed_transition_count = 0;
+    double checkpoint_dt_s = 0.0;
+    double next_checkpoint_time_s = 0.0;
+};
+
+struct SurfaceTransitionFinalizationState
+{
+    bool active = false;
+    double trigger_time_s = 0.0;
+    double duration_s = 0.0;
+    double validity_renormalization = 1.0;
+};
+
+struct SurfaceSunFluxIntensityState
+{
+    bool active = false;
+    double intensity_scale = 1.0;
+    double normalized_scale = 1.0;
+    double daylight_factor = 1.0;
+    double spin_factor = 1.0;
+};
+
+struct SurfaceTransitionObjectLayerState
+{
+    std::size_t interface_layer_family_count = 0;
+    std::size_t active_interface_layer_family_count = 0;
+    std::string interface_layer_family_signature;
+    std::string active_interface_layer_family_signature;
+    std::size_t supported_family_count = 0;
+    std::size_t active_family_count = 0;
+    std::string supported_family_signature;
+    std::string active_family_signature;
+    std::size_t lifecycle_family_count = 0;
+    std::size_t active_lifecycle_family_count = 0;
+    std::string lifecycle_family_signature;
+    std::string active_lifecycle_family_signature;
+};
+
 struct SurfaceAdvanceTransition
 {
     SurfaceRuntimeRoute runtime_route = SurfaceRuntimeRoute::SCDATUnified;
@@ -55,7 +97,11 @@ struct SurfaceAdvanceTransition
     double local_time_hour = 12.0;
     double spinning_phase_rad = 0.0;
     double sun_flux_scale = 1.0;
+    SurfaceTransitionObserverState observer{};
+    SurfaceTransitionFinalizationState finalization{};
+    SurfaceSunFluxIntensityState sun_flux_intensity{};
     SurfaceTransitionExtendedEvents extended_events{};
+    SurfaceTransitionObjectLayerState object_layer{};
 };
 
 SurfaceAdvanceTransition evaluateSurfaceAdvanceTransition(

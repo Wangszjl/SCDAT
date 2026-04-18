@@ -2414,12 +2414,85 @@ SurfaceDistributionMoments buildSurfaceDistributionMoments(const SurfaceCharging
     SurfaceDistributionMoments moments;
     moments.model = config.distribution_model;
     Particle::SurfaceDistributionRoleBuildRequest role_request;
-    role_request.model =
-        config.distribution_model == PlasmaAnalysis::PlasmaDistributionModelKind::MaxwellianProjected
-            ? Particle::SurfaceDistributionModel::MaxwellianProjected
-            : (config.distribution_model == PlasmaAnalysis::PlasmaDistributionModelKind::WakeAnisotropic
-                   ? Particle::SurfaceDistributionModel::WakeAnisotropic
-                   : Particle::SurfaceDistributionModel::MultiPopulationHybrid);
+    switch (config.distribution_model)
+    {
+    case PlasmaAnalysis::PlasmaDistributionModelKind::MaxwellianProjected:
+        role_request.model = Particle::SurfaceDistributionModel::MaxwellianProjected;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::WakeAnisotropic:
+        role_request.model = Particle::SurfaceDistributionModel::WakeAnisotropic;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::MultipleSurf:
+        role_request.model = Particle::SurfaceDistributionModel::MultipleSurf;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalModifiedPearsonIV:
+        role_request.model = Particle::SurfaceDistributionModel::LocalModifiedPearsonIV;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalTabulated:
+        role_request.model = Particle::SurfaceDistributionModel::LocalTabulated;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::TwoAxesTabulatedVelocity:
+        role_request.model = Particle::SurfaceDistributionModel::TwoAxesTabulatedVelocity;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::AxisymTabulatedVelocity:
+        role_request.model = Particle::SurfaceDistributionModel::AxisymTabulatedVelocity;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalMaxwellBoltzmann:
+        role_request.model = Particle::SurfaceDistributionModel::GlobalMaxwellBoltzmann;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalMaxwellBoltzmann2:
+        role_request.model = Particle::SurfaceDistributionModel::GlobalMaxwellBoltzmann2;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalMaxwell:
+        role_request.model = Particle::SurfaceDistributionModel::GlobalMaxwell;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalMaxwell:
+        role_request.model = Particle::SurfaceDistributionModel::LocalMaxwell;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalMaxwell2:
+        role_request.model = Particle::SurfaceDistributionModel::LocalMaxwell2;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::RecollMaxwell:
+        role_request.model = Particle::SurfaceDistributionModel::RecollMaxwell;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::PICSurf:
+        role_request.model = Particle::SurfaceDistributionModel::PICSurf;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::NonPICSurf:
+        role_request.model = Particle::SurfaceDistributionModel::NonPICSurf;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GenericSurf:
+        role_request.model = Particle::SurfaceDistributionModel::GenericSurf;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::GlobalSurf:
+        role_request.model = Particle::SurfaceDistributionModel::GlobalSurf;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::LocalGenericSurf:
+        role_request.model = Particle::SurfaceDistributionModel::LocalGenericSurf;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::TestableSurf:
+        role_request.model = Particle::SurfaceDistributionModel::TestableSurf;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::TestableForA:
+        role_request.model = Particle::SurfaceDistributionModel::TestableForA;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::MaxwellianThruster:
+        role_request.model = Particle::SurfaceDistributionModel::MaxwellianThruster;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::UniformVelocity:
+        role_request.model = Particle::SurfaceDistributionModel::UniformVelocity;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::Fluid:
+        role_request.model = Particle::SurfaceDistributionModel::Fluid;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::FowlerNordheim:
+        role_request.model = Particle::SurfaceDistributionModel::FowlerNordheim;
+        break;
+    case PlasmaAnalysis::PlasmaDistributionModelKind::MultiPopulationHybrid:
+    default:
+        role_request.model = Particle::SurfaceDistributionModel::MultiPopulationHybrid;
+        break;
+    }
     role_request.electron_density_m3 = config.plasma.electron_density_m3;
     role_request.electron_temperature_ev = config.plasma.electron_temperature_ev;
     role_request.ion_density_m3 = config.plasma.ion_density_m3;
@@ -2448,6 +2521,8 @@ SurfaceDistributionMoments buildSurfaceDistributionMoments(const SurfaceCharging
     role_request.projected_speed_m_per_s = projected_speed;
     role_request.flow_alignment_cosine = config.flow_alignment_cosine;
     role_request.normal_electric_field_v_per_m = state.normal_electric_field_v_per_m;
+    role_request.electron_recollection_ratio = config.material.getSurfaceSecondaryScale();
+    role_request.ion_recollection_ratio = config.material.getSurfaceIonSecondaryScale();
     role_request.share_patch_distribution = share_patch_distribution;
     role_request.patch_role = role == ReferenceSurfaceRole::Patch;
     const auto inputs = Particle::makeSurfaceDistributionRoleInputs(role_request);
@@ -3397,6 +3472,7 @@ class SpisEquivalentSurfaceCurrentModel final : public SurfaceCurrentModel
             sampler_config.ion_spectrum = effective_config.ion_spectrum;
             sampler_config.has_electron_spectrum = effective_config.has_electron_spectrum;
             sampler_config.has_ion_spectrum = effective_config.has_ion_spectrum;
+            sampler_config.source_keys = effective_config.spis_import.source_keys;
             sampler_config.material = effective_config.material;
             calibration.latest_sample =
                 sampler_.sampleWithDerivative(sampler_config, effective_config.live_pic_probe_delta_v);

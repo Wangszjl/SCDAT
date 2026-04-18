@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace SCDAT
 {
@@ -21,6 +22,142 @@ constexpr double kEpsilon0 = 8.8541878128e-12;
 double clampAngle(double angle_rad)
 {
     return std::clamp(angle_rad, 0.0, 0.5 * kPi);
+}
+
+std::string normalizedMaterialName(const MaterialProperty& material)
+{
+    std::string name = material.getName();
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return name;
+}
+
+double scalarWithAliases(const MaterialProperty& material,
+                         std::initializer_list<const char*> keys,
+                         double fallback)
+{
+    for (const char* key : keys)
+    {
+        if (key == nullptr || key[0] == '\0')
+        {
+            continue;
+        }
+        const double value = material.getScalarProperty(key, std::numeric_limits<double>::quiet_NaN());
+        if (std::isfinite(value))
+        {
+            return value;
+        }
+    }
+    return fallback;
+}
+
+double interpolateLinear(double x0, double x1, double y0, double y1, double x)
+{
+    const double span = x1 - x0;
+    if (!std::isfinite(span) || std::abs(span) <= 1.0e-12)
+    {
+        return y0;
+    }
+    const double t = std::clamp((x - x0) / span, 0.0, 1.0);
+    return y0 + (y1 - y0) * t;
+}
+
+bool resolveBackscatterGrid(const MaterialProperty& material,
+                            std::vector<double>& energies_ev,
+                            std::vector<double>& angles_deg,
+                            std::vector<double>& values)
+{
+    const int energy_count = static_cast<int>(std::llround(
+        material.getScalarProperty("backscatter_table_energy_count", 0.0)));
+    const int angle_count = static_cast<int>(std::llround(
+        material.getScalarProperty("backscatter_table_angle_count", 0.0)));
+    if (energy_count < 2 || angle_count < 2)
+    {
+        return false;
+    }
+
+    energies_ev.resize(static_cast<std::size_t>(energy_count));
+    angles_deg.resize(static_cast<std::size_t>(angle_count));
+    values.resize(static_cast<std::size_t>(energy_count * angle_count));
+
+    for (int i = 0; i < energy_count; ++i)
+    {
+        const auto value =
+            material.getScalarProperty("backscatter_table_energy_" + std::to_string(i) + "_ev",
+                                       std::numeric_limits<double>::quiet_NaN());
+        if (!std::isfinite(value))
+        {
+            return false;
+        }
+        energies_ev[static_cast<std::size_t>(i)] = value;
+    }
+    for (int j = 0; j < angle_count; ++j)
+    {
+        const auto value =
+            material.getScalarProperty("backscatter_table_angle_" + std::to_string(j) + "_deg",
+                                       std::numeric_limits<double>::quiet_NaN());
+        if (!std::isfinite(value))
+        {
+            return false;
+        }
+        angles_deg[static_cast<std::size_t>(j)] = value;
+    }
+    for (int i = 0; i < energy_count; ++i)
+    {
+        for (int j = 0; j < angle_count; ++j)
+        {
+            const auto value = material.getScalarProperty(
+                "backscatter_table_value_" + std::to_string(i) + "_" + std::to_string(j),
+                std::numeric_limits<double>::quiet_NaN());
+            if (!std::isfinite(value))
+            {
+                return false;
+            }
+            values[static_cast<std::size_t>(i * angle_count + j)] = value;
+        }
+    }
+    return true;
+}
+
+double evaluateTabulatedBackscatterYield(const MaterialProperty& material,
+                                         double incident_energy_ev,
+                                         double angle_rad)
+{
+    std::vector<double> energies_ev;
+    std::vector<double> angles_deg;
+    std::vector<double> values;
+    if (!resolveBackscatterGrid(material, energies_ev, angles_deg, values))
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double query_energy = std::clamp(incident_energy_ev, energies_ev.front(), energies_ev.back());
+    const double query_angle_deg =
+        std::clamp(clampAngle(angle_rad) * 180.0 / kPi, angles_deg.front(), angles_deg.back());
+
+    auto energy_upper =
+        std::lower_bound(energies_ev.begin(), energies_ev.end(), query_energy);
+    auto angle_upper =
+        std::lower_bound(angles_deg.begin(), angles_deg.end(), query_angle_deg);
+    const std::size_t e1 = std::min<std::size_t>(energies_ev.size() - 1,
+                                                 static_cast<std::size_t>(energy_upper - energies_ev.begin()));
+    const std::size_t a1 = std::min<std::size_t>(angles_deg.size() - 1,
+                                                 static_cast<std::size_t>(angle_upper - angles_deg.begin()));
+    const std::size_t e0 = e1 == 0 ? 0 : e1 - 1;
+    const std::size_t a0 = a1 == 0 ? 0 : a1 - 1;
+    const std::size_t angle_count = angles_deg.size();
+
+    const double q00 = values[e0 * angle_count + a0];
+    const double q01 = values[e0 * angle_count + a1];
+    const double q10 = values[e1 * angle_count + a0];
+    const double q11 = values[e1 * angle_count + a1];
+    const double energy_low_interp = interpolateLinear(
+        angles_deg[a0], angles_deg[a1], q00, q01, query_angle_deg);
+    const double energy_high_interp = interpolateLinear(
+        angles_deg[a0], angles_deg[a1], q10, q11, query_angle_deg);
+    return std::clamp(interpolateLinear(energies_ev[e0], energies_ev[e1], energy_low_interp,
+                                        energy_high_interp, query_energy),
+                      0.0, 0.95);
 }
 
 double secondaryYield(const MaterialProperty& material, double energy_ev, double angle_rad)
@@ -43,6 +180,12 @@ double ionSecondaryYield(const MaterialProperty& material, double energy_ev, dou
 
 double backscatterYield(const MaterialProperty& material, double energy_ev, double angle_rad)
 {
+    const double tabulated = evaluateTabulatedBackscatterYield(material, energy_ev, angle_rad);
+    if (std::isfinite(tabulated))
+    {
+        return tabulated;
+    }
+
     const double dielectric_floor = material.isDielectric() ? 0.5 : 0.15;
     const double conductivity_ratio =
         material.getSurfaceConductivitySPerM() < 1.0e3 ? dielectric_floor : 0.0;
@@ -181,55 +324,39 @@ bool erosionModelEnabled(const MaterialProperty& material)
            material.getScalarProperty("erosion_rate_scale", 0.0) > 0.0;
 }
 
-double erosionActivation(const MaterialProperty& material, const SurfaceModelContext& context)
+double erosionActivation(const ErosionParamSet& params, const SurfaceModelContext& context)
 {
-    const double yield_scale =
-        std::max(material.getScalarProperty("erosion_yield_scale", 0.0),
-                 material.getScalarProperty("surface_erosion_yield_scale", 0.0));
-    if (yield_scale <= 0.0)
+    if (params.yield_scale <= 0.0)
     {
         return 0.0;
     }
 
-    const double threshold_energy_ev =
-        std::max(0.0, material.getScalarProperty("erosion_threshold_energy_ev", 80.0));
-    const double characteristic_energy_ev =
-        std::max(1.0, material.getScalarProperty("erosion_characteristic_energy_ev", 500.0));
-    const double energy_excess_ev = std::max(0.0, context.incident_energy_ev - threshold_energy_ev);
-    const double energy_factor = std::clamp(energy_excess_ev / characteristic_energy_ev, 0.0, 1.0);
+    const double energy_excess_ev =
+        std::max(0.0, context.incident_energy_ev - params.threshold_energy_ev);
+    const double energy_factor =
+        std::clamp(energy_excess_ev / std::max(1.0, params.characteristic_energy_ev), 0.0, 1.0);
     const double angle_factor = 1.0 + 0.25 * std::sin(clampAngle(context.incident_angle_rad));
-    return std::clamp(yield_scale * energy_factor * angle_factor, 0.0, 1.0);
+    return std::clamp(params.yield_scale * energy_factor * angle_factor, 0.0, 1.0);
 }
 
 void applyErosionResponse(const MaterialProperty& material, const SurfaceModelContext& context,
                          SurfaceComponentCurrents& currents)
 {
-    const double activation = erosionActivation(material, context);
+    const auto params = resolveErosionParamSet(material);
+    const double activation = erosionActivation(params, context);
     if (activation <= 0.0)
     {
         return;
     }
 
-    const double secondary_gain =
-        std::max(0.0, material.getScalarProperty("erosion_secondary_gain", 0.35));
-    const double ion_secondary_gain =
-        std::max(0.0, material.getScalarProperty("erosion_ion_secondary_gain", 0.80));
-    const double backscatter_gain =
-        std::max(0.0, material.getScalarProperty("erosion_backscatter_gain", 0.25));
-    const double photo_suppression =
-        std::clamp(material.getScalarProperty("erosion_photo_suppression", 0.25), 0.0, 1.0);
-    const double conduction_suppression =
-        std::clamp(material.getScalarProperty("erosion_conductivity_suppression", 0.40), 0.0,
-                   1.0);
-
-    currents.secondary_electron_emission_a_per_m2 *= 1.0 + activation * secondary_gain;
+    currents.secondary_electron_emission_a_per_m2 *= 1.0 + activation * params.secondary_gain;
     currents.ion_secondary_electron_emission_a_per_m2 *=
-        1.0 + activation * ion_secondary_gain;
-    currents.backscatter_emission_a_per_m2 *= 1.0 + activation * backscatter_gain;
+        1.0 + activation * params.ion_secondary_gain;
+    currents.backscatter_emission_a_per_m2 *= 1.0 + activation * params.backscatter_gain;
     currents.photoelectron_emission_a_per_m2 *=
-        std::max(0.0, 1.0 - activation * photo_suppression);
+        std::max(0.0, 1.0 - activation * params.photo_suppression);
     currents.induced_conduction_a_per_m2 *=
-        std::max(0.0, 1.0 - activation * conduction_suppression);
+        std::max(0.0, 1.0 - activation * params.conductivity_suppression);
 }
 
 } // namespace
@@ -397,6 +524,98 @@ SurfaceRoleCurrentBundle evaluateSurfaceRoleCurrentBundle(
     return evaluateSurfaceRoleCurrentBundle(material, inputs, model);
 }
 
+ErosionParamSet resolveErosionParamSet(const MaterialProperty& material)
+{
+    ErosionParamSet params;
+    const std::string material_name = normalizedMaterialName(material);
+
+    if (material_name.find("kapton") != std::string::npos)
+    {
+        params.yield_scale = 0.20;
+        params.threshold_energy_ev = 60.0;
+        params.characteristic_energy_ev = 220.0;
+        params.secondary_gain = 0.45;
+        params.ion_secondary_gain = 0.90;
+        params.backscatter_gain = 0.30;
+        params.photo_suppression = 0.30;
+        params.conductivity_suppression = 0.45;
+    }
+    else if (material_name.find("ptfe") != std::string::npos ||
+             material_name.find("teflon") != std::string::npos)
+    {
+        params.yield_scale = 0.16;
+        params.threshold_energy_ev = 70.0;
+        params.characteristic_energy_ev = 260.0;
+        params.secondary_gain = 0.40;
+        params.ion_secondary_gain = 0.75;
+        params.backscatter_gain = 0.35;
+        params.photo_suppression = 0.25;
+        params.conductivity_suppression = 0.35;
+    }
+    else if (material_name.find("al") != std::string::npos)
+    {
+        params.yield_scale = 0.08;
+        params.threshold_energy_ev = 120.0;
+        params.characteristic_energy_ev = 400.0;
+        params.secondary_gain = 0.20;
+        params.ion_secondary_gain = 0.45;
+        params.backscatter_gain = 0.18;
+        params.photo_suppression = 0.10;
+        params.conductivity_suppression = 0.10;
+    }
+
+    params.yield_scale = std::max(
+        0.0, scalarWithAliases(material, {"erosion_yield_scale", "surface_erosion_yield_scale"},
+                               params.yield_scale));
+    params.threshold_energy_ev = std::max(
+        0.0, scalarWithAliases(material, {"erosion_threshold_energy_ev"}, params.threshold_energy_ev));
+    params.characteristic_energy_ev = std::max(
+        1.0, scalarWithAliases(material, {"erosion_characteristic_energy_ev"},
+                               params.characteristic_energy_ev));
+    params.secondary_gain = std::max(
+        0.0, scalarWithAliases(material, {"erosion_secondary_gain"}, params.secondary_gain));
+    params.ion_secondary_gain = std::max(
+        0.0, scalarWithAliases(material, {"erosion_ion_secondary_gain"},
+                               params.ion_secondary_gain));
+    params.backscatter_gain = std::max(
+        0.0, scalarWithAliases(material, {"erosion_backscatter_gain"}, params.backscatter_gain));
+    params.photo_suppression = std::clamp(
+        scalarWithAliases(material, {"erosion_photo_suppression"}, params.photo_suppression), 0.0,
+        1.0);
+    params.conductivity_suppression = std::clamp(
+        scalarWithAliases(material, {"erosion_conductivity_suppression"},
+                          params.conductivity_suppression),
+        0.0, 1.0);
+    return params;
+}
+
+SurfaceFieldEmissionParameters resolveSurfaceFieldEmissionParameters(
+    const MaterialProperty& material)
+{
+    SurfaceFieldEmissionParameters params;
+    params.work_function_ev = std::max(0.1, scalarWithAliases(
+                                                material, {"surface_work_function_ev"},
+                                                material.getWorkFunctionEv() > 0.0
+                                                    ? material.getWorkFunctionEv()
+                                                    : 4.5));
+    params.fn_decay_coefficient_v_per_m_ev_1p5 = std::max(
+        1.0, scalarWithAliases(material,
+                               {"surface_fn_decay_coefficient_v_per_m_ev_1p5",
+                                "fn_decay_coefficient_v_per_m_ev_1p5"},
+                               5.0e5));
+    params.threshold_field_v_per_m = std::max(
+        1.0e3, scalarWithAliases(material,
+                                 {"surface_fn_threshold_field_v_per_m",
+                                  "fn_threshold_field_v_per_m"},
+                                 1.0e7));
+    params.effective_sheath_floor_m = std::max(
+        1.0e-9, scalarWithAliases(material,
+                                  {"surface_fn_effective_sheath_floor_m",
+                                   "fn_effective_sheath_floor_m"},
+                                  1.0e-6));
+    return params;
+}
+
 double evaluateLegacySecondaryElectronYield(const MaterialProperty& material,
                                             LegacySecondaryYieldModel model,
                                             double incident_energy_ev,
@@ -446,6 +665,13 @@ double evaluateLegacyIonSecondaryElectronYield(const MaterialProperty& material,
 double evaluateLegacyBackscatterYield(const MaterialProperty& material,
                                       double incident_energy_ev)
 {
+    const double tabulated =
+        evaluateTabulatedBackscatterYield(material, incident_energy_ev, 0.0);
+    if (std::isfinite(tabulated))
+    {
+        return tabulated;
+    }
+
     const double z = material.getScalarProperty("atomic_number", 13.0);
     const double es = incident_energy_ev;
     double ybe = 0.0;
@@ -529,6 +755,57 @@ double evaluateLegacyRamBodyCurrentDensity(double surface_potential_v,
     return std::max(0.0, current_na_per_m2) * 1.0e-9;
 }
 
+double evaluateDebyeLengthM(double electron_temperature_ev,
+                            double electron_density_m3)
+{
+    const double density_m3 = std::max(0.0, electron_density_m3);
+    if (electron_temperature_ev <= 0.0 || density_m3 <= 0.0)
+    {
+        return 0.0;
+    }
+
+    return std::sqrt(kEpsilon0 * electron_temperature_ev /
+                     (density_m3 * kElementaryCharge));
+}
+
+double evaluateSimpleSheathFieldVPerM(double surface_potential_v,
+                                      double reference_potential_v,
+                                      double effective_sheath_length_m,
+                                      double sheath_floor_m)
+{
+    const double sheath_length =
+        std::max(std::max(1.0e-12, sheath_floor_m), effective_sheath_length_m);
+    return std::abs(reference_potential_v - surface_potential_v) / sheath_length;
+}
+
+double evaluateOmlLikeCollectionFactor(double surface_potential_v,
+                                       double characteristic_energy_ev,
+                                       LegacyCollectionParticle particle)
+{
+    const double energy_ev = std::max(1.0e-6, characteristic_energy_ev);
+    const double normalized_potential = surface_potential_v / energy_ev;
+    if (particle == LegacyCollectionParticle::Electron)
+    {
+        return normalized_potential >= 0.0 ? safeExp(-normalized_potential)
+                                           : 1.0 + std::abs(normalized_potential);
+    }
+
+    return normalized_potential <= 0.0 ? safeExp(normalized_potential)
+                                        : 1.0 + normalized_potential;
+}
+
+double evaluateMaxwellianEnergyWeight(double energy_ev,
+                                      double temperature_ev)
+{
+    if (energy_ev < 0.0 || temperature_ev <= 0.0)
+    {
+        return 0.0;
+    }
+
+    return std::sqrt(std::max(0.0, energy_ev)) *
+           std::exp(-energy_ev / std::max(1.0e-6, temperature_ev));
+}
+
 double integrateMaxwellianYield(double temperature_ev,
                                 const std::function<double(double)>& yield_evaluator)
 {
@@ -544,8 +821,7 @@ double integrateMaxwellianYield(double temperature_ev,
     for (std::size_t index = 0; index <= steps; ++index)
     {
         const double energy_ev = step * static_cast<double>(index);
-        const double weight = std::sqrt(std::max(0.0, energy_ev)) *
-                              std::exp(-energy_ev / std::max(1.0e-6, temperature_ev));
+        const double weight = evaluateMaxwellianEnergyWeight(energy_ev, temperature_ev);
         const double trapezoid_weight =
             (index == 0 || index == steps) ? 0.5 : 1.0;
         weighted_yield += trapezoid_weight * weight * yield_evaluator(energy_ev);
@@ -571,20 +847,23 @@ double evaluateSurfaceFieldEmissionCurrentDensity(const MaterialProperty& materi
                                                   double normal_electric_field_v_per_m,
                                                   double effective_sheath_length_m)
 {
-    const double work_function = std::max(0.1, material.getWorkFunctionEv());
-    const double sheath_length = std::max(1.0e-6, effective_sheath_length_m);
+    const auto params = resolveSurfaceFieldEmissionParameters(material);
+    const double work_function = params.work_function_ev;
     const double reference_field_v_per_m =
-        std::abs(reference_potential_v - surface_potential_v) / sheath_length;
+        evaluateSimpleSheathFieldVPerM(surface_potential_v, reference_potential_v,
+                                       effective_sheath_length_m,
+                                       params.effective_sheath_floor_m);
     const double local_field_v_per_m =
         std::max(std::abs(normal_electric_field_v_per_m), reference_field_v_per_m);
-    if (local_field_v_per_m <= 1.0e7)
+    if (local_field_v_per_m <= params.threshold_field_v_per_m)
     {
         return 0.0;
     }
 
     const double fn_prefactor = 1.54e-6 * local_field_v_per_m * local_field_v_per_m / work_function;
     const double fn_exponent =
-        -6.83e9 * std::pow(work_function, 1.5) / std::max(1.0e6, local_field_v_per_m);
+        -params.fn_decay_coefficient_v_per_m_ev_1p5 * std::pow(work_function, 1.5) /
+        std::max(1.0e6, local_field_v_per_m);
     return fn_prefactor * safeExp(fn_exponent);
 }
 

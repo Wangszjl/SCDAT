@@ -63,6 +63,7 @@ foreach(module IN LISTS TOOLS_MODULES)
     if(_sources)
         # 目录非空：创建真实静态库
         add_library(Tools_${module} STATIC ${_sources} ${_headers})
+        scdat_harden_build_target(Tools_${module})
         target_include_directories(Tools_${module}
             PUBLIC
                 $<BUILD_INTERFACE:${_dir}/include>

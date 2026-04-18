@@ -20,6 +20,7 @@ set(FIELDSOLVER_TEST_TARGETS
     MultiBoundaryElectricFieldSolver_test
     SurfaceBarrierModels_test
     SurfaceFieldVolumeBridge_test
+    VolInteract_test
 )
 
 foreach(test_target IN LISTS FIELDSOLVER_TEST_TARGETS)

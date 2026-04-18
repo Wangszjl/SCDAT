@@ -24,9 +24,31 @@ enum class SurfaceDistributionModel
 {
     MaxwellianProjected,
     WakeAnisotropic,
-  MultiPopulationHybrid,
-  TabulatedVelocity,
-  NonLocalizedHybrid
+    MultiPopulationHybrid,
+    TabulatedVelocity,
+    NonLocalizedHybrid,
+    MultipleSurf,
+    LocalModifiedPearsonIV,
+    LocalTabulated,
+    TwoAxesTabulatedVelocity,
+    UniformVelocity,
+    Fluid,
+    FowlerNordheim,
+    AxisymTabulatedVelocity,
+    GlobalMaxwellBoltzmann,
+    GlobalMaxwellBoltzmann2,
+    GlobalMaxwell,
+    LocalMaxwell,
+    LocalMaxwell2,
+    RecollMaxwell,
+    PICSurf,
+    NonPICSurf,
+    GenericSurf,
+    GlobalSurf,
+    LocalGenericSurf,
+    TestableSurf,
+    TestableForA,
+    MaxwellianThruster
 };
 
 struct SurfaceDistributionSynthesisRequest
@@ -41,6 +63,9 @@ struct SurfaceDistributionSynthesisRequest
     double normalized_flow_alignment = 1.0;
     double local_field_factor = 1.0;
     double wake_factor = 0.0;
+    double axisym_anisotropy = 1.0;
+    double electron_recollection_ratio = 1.0;
+    double ion_recollection_ratio = 1.0;
     bool patch_role = false;
     std::size_t electron_population_count = 1;
     std::size_t ion_population_count = 1;
@@ -70,6 +95,9 @@ struct SurfaceDistributionBuildRequest
     double ion_density_m3 = 0.0;
     double ion_temperature_ev = 0.0;
     double ion_directed_velocity_m_per_s = 0.0;
+    double axisym_anisotropy = 1.0;
+    double electron_recollection_ratio = 1.0;
+    double ion_recollection_ratio = 1.0;
     std::vector<SurfacePopulationDescriptor> electron_populations;
     std::vector<SurfacePopulationDescriptor> ion_populations;
 };
@@ -104,6 +132,9 @@ struct SurfaceDistributionEnvironment
     double normalized_flow_alignment = 1.0;
     double local_field_factor = 1.0;
     double wake_factor = 0.0;
+    double axisym_anisotropy = 1.0;
+    double electron_recollection_ratio = 1.0;
+    double ion_recollection_ratio = 1.0;
     bool patch_role = false;
 };
 
@@ -125,6 +156,9 @@ struct SurfaceDistributionRoleInputs
     double projected_speed_m_per_s = 0.0;
     double flow_alignment_cosine = 1.0;
     double normal_electric_field_v_per_m = 0.0;
+    double axisym_anisotropy = 1.0;
+    double electron_recollection_ratio = 1.0;
+    double ion_recollection_ratio = 1.0;
     bool share_patch_distribution = false;
     bool patch_role = false;
 };
@@ -145,6 +179,9 @@ struct SurfaceDistributionRoleInputs
     double projected_speed_m_per_s = 0.0;
     double flow_alignment_cosine = 1.0;
     double normal_electric_field_v_per_m = 0.0;
+    double axisym_anisotropy = 1.0;
+    double electron_recollection_ratio = 1.0;
+    double ion_recollection_ratio = 1.0;
     bool share_patch_distribution = false;
     bool patch_role = false;
   };
@@ -296,6 +333,164 @@ class NonLocalizedHybridSurfaceDistributionFunction final : public SurfaceDistri
     SurfaceFluxMoments local_moments_{};
     SurfaceFluxMoments non_local_moments_{};
     double non_local_weight_ = 0.0;
+};
+
+class MultipleSurfSurfaceDistributionFunction final : public SurfaceDistributionFunction
+{
+  public:
+    MultipleSurfSurfaceDistributionFunction(std::vector<SurfaceFluxMoments> component_moments,
+                                            std::vector<double> component_weights,
+                                            double localization_bias = 0.0);
+
+    const char* family() const override;
+    SurfaceFluxMoments computeMoments() const override;
+
+  private:
+    std::vector<SurfaceFluxMoments> component_moments_;
+    std::vector<double> component_weights_;
+    double localization_bias_ = 0.0;
+};
+
+class LocalModifiedPearsonIVSurfaceDistributionFunction final : public SurfaceDistributionFunction
+{
+  public:
+    LocalModifiedPearsonIVSurfaceDistributionFunction(double density_m3,
+                                                      double characteristic_energy_ev,
+                                                      double skewness,
+                                                      double kurtosis,
+                                                      double incidence_bias = 0.5,
+                                                      double localization_gain = 1.0);
+
+    const char* family() const override;
+    SurfaceFluxMoments computeMoments() const override;
+
+  private:
+    double density_m3_ = 0.0;
+    double characteristic_energy_ev_ = 0.0;
+    double skewness_ = 0.0;
+    double kurtosis_ = 3.0;
+    double incidence_bias_ = 0.5;
+    double localization_gain_ = 1.0;
+};
+
+class LocalTabulatedSurfaceDistributionFunction final : public SurfaceDistributionFunction
+{
+  public:
+    LocalTabulatedSurfaceDistributionFunction(std::vector<double> energies_ev,
+                                             std::vector<double> flux_weights,
+                                             double local_energy_shift_ev = 0.0,
+                                             double local_flux_scale = 1.0,
+                                             std::vector<double> cosine_weights = {});
+
+    const char* family() const override;
+    SurfaceFluxMoments computeMoments() const override;
+
+  private:
+    std::vector<double> energies_ev_;
+    std::vector<double> flux_weights_;
+    std::vector<double> cosine_weights_;
+    double local_energy_shift_ev_ = 0.0;
+    double local_flux_scale_ = 1.0;
+};
+
+class TwoAxesTabulatedVelocitySurfaceDistributionFunction final : public SurfaceDistributionFunction
+{
+  public:
+    TwoAxesTabulatedVelocitySurfaceDistributionFunction(
+        std::vector<double> normal_velocity_m_per_s,
+        std::vector<double> tangential_velocity_m_per_s,
+        std::vector<double> flux_weights,
+        double normal_energy_scale_ev_per_velocity2,
+        double tangential_energy_scale_ev_per_velocity2,
+        std::vector<double> cosine_weights = {});
+
+    const char* family() const override;
+    SurfaceFluxMoments computeMoments() const override;
+
+  private:
+    std::vector<double> normal_velocity_m_per_s_;
+    std::vector<double> tangential_velocity_m_per_s_;
+    std::vector<double> flux_weights_;
+    std::vector<double> cosine_weights_;
+    double normal_energy_scale_ev_per_velocity2_ = 1.0e-10;
+    double tangential_energy_scale_ev_per_velocity2_ = 1.0e-10;
+};
+
+class AxisymTabulatedVelocitySurfaceDistributionFunction final : public SurfaceDistributionFunction
+{
+  public:
+    AxisymTabulatedVelocitySurfaceDistributionFunction(
+        std::vector<double> axial_velocity_m_per_s,
+        std::vector<double> radial_velocity_m_per_s,
+        std::vector<double> flux_weights,
+        double axial_energy_scale_ev_per_velocity2,
+        double radial_energy_scale_ev_per_velocity2,
+        std::vector<double> cosine_weights = {});
+
+    const char* family() const override;
+    SurfaceFluxMoments computeMoments() const override;
+
+  private:
+    std::vector<double> axial_velocity_m_per_s_;
+    std::vector<double> radial_velocity_m_per_s_;
+    std::vector<double> flux_weights_;
+    std::vector<double> cosine_weights_;
+    double axial_energy_scale_ev_per_velocity2_ = 1.0e-10;
+    double radial_energy_scale_ev_per_velocity2_ = 1.0e-10;
+};
+
+class UniformVelocitySurfaceDistributionFunction final : public SurfaceDistributionFunction
+{
+  public:
+    UniformVelocitySurfaceDistributionFunction(double velocity_m_per_s,
+                                               double flux_weight,
+                                               double energy_scale_ev_per_velocity2,
+                                               double cosine_weight = 1.0);
+
+    const char* family() const override;
+    SurfaceFluxMoments computeMoments() const override;
+
+  private:
+    double velocity_m_per_s_ = 0.0;
+    double flux_weight_ = 0.0;
+    double energy_scale_ev_per_velocity2_ = 1.0e-10;
+    double cosine_weight_ = 1.0;
+};
+
+class FluidSurfaceDistributionFunction final : public SurfaceDistributionFunction
+{
+  public:
+    FluidSurfaceDistributionFunction(double density_m3,
+                                     double characteristic_energy_ev,
+                                     double directed_velocity_m_per_s,
+                                     double compressibility = 1.0,
+                                     double incidence_bias = 0.5);
+
+    const char* family() const override;
+    SurfaceFluxMoments computeMoments() const override;
+
+  private:
+    double density_m3_ = 0.0;
+    double characteristic_energy_ev_ = 0.0;
+    double directed_velocity_m_per_s_ = 0.0;
+    double compressibility_ = 1.0;
+    double incidence_bias_ = 0.5;
+};
+
+class FowlerNordheimSurfaceDistributionFunction final : public SurfaceDistributionFunction
+{
+  public:
+    FowlerNordheimSurfaceDistributionFunction(double field_strength_v_per_m,
+                                              double work_function_ev,
+                                              double emission_area_scale = 1.0);
+
+    const char* family() const override;
+    SurfaceFluxMoments computeMoments() const override;
+
+  private:
+    double field_strength_v_per_m_ = 0.0;
+    double work_function_ev_ = 4.5;
+    double emission_area_scale_ = 1.0;
 };
 
 class SurfaceFluxSampler

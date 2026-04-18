@@ -1,0 +1,1380 @@
+{
+  "schema_version": "scdat.surface_spis_family_coverage_matrix.v1",
+  "contract_id": "surface-spis-family-coverage-matrix-v1",
+  "artifact_version": "v1",
+  "description": "Machine-readable Surface/SPIS family coverage matrix for Round 26 gating.",
+  "post_r26_update_rules": [
+    "Round 22-26 中出现的 near_equivalent、近似可达、未显式实现、已完成（family 可观测）一律不得视为历史已收口项，必须进入 Round 27-33 remediation 主线。",
+    "near_equivalent -> completed 必须同时补齐显式代码入口、显式 config/route 入口、单测、smoke 或 matrix case，并完成 coverage 状态回填。",
+    "已完成（family 可观测） -> completed 必须从 parity/signature 可观测升级为显式实现 + direct evidence；仅 metadata 或 sidecar 不足以升为 completed。",
+    "对于来自 R23-L1 明细表且当前为近似可达或未显式实现的 Vol family，只有在显式 route + 单测 + smoke + matrix case 四项齐全后，才允许把上层 vol_full_stack 提升为 completed。"
+  ],
+  "post_r26_remediation_scope": {
+    "wave_h_round_27": [
+      "surf_interact"
+    ],
+    "wave_i_round_28_vol_bc_field": [
+      "VoltageDependentMBC",
+      "MixedDirichletFourierPoissonBC",
+      "FourierPoissonBC",
+      "SurfDistribMatterBC",
+      "OneSurfDistribTestableMatterBC",
+      "CapacitiveVoltageGenerator",
+      "UniformBField",
+      "SolenoidBField",
+      "DipolarBField",
+      "MultipleEField",
+      "EMField"
+    ],
+    "wave_j_round_29_vol_distrib": [
+      "PICVolDistrib",
+      "PICVolDistribNoAcc",
+      "PICVolDistribUpdatable",
+      "SmartPICVolDistrib",
+      "CompositeVolDistrib",
+      "BackTrackingVolDistrib",
+      "BacktrackingPICCompositeVolDistrib",
+      "BacktrackingBoltzmannCompositeVolDistrib"
+    ],
+    "wave_k_round_30_vol_interact": [
+      "MCCInteractor",
+      "CEXInteractor",
+      "PhotoIonization",
+      "TrajectoryInteractionFromField",
+      "SpinningSpacecraftTrajectory"
+    ],
+    "wave_l_round_31_near_equivalent_promotions": [
+      "surf_field",
+      "top_transition",
+      "circ_circuit",
+      "circ_circfield",
+      "circ_didv"
+    ],
+    "wave_m_round_32_near_equivalent_promotions": [
+      "surf_material",
+      "solver_circuit",
+      "solver_electromag",
+      "solver_matter"
+    ],
+    "wave_y_round_44_util_direct_subpackages": [
+      "Util/Func",
+      "Util/Sampler",
+      "Util/Monitor",
+      "Util/io",
+      "Util/Matrix"
+    ],
+    "wave_z_round_45_util_direct_subpackages": [
+      "Util/DistribFunc",
+      "Util/Exception",
+      "Util/Part",
+      "Util/Phys",
+      "Util/Table",
+      "Util/Vect"
+    ],
+    "wave_aa_round_46_util_instrument": [
+      "Util/Instrument"
+    ],
+    "wave_ab_round_47_util_remaining_subpackages": [
+      "Util/List",
+      "Util/OcTree",
+      "Util/OcTreeMesh"
+    ],
+    "wave_x_round_43_vol_interact_long_tail": [
+      "VolInteractor",
+      "VolInteractModel",
+      "VolInteractionAlongTrajectory",
+      "ElasticCollisions",
+      "ConstantIonizationInteractor"
+    ]
+  },
+  "target_families": [
+    { "id": "surf_material", "domain": "Surf", "spis_family": "Surf/Material", "alignment_status": "completed" },
+    { "id": "surf_interact", "domain": "Surf", "spis_family": "Surf/SurfInteract", "alignment_status": "completed" },
+    { "id": "surf_distrib", "domain": "Surf", "spis_family": "Surf/SurfDistrib", "alignment_status": "completed" },
+    { "id": "surf_mesh", "domain": "Surf", "spis_family": "Surf/SurfMesh", "alignment_status": "completed" },
+    { "id": "surf_field", "domain": "Surf", "spis_family": "Surf/SurfField", "alignment_status": "completed" },
+    { "id": "util_full_stack", "domain": "Util", "spis_family": "Util/**", "alignment_status": "completed" },
+    { "id": "util_distrib_func", "domain": "Util", "spis_family": "Util/DistribFunc", "alignment_status": "completed" },
+    { "id": "util_exception", "domain": "Util", "spis_family": "Util/Exception", "alignment_status": "completed" },
+    { "id": "util_instrument", "domain": "Util", "spis_family": "Util/Instrument", "alignment_status": "completed" },
+    { "id": "util_func", "domain": "Util", "spis_family": "Util/Func", "alignment_status": "completed" },
+    { "id": "util_part", "domain": "Util", "spis_family": "Util/Part", "alignment_status": "completed" },
+    { "id": "util_phys", "domain": "Util", "spis_family": "Util/Phys", "alignment_status": "completed" },
+    { "id": "util_sampler", "domain": "Util", "spis_family": "Util/Sampler", "alignment_status": "completed" },
+    { "id": "util_monitor", "domain": "Util", "spis_family": "Util/Monitor", "alignment_status": "completed" },
+    { "id": "util_io", "domain": "Util", "spis_family": "Util/io", "alignment_status": "completed" },
+    { "id": "util_table", "domain": "Util", "spis_family": "Util/Table", "alignment_status": "completed" },
+    { "id": "util_matrix", "domain": "Util", "spis_family": "Util/Matrix", "alignment_status": "completed" },
+    { "id": "util_vect", "domain": "Util", "spis_family": "Util/Vect", "alignment_status": "completed" },
+    { "id": "util_list", "domain": "Util", "spis_family": "Util/List", "alignment_status": "completed" },
+    { "id": "util_octree", "domain": "Util", "spis_family": "Util/OcTree", "alignment_status": "completed" },
+    { "id": "util_octree_mesh", "domain": "Util", "spis_family": "Util/OcTreeMesh", "alignment_status": "completed" },
+    { "id": "top_transition", "domain": "Top", "spis_family": "Top/Transition", "alignment_status": "completed" },
+    { "id": "top_top", "domain": "Top", "spis_family": "Top/Top", "alignment_status": "completed" },
+    { "id": "top_simulation", "domain": "Top", "spis_family": "Top/Simulation", "alignment_status": "completed" },
+    { "id": "top_plasma", "domain": "Top", "spis_family": "Top/Plasma", "alignment_status": "completed" },
+    { "id": "top_sc", "domain": "Top", "spis_family": "Top/SC", "alignment_status": "completed" },
+    { "id": "top_grid", "domain": "Top", "spis_family": "Top/Grid", "alignment_status": "completed" },
+    { "id": "top_default", "domain": "Top", "spis_family": "Top/Default", "alignment_status": "completed" },
+    { "id": "vol_full_stack", "domain": "Vol", "spis_family": "Vol/BC+Field+Distrib+Interact", "alignment_status": "completed" },
+    { "id": "vol_bc_abstract", "domain": "Vol", "spis_family": "Vol/BC(Abstract)", "alignment_status": "completed" },
+    { "id": "vol_field_abstract", "domain": "Vol", "spis_family": "Vol/VolField(Abstract)", "alignment_status": "completed" },
+    { "id": "vol_distrib_long_tail", "domain": "Vol", "spis_family": "Vol/VolDistrib(LongTail)", "alignment_status": "completed" },
+    { "id": "vol_interact_long_tail", "domain": "Vol", "spis_family": "Vol/VolInteract(LongTail)", "alignment_status": "completed" },
+    { "id": "vol_geom", "domain": "Vol", "spis_family": "Vol/Geom", "alignment_status": "completed" },
+    { "id": "vol_mesh", "domain": "Vol", "spis_family": "Vol/VolMesh", "alignment_status": "completed" },
+    { "id": "circ_circuit", "domain": "Circ", "spis_family": "Circ/Circ", "alignment_status": "completed" },
+    { "id": "circ_circfield", "domain": "Circ", "spis_family": "Circ/CircField", "alignment_status": "completed" },
+    { "id": "circ_didv", "domain": "Circ", "spis_family": "Circ/DIDV", "alignment_status": "completed" },
+    { "id": "solver_circuit", "domain": "Solver", "spis_family": "Solver/Circuit", "alignment_status": "completed" },
+    { "id": "solver_util", "domain": "Solver", "spis_family": "Solver/Util", "alignment_status": "completed" },
+    { "id": "solver_electromag", "domain": "Solver", "spis_family": "Solver/ElectroMag", "alignment_status": "completed" },
+    { "id": "solver_matter", "domain": "Solver", "spis_family": "Solver/Matter", "alignment_status": "completed" }
+  ],
+  "family_to_code": [
+    {
+      "family_id": "surf_material",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Surf/Material/**"],
+      "code_paths": [
+        "Tools/Material/include/SurfaceMaterialModel.h",
+        "Tools/Material/src/SurfaceMaterialModel.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "surf_interact",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Surf/SurfInteract/**"],
+      "code_paths": [
+        "Tools/Material/include/SurfaceInteraction.h",
+        "Tools/Material/src/SurfaceInteraction.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "surf_distrib",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Surf/SurfDistrib/**"],
+      "code_paths": [
+        "Tools/Particle/include/SurfaceDistributionFunction.h",
+        "Tools/Particle/src/SurfaceDistributionFunction.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "surf_mesh",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Surf/SurfMesh/**"],
+      "code_paths": [
+        "Toolkit/Surface Charging/include/DensePlasmaSurfaceCharging.h",
+        "Toolkit/Surface Charging/src/SurfaceChargingKernelFramework.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp",
+        "Main/SurfaceScenarioLoader.cpp",
+        "Main/main.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "surf_field",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Surf/SurfField/**"],
+      "code_paths": [
+        "Tools/FieldSolver/include/SurfaceBarrierModels.h",
+        "Tools/FieldSolver/src/SurfaceBarrierModels.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_full_stack",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/**"],
+      "code_paths": [
+        "Tools/Basic/include/NumericAggregation.h",
+        "Tools/Basic/include/StringTokenUtils.h",
+        "Tools/Basic/include/MathUtils.h",
+        "Tools/Geometry/include/Vector3D.h",
+        "Tools/Diagnostics/include/MonitorManager.h",
+        "Tools/Output/include/ResultExporter.h",
+        "Tools/Particle/include/SurfaceDistributionFunction.h",
+        "Tools/Solver/include/SurfaceSolverFacade.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_distrib_func",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/DistribFunc/**"],
+      "code_paths": [
+        "Tools/Particle/include/SurfaceDistributionFunction.h",
+        "Tools/Particle/src/SurfaceDistributionFunction.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_exception",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Exception/**"],
+      "code_paths": [
+        "Tools/Basic/include/ErrorCode.h",
+        "Tools/Basic/include/ErrorHandling.h",
+        "Tools/Basic/include/VoidResult.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_instrument",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Instrument/**"],
+      "code_paths": [
+        "Toolkit/Surface Charging/include/DensePlasmaSurfaceCharging.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp",
+        "Main/SurfaceScenarioLoader.cpp",
+        "Main/main.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_func",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Func/**"],
+      "code_paths": [
+        "Tools/Basic/include/MathUtils.h",
+        "Tools/Basic/include/NumericAggregation.h",
+        "Tools/Basic/include/StringTokenUtils.h",
+        "Tools/Basic/include/ModelRegistry.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_part",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Part/**"],
+      "code_paths": [
+        "Tools/Particle/include/ParticleDefinitions.h",
+        "Tools/Particle/include/ParticleSource.h",
+        "Tools/Particle/src/ParticleDefinitions.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_phys",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Phys/**"],
+      "code_paths": [
+        "Tools/Basic/include/Constants.h",
+        "Tools/Basic/include/MathUtils.h",
+        "Tools/Particle/include/ParticleDefinitions.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_sampler",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Sampler/**"],
+      "code_paths": [
+        "Tools/Particle/include/SurfaceDistributionFunction.h",
+        "Tools/Particle/src/SurfaceDistributionFunction.cpp",
+        "Toolkit/Surface Charging/include/PicMccSurfaceCurrentSampler.h",
+        "Toolkit/Surface Charging/src/PicMccSurfaceCurrentSampler.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_monitor",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Monitor/**"],
+      "code_paths": [
+        "Tools/Diagnostics/include/Monitor.h",
+        "Tools/Diagnostics/include/FieldMonitor.h",
+        "Tools/Diagnostics/include/MonitorManager.h",
+        "Tools/Diagnostics/src/MonitorManager.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_io",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/io/**"],
+      "code_paths": [
+        "Tools/Output/include/ResultExporter.h",
+        "Tools/Output/include/CSVExporter.h",
+        "Tools/Output/src/ResultExporter.cpp",
+        "Main/SurfaceScenarioLoader.cpp",
+        "Main/main.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_table",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Table/**"],
+      "code_paths": [
+        "Tools/Particle/include/ParticleSource.h",
+        "Tools/Particle/include/SurfaceDistributionFunction.h",
+        "Tools/Particle/src/SurfaceDistributionFunction.cpp",
+        "Tools/Output/include/DataAnalyzer.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_matrix",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Matrix/**"],
+      "code_paths": [
+        "Tools/Solver/include/LinearSystem.h",
+        "Tools/Solver/include/SparseMatrix.h",
+        "Tools/Solver/include/BandMatrix.h",
+        "Tools/Solver/src/LinearSystem.cpp",
+        "Tools/Solver/src/SurfaceSolverFacade.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_vect",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/Vect/**"],
+      "code_paths": [
+        "Tools/Geometry/include/Vector3D.h",
+        "Tools/Geometry/include/Point3D.h",
+        "Tools/Geometry/src/Vector3D.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_list",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/List/**"],
+      "code_paths": [
+        "Tools/Particle/include/ParticleSource.h",
+        "Tools/Particle/src/ParticleSource.cpp",
+        "Tools/Particle/include/SurfaceDistributionFunction.h",
+        "Tools/Particle/src/SurfaceDistributionFunction.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_octree",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/OcTree/**"],
+      "code_paths": [
+        "Tools/Mesh/include/MeshPartitioning.h",
+        "Tools/Mesh/src/MeshPartitioning.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "util_octree_mesh",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Util/OcTreeMesh/**"],
+      "code_paths": [
+        "Tools/Mesh/include/MeshAlgorithms.h",
+        "Tools/Mesh/include/MeshPartitioning.h",
+        "Tools/Mesh/src/MeshAlgorithms.cpp",
+        "Tools/Mesh/src/MeshPartitioning.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "top_transition",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Top/Transition/**"],
+      "code_paths": [
+        "Toolkit/Surface Charging/include/SurfaceTransitionEngine.h",
+        "Toolkit/Surface Charging/src/SurfaceTransitionEngine.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "top_top",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Top/Top/**"],
+      "code_paths": [
+        "Toolkit/Surface Charging/include/SurfaceScenarioCatalog.h",
+        "Toolkit/Surface Charging/src/SurfaceScenarioCatalog.cpp",
+        "Toolkit/Surface Charging/include/SurfaceSimulationRunner.h",
+        "Toolkit/Surface Charging/src/SurfaceSimulationRunner.cpp",
+        "Toolkit/Surface Charging/include/SurfaceRuntimePlan.h",
+        "Toolkit/Surface Charging/src/SurfaceRuntimePlan.cpp",
+        "Main/SurfaceScenarioLoader.cpp",
+        "Main/main.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "top_simulation",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Top/Simulation/**"],
+      "code_paths": [
+        "Toolkit/Surface Charging/include/SurfaceSimulationRunner.h",
+        "Toolkit/Surface Charging/src/SurfaceSimulationRunner.cpp",
+        "Toolkit/Surface Charging/include/SurfaceRuntimePlan.h",
+        "Toolkit/Surface Charging/src/SurfaceRuntimePlan.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "top_plasma",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Top/Plasma/**"],
+      "code_paths": [
+        "Toolkit/Plasma Analysis/include/FluidAlgorithmConfig.h",
+        "Toolkit/Surface Charging/include/DensePlasmaSurfaceCharging.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp",
+        "Toolkit/Surface Charging/src/SurfaceRuntimePlan.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "top_sc",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Top/SC/**"],
+      "code_paths": [
+        "Tools/Coupling/include/SurfaceCircuitCoupling.h",
+        "Tools/Coupling/src/SurfaceCircuitCoupling.cpp",
+        "Toolkit/Surface Charging/include/DensePlasmaSurfaceCharging.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "top_grid",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Top/Grid/**"],
+      "code_paths": [
+        "Main/SurfaceScenarioLoader.cpp",
+        "Tools/FieldSolver/include/SurfaceFieldVolumeBridge.h",
+        "Tools/FieldSolver/src/SurfaceFieldVolumeBridge.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "top_default",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Top/Default/**"],
+      "code_paths": [
+        "Toolkit/Surface Charging/include/SurfaceScenarioCatalog.h",
+        "Toolkit/Surface Charging/src/SurfaceScenarioCatalog.cpp",
+        "Toolkit/Surface Charging/include/SurfaceRuntimePlan.h",
+        "Toolkit/Surface Charging/src/SurfaceRuntimePlan.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "vol_full_stack",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Vol/**"],
+      "code_paths": [
+        "Tools/FieldSolver/include/SurfaceFieldVolumeContracts.h",
+        "Tools/FieldSolver/include/SurfaceFieldVolumeBridge.h",
+        "Tools/FieldSolver/src/SurfaceFieldVolumeBridge.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "vol_bc_abstract",
+      "spis_sources": [
+        "ref/SPIS/num-master/src/main/java/spis/Vol/BC/BC.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/BC/DirichletPoissonBC.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/BC/MatterBC.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/BC/TestableMatterBC.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/BC/VoltageGenerator.java"
+      ],
+      "code_paths": [
+        "Tools/FieldSolver/include/BoundaryCondition.h",
+        "Tools/FieldSolver/src/PoissonSolver.cpp",
+        "Tools/FieldSolver/include/PoissonSolver.h",
+        "Tools/Solver/include/LinearSystem.h",
+        "Tools/Solver/src/LinearSystem.cpp",
+        "Tools/FieldSolver/src/SurfaceFieldVolumeBridge.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "vol_field_abstract",
+      "spis_sources": [
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolField/VolField.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolField/ScalVolField.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolField/VectVolField.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolField/EField.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolField/DirVectVolField.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolField/DirEField.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolField/PotEField.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolField/PotVectVolField.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolField/BField.java"
+      ],
+      "code_paths": [
+        "Tools/FieldSolver/include/VolField.h",
+        "Tools/FieldSolver/src/VolField.cpp",
+        "Tools/FieldSolver/include/SurfaceFieldVolumeContracts.h",
+        "Tools/FieldSolver/src/SurfaceFieldVolumeBridge.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "vol_distrib_long_tail",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Vol/VolDistrib/**"],
+      "code_paths": [
+        "Tools/FieldSolver/include/VolDistrib.h",
+        "Tools/FieldSolver/include/SurfaceFieldVolumeContracts.h",
+        "Tools/FieldSolver/include/SurfaceFieldVolumeBridge.h",
+        "Tools/FieldSolver/src/SurfaceFieldVolumeBridge.cpp",
+        "Main/SurfaceScenarioLoader.cpp",
+        "Main/main.cpp",
+        "Toolkit/Surface Charging/include/DensePlasmaSurfaceCharging.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "vol_interact_long_tail",
+      "spis_sources": [
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolInteract/VolInteractor.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolInteract/VolInteractModel.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolInteract/VolInteractionAlongTrajectory.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolInteract/ElasticCollisions.java",
+        "ref/SPIS/num-master/src/main/java/spis/Vol/VolInteract/ConstantIonizationInteractor.java"
+      ],
+      "code_paths": [
+        "Tools/FieldSolver/include/VolInteract.h",
+        "Tools/FieldSolver/src/VolInteract.cpp",
+        "Tools/FieldSolver/src/SurfaceFieldVolumeBridge.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "vol_geom",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Vol/Geom/**"],
+      "code_paths": [
+        "Tools/Mesh/include/MeshParsing.h",
+        "Tools/Mesh/src/MeshParsing.cpp",
+        "Tools/FieldSolver/include/SurfaceFieldVolumeBridge.h",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "vol_mesh",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Vol/VolMesh/**"],
+      "code_paths": [
+        "Tools/Mesh/include/MeshParsing.h",
+        "Tools/Mesh/src/MeshParsing.cpp",
+        "Tools/FieldSolver/include/SurfaceFieldVolumeBridge.h",
+        "Tools/FieldSolver/src/SurfaceFieldVolumeBridge.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "circ_circuit",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Circ/Circ/**"],
+      "code_paths": [
+        "Tools/Coupling/include/SurfaceCircuitCoupling.h",
+        "Tools/Coupling/src/SurfaceCircuitCoupling.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "circ_circfield",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Circ/CircField/**"],
+      "code_paths": [
+        "Tools/Coupling/include/SurfaceCircuitCoupling.h",
+        "Tools/Coupling/src/SurfaceCircuitCoupling.cpp",
+        "Tools/Coupling/src/SurfaceCurrentLinearizationKernel.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "circ_didv",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Circ/DIDV/**"],
+      "code_paths": [
+        "Tools/Coupling/include/SurfaceCircuitCoupling.h",
+        "Tools/Coupling/src/SurfaceCircuitCoupling.cpp",
+        "Tools/Coupling/src/SurfaceCurrentLinearizationKernel.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "solver_circuit",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Solver/Circuit/**"],
+      "code_paths": [
+        "Tools/Solver/include/SurfaceSolverFacade.h",
+        "Tools/Solver/src/SurfaceSolverFacade.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "solver_util",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Solver/Util/**"],
+      "code_paths": [
+        "Tools/Solver/include/LinearSystem.h",
+        "Tools/Solver/src/LinearSystem.cpp",
+        "Tools/FieldSolver/include/PoissonSolver.h",
+        "Tools/FieldSolver/src/PoissonSolver.cpp",
+        "Tools/PICcore/src/PICCycle.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "solver_electromag",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Solver/ElectroMag/**"],
+      "code_paths": [
+        "Tools/Solver/include/SurfaceSolverFacade.h",
+        "Tools/Solver/src/SurfaceSolverFacade.cpp",
+        "Toolkit/Surface Charging/src/SurfaceChargingKernelFramework.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    },
+    {
+      "family_id": "solver_matter",
+      "spis_sources": ["ref/SPIS/num-master/src/main/java/spis/Solver/Matter/**"],
+      "code_paths": [
+        "Tools/Solver/include/SurfaceSolverFacade.h",
+        "Tools/Solver/src/SurfaceSolverFacade.cpp",
+        "Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"
+      ],
+      "documentation_paths": ["Toolkit/Surface Charging/docs/surface_num_alignment_refactor_plan.md"]
+    }
+  ],
+  "family_to_test": [
+    {
+      "family_id": "surf_material",
+      "test_evidence": [
+        { "path": "Tools/Material/test/Material_test.cpp", "selectors": ["BasicSurfaceMaterialModelTest", "ErosionSurfaceMaterialModelTest", "SurfaceMaterialModelVariantTest"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUnifiedKernelMetadata", "ScdatUnifiedRouteExportsErosionMaterialModelFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "surf_interact",
+      "test_evidence": [
+        { "path": "Tools/Material/test/Material_test.cpp", "selectors": ["SurfaceInteractionTest"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsTabulatedSeyInteractorFamilyMetadata", "ScdatUnifiedRouteExportsMultipleInteractorFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "surf_distrib",
+      "test_evidence": [
+        { "path": "Tools/Particle/test/SurfaceDistributionFunction_test.cpp", "selectors": ["BuildAndSynthesisSupportMaxwellFamilyModels", "BuildAndSynthesisSupportTabulatedVelocityAndNonLocalizedModels"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["SurfaceConfigCliAcceptsCanonicalSurfDistribFamilyAlias"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "surf_mesh",
+      "test_evidence": [
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["StructuredTopologyRejectsBoundaryMappingWithUnknownGroup", "StructuredTopologyWritesReadableGraphSidecarReport", "ScdatUnifiedRouteExportsSurfMeshFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "surf_field",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/SurfaceBarrierModels_test.cpp", "selectors": ["ScalerKindRoutingResolvesExpectedFamilies", "EmissionBarrierBundleRoutesConfiguredScalerFamilies", "AutomaticBarrierCurrentScalerSelectsExpectedInnerFamilies", "MultipleCurrentScalerBlendsConfiguredInnerScalers"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsAutomaticAndMultipleBarrierMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_full_stack",
+      "test_evidence": [
+        { "path": "Tools/Geometry/test/Vector3D_test.cpp", "selectors": ["DotCrossAndLength", "AngleAndProjection"] },
+        { "path": "Tools/Diagnostics/test/Diagnostics_test.cpp", "selectors": ["FieldMonitorCapturesMagnitudeAndPotentialRange", "MonitorManagerAggregatesLatestSamples"] },
+        { "path": "Tools/Output/test/Output_test.cpp", "selectors": ["ResultExporterWritesCsvVtkAndHdf5Artifacts", "DataAnalyzerSummarizesCsvColumns"] },
+        { "path": "Tools/Particle/test/SurfaceDistributionFunction_test.cpp", "selectors": ["BuildAndSynthesisSupportMaxwellFamilyModels"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_distrib_func",
+      "test_evidence": [
+        { "path": "Tools/Particle/test/SurfaceDistributionFunction_test.cpp", "selectors": ["TabulatedDistributionComputesWeightedMoments", "BuildSurfaceFluxMomentsConstructsWakeAndHybridSources"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_exception",
+      "test_evidence": [
+        { "path": "Tools/Basic/test/Basic_test.cpp", "selectors": ["ErrorHandlerBuildsValueAndVoidResults"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_instrument",
+      "test_evidence": [
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["SurfaceReferenceAndRuntimeContractsExportMetadata", "ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_func",
+      "test_evidence": [
+        { "path": "Tools/Basic/test/Basic_test.cpp", "selectors": ["MathUtilsSafeDivideAndClampHandleFiniteRanges", "StringTokenUtilsNormalizeAndTrimAsciiTokens", "StringModelRegistryParsesAliasesAfterNormalization"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_part",
+      "test_evidence": [
+        { "path": "Tools/Particle/test/ParticleDefinitions_test.cpp", "selectors": ["FactoryCreateElectronUsesGlobalConstants", "FactoryCreateIonAssignsSpecies", "LifecycleAndAgeManagement"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_phys",
+      "test_evidence": [
+        { "path": "Tools/Basic/test/Basic_test.cpp", "selectors": ["PhysicsConstantsExposeStableConversions"] },
+        { "path": "Tools/Particle/test/ParticleDefinitions_test.cpp", "selectors": ["FactoryCreateElectronUsesGlobalConstants"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_sampler",
+      "test_evidence": [
+        { "path": "Tools/Particle/test/SurfaceDistributionFunction_test.cpp", "selectors": ["SamplerTracksDirtyAndCachedState", "BuildAndSynthesisSupportMaxwellFamilyModels"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_monitor",
+      "test_evidence": [
+        { "path": "Tools/Diagnostics/test/Diagnostics_test.cpp", "selectors": ["FieldMonitorCapturesMagnitudeAndPotentialRange", "MonitorManagerAggregatesLatestSamples"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_io",
+      "test_evidence": [
+        { "path": "Tools/Output/test/Output_test.cpp", "selectors": ["ResultExporterWritesCsvVtkAndHdf5Artifacts", "DataAnalyzerSummarizesCsvColumns"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_table",
+      "test_evidence": [
+        { "path": "Tools/Particle/test/SurfaceDistributionFunction_test.cpp", "selectors": ["LegacyFluxTableBuilderBuildsSharedEnergyGridAndPopulationFlux", "ResolvedSpectrumDiscreteFluxHelpersDetectIntegrateAndAverageEnergy"] },
+        { "path": "Tools/Output/test/Output_test.cpp", "selectors": ["DataAnalyzerSummarizesCsvColumns"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_matrix",
+      "test_evidence": [
+        { "path": "Tools/Solver/test/SurfaceSolverFacade_test.cpp", "selectors": ["SolveDenseLinearSystemWithResidualSolvesWellConditionedSystem", "SolveIterativeLinearSystemConvergesForWellConditionedSystem"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_vect",
+      "test_evidence": [
+        { "path": "Tools/Geometry/test/Vector3D_test.cpp", "selectors": ["DotCrossAndLength", "AngleAndProjection", "RotateAroundAxis"] },
+        { "path": "Tools/Geometry/test/Point3D_test.cpp", "selectors": ["ArithmeticOperators", "DistanceAndMagnitude"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_list",
+      "test_evidence": [
+        { "path": "Tools/Particle/test/ParticleSource_test.cpp", "selectors": ["ResolveSpectrumBuildsDoubleMaxwellPopulations", "ResolveSpectrumBuildsDiscreteKappaFlux"] },
+        { "path": "Tools/Particle/test/SurfaceDistributionFunction_test.cpp", "selectors": ["RoleInputBuilderBuildsPopulationsAndFallbackFromResolvedSpectra", "ResolvedSpectrumMomentsPreferPopulationStatistics"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_octree",
+      "test_evidence": [
+        { "path": "Tools/Mesh/test/MeshPartitioning_test.cpp", "selectors": ["OctreeNodeSubdividesAndQueriesByPoint", "SpatialIndexTracksDepthAndRadiusQueries"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "util_octree_mesh",
+      "test_evidence": [
+        { "path": "Tools/Mesh/test/MeshPartitioning_test.cpp", "selectors": ["BoundingBoxSubdivisionCoversMeshOctants", "SpatialIndexBuildsFromMeshElementsAndRegionQueriesMatch"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsUtilFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "top_transition",
+      "test_evidence": [
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_object_layer_test.cpp", "selectors": ["ExposesObserverFinalizationAndSunFluxIntensityObjectHooks", "EvaluatesExtendedEventBundleWhenSunFluxIsDisabled", "ExtendedEventBundleDefaultsToDisabled"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsTopTransitionFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "top_top",
+      "test_evidence": [
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_object_layer_test.cpp", "selectors": ["ListsPresetsAndResolvesAliases", "RunsDefaultPresetWithZeroSteps", "CompilesPresetMetadataAndSolverPolicy"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["PresetCatalogRouteExportsTopTopFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "top_simulation",
+      "test_evidence": [
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_object_layer_test.cpp", "selectors": ["RunsDefaultPresetWithZeroSteps", "CompilesPresetMetadataAndSolverPolicy"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsTopTransitionFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "top_plasma",
+      "test_evidence": [
+        { "path": "Tools/Particle/test/SurfaceDistributionFunction_test.cpp", "selectors": ["BuildSurfaceFluxMomentsConstructsWakeAndHybridSources", "BuildAndSynthesisSupportMaxwellFamilyModels"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsTopTransitionFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "top_sc",
+      "test_evidence": [
+        { "path": "Tools/Coupling/test/Coupling_test.cpp", "selectors": ["GenericCircuitAssemblyAppliesNodeBranchAndSourceElements", "SurfaceAssemblyAppliesDynamicExcitationOverrides"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsTopTransitionFamilyMetadata", "ScdatUnifiedRouteExportsCircFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "top_grid",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/SurfaceFieldVolumeBridge_test.cpp", "selectors": ["NativeVolumeParitySnapshotBuildsMinimalClosedLoop", "HybridBlendParityAddsPhase2BoundaryAndInteractionCoverage"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["VolumetricRuntimeDerivesGeometryFromExternalBoundaryFaces", "ScdatUnifiedRouteExportsNativeVolumeParityMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "top_default",
+      "test_evidence": [
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_object_layer_test.cpp", "selectors": ["ListsPresetsAndResolvesAliases", "CompilesPresetMetadataAndSolverPolicy"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsTopTransitionFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "vol_full_stack",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/SurfaceFieldVolumeBridge_test.cpp", "selectors": ["NativeVolumeParitySnapshotBuildsMinimalClosedLoop", "HybridBlendParityAddsPhase2BoundaryAndInteractionCoverage"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsNativeVolumeParityMetadata", "SurfaceConfigCliAcceptsNativeVolumeFamilyOverrideKeys"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "vol_bc_abstract",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/PoissonSolver_test.cpp", "selectors": ["SolvesFiniteDirichletProfileOnPlateMesh"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsNativeVolumeParityMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "vol_field_abstract",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/SurfaceFieldVolumeBridge_test.cpp", "selectors": ["NativeVolumeParitySnapshotBuildsMinimalClosedLoop", "ActiveBoundaryAndFieldFamilySignaturesFollowRoute", "ExplicitBoundaryAndFieldFamiliesNormalizeDuplicates"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsNativeVolumeParityMetadata", "SurfaceConfigCliAcceptsNativeVolumeFamilyOverrideKeys"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "vol_distrib_long_tail",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/SurfaceFieldVolumeBridge_test.cpp", "selectors": ["ExplicitDistributionFamiliesNormalizeDuplicates"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsNativeVolumeParityMetadata", "SurfaceConfigCliAcceptsNativeVolumeFamilyOverrideKeys"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "vol_interact_long_tail",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/VolInteract_test.cpp", "selectors": ["CompatibilityInteractorsExposeExpectedInheritanceLayers", "AlongTrajectoryInteractorsAccumulateIntegrationTime", "ExecuteNativeVolumeInteractionsUsesConfiguredFamilySet"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsNativeVolumeParityMetadata", "SurfaceConfigCliAcceptsNativeVolumeFamilyOverrideKeys"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "vol_geom",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/SurfaceFieldVolumeBridge_test.cpp", "selectors": ["NativeVolumeParitySnapshotBuildsMinimalClosedLoop", "HybridBlendParityAddsPhase2BoundaryAndInteractionCoverage"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsNativeVolumeParityMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "vol_mesh",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/SurfaceFieldVolumeBridge_test.cpp", "selectors": ["NativeVolumeParitySnapshotBuildsMinimalClosedLoop", "HybridBlendParityAddsPhase2BoundaryAndInteractionCoverage"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsNativeVolumeParityMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "circ_circuit",
+      "test_evidence": [
+        { "path": "Tools/Coupling/test/Coupling_test.cpp", "selectors": ["GenericCircuitAssemblyAppliesNodeBranchAndSourceElements", "CircuitExcitationSamplingSupportsAllWaveforms", "SurfaceAssemblyAppliesDynamicExcitationOverrides"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsCircFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "circ_circfield",
+      "test_evidence": [
+        { "path": "Tools/Coupling/test/Coupling_test.cpp", "selectors": ["CircuitKernelInputComposerMergesDidvAndTopologyState", "SurfaceCircuitKernelInputAppliesBiasCapacitanceAndBranchSource"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsCircFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "circ_didv",
+      "test_evidence": [
+        { "path": "Tools/Coupling/test/Coupling_test.cpp", "selectors": ["CircuitDidvCompositionSupportsWeightedTerms", "CircuitDidvCompositionSupportsMultiSurfaceAggregation", "SurfDidvFromMatricesBuildsExplicitNodeAndOffDiagonalRoute", "ReducedRegularDidvAggregatesMappedNodesAndInternalCouplings", "ReducedSurfDidvAggregatesMappedSurfaceMatrices"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ReferenceDidvMatchesFiniteDifferenceAcrossGeoLeoRoutes", "ScdatUnifiedRouteExportsCircFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "solver_circuit",
+      "test_evidence": [
+        { "path": "Tools/Solver/test/SurfaceSolverFacade_test.cpp", "selectors": ["ResolveSurfaceSolverFamilyViewBuildsSupportedAndActiveSignatures"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["SolverConfigImplicitCouplingDrivesSharedGlobalCoupledPolicy", "ScdatUnifiedRouteExportsSolverFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "solver_util",
+      "test_evidence": [
+        { "path": "Tools/FieldSolver/test/PoissonSolver_test.cpp", "selectors": ["SolvesFiniteDirichletProfileOnPlateMesh"] },
+        { "path": "Tools/PICcore/test/PICCycleBoundary_test.cpp", "selectors": ["ManualPotentialProfileReconstructsElectricField"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["ScdatUnifiedRouteExportsSolverFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "solver_electromag",
+      "test_evidence": [
+        { "path": "Tools/Solver/test/SurfaceSolverFacade_test.cpp", "selectors": ["ResolveGlobalCoupledControlAppliesImplicitOverrides", "SolveDenseLinearSystemWithResidualSolvesWellConditionedSystem", "SolveIterativeLinearSystemConvergesForWellConditionedSystem", "ResolveVolumeLinearSolverRoutingHonorsPolicyHints", "ResolveSurfaceSolverFamilyViewBuildsSupportedAndActiveSignatures"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["SolverConfigImplicitCouplingDrivesSharedGlobalCoupledPolicy", "ScdatUnifiedRouteExportsSolverFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    },
+    {
+      "family_id": "solver_matter",
+      "test_evidence": [
+        { "path": "Tools/Solver/test/SurfaceSolverFacade_test.cpp", "selectors": ["ResolveSurfaceSolverFamilyViewBuildsSupportedAndActiveSignatures"] },
+        { "path": "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "selectors": ["PicCircuitPresetsKeepLivePicMccEnabled", "ScdatUnifiedRouteExportsSolverFamilyMetadata"] }
+      ],
+      "gate_artifacts": ["scripts/run/surface_reference_matrix.json"]
+    }
+  ],
+  "family_to_config_route": [
+    {
+      "family_id": "surf_material",
+      "metadata_keys": ["surface_material_model_family"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["surface_material_model_use_erosion", "surface_material"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_ref", "geo_ecss_kapton_pic_circuit"],
+      "reference_matrix_cases": ["geo_ecss_kapton_ref"]
+    },
+    {
+      "family_id": "surf_interact",
+      "metadata_keys": [
+        "surface_interactor_family",
+        "surface_interactor_supported_family_signature",
+        "surface_interactor_active_family_signature"
+      ],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["surface_interactor_family_code", "surface_multiple_yield_weight"],
+      "config_source_files": ["Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "documentation/contracts/config_schema_v1.json"],
+      "preset_names": ["geo_ecss_kapton_ref"],
+      "reference_matrix_cases": ["geo_ecss_kapton_ref"]
+    },
+    {
+      "family_id": "surf_distrib",
+      "metadata_keys": ["surface_distribution_family"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["distribution_model"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_ref", "leo_ref_ram_facing"],
+      "reference_matrix_cases": ["geo_ecss_kapton_axisym_distribution", "geo_ecss_kapton_global_maxwell_distribution", "leo_ref_ram_facing_axisym_distribution"]
+    },
+    {
+      "family_id": "surf_mesh",
+      "metadata_keys": ["surface_surf_mesh_route", "surface_surf_mesh_family_signature", "surface_surf_mesh_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["body_boundary_groups", "patch_boundary_groups", "boundary_mappings"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/SurfaceScenarioLoader.cpp", "Main/main.cpp", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_ref", "leo_ref_ram_facing"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surf_mesh_structured_topology"]
+    },
+    {
+      "family_id": "surf_field",
+      "metadata_keys": ["surface_barrier_scaler_family", "surface_photo_barrier_scaler_family", "surface_secondary_barrier_scaler_family"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["surface_photo_barrier_scaler_kind", "surface_secondary_barrier_scaler_kind"],
+      "config_source_files": ["Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "documentation/contracts/config_schema_v1.json"],
+      "preset_names": ["geo_ecss_kapton_ref"],
+      "reference_matrix_cases": ["geo_ecss_kapton_ref"]
+    },
+    {
+      "family_id": "util_full_stack",
+      "metadata_keys": ["surface_util_route", "surface_util_family_signature", "surface_util_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "surface_pic_runtime", "surface_instrument_set", "distribution_model"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_pic_circuit", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct", "leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    },
+    {
+      "family_id": "util_distrib_func",
+      "metadata_keys": ["surface_util_distrib_func_route", "surface_util_distrib_func_family_signature", "surface_util_distrib_func_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "distribution_model"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_exception",
+      "metadata_keys": ["surface_util_exception_route", "surface_util_exception_family_signature", "surface_util_exception_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "surface-config"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/main.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_instrument",
+      "metadata_keys": ["surface_util_instrument_route", "surface_util_instrument_family_signature", "surface_util_instrument_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["surface_instrument_set", "surface_pic_runtime", "runtime_route"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/main.cpp", "Main/SurfaceScenarioLoader.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct", "geo_ecss_kapton_pic_circuit"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_func",
+      "metadata_keys": ["surface_util_func_route", "surface_util_func_family_signature", "surface_util_func_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "distribution_model"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_part",
+      "metadata_keys": ["surface_util_part_route", "surface_util_part_family_signature", "surface_util_part_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "electron_spectrum", "ion_spectrum"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/SurfaceScenarioLoader.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_phys",
+      "metadata_keys": ["surface_util_phys_route", "surface_util_phys_family_signature", "surface_util_phys_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "time_step_s", "distribution_model"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/main.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_sampler",
+      "metadata_keys": ["surface_util_sampler_route", "surface_util_sampler_family_signature", "surface_util_sampler_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "distribution_model", "surface_pic_runtime"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_monitor",
+      "metadata_keys": ["surface_util_monitor_route", "surface_util_monitor_family_signature", "surface_util_monitor_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "surface_pic_runtime", "surface_instrument_set"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_io",
+      "metadata_keys": ["surface_util_io_route", "surface_util_io_family_signature", "surface_util_io_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["output_csv", "runtime_route", "surface-config"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/main.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_table",
+      "metadata_keys": ["surface_util_table_route", "surface_util_table_family_signature", "surface_util_table_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["output_csv", "runtime_route", "distribution_model"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/main.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_matrix",
+      "metadata_keys": ["surface_util_matrix_route", "surface_util_matrix_family_signature", "surface_util_matrix_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "coupling_mode", "convergence_policy", "deposition_scheme"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/main.cpp", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_vect",
+      "metadata_keys": ["surface_util_vect_route", "surface_util_vect_family_signature", "surface_util_vect_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "domain_size", "resolution"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/main.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_list",
+      "metadata_keys": ["surface_util_list_route", "surface_util_list_family_signature", "surface_util_list_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "distribution_model", "electron_spectrum", "ion_spectrum"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/SurfaceScenarioLoader.cpp", "Main/main.cpp", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_octree",
+      "metadata_keys": ["surface_util_octree_route", "surface_util_octree_family_signature", "surface_util_octree_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "surface_pic_runtime", "enable_live_pic_window"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/main.cpp", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "util_octree_mesh",
+      "metadata_keys": ["surface_util_octree_mesh_route", "surface_util_octree_mesh_family_signature", "surface_util_octree_mesh_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "surface_pic_runtime", "enable_live_pic_mcc"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/main.cpp", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct"]
+    },
+    {
+      "family_id": "top_transition",
+      "metadata_keys": ["surface_top_transition_family_signature", "surface_top_transition_active_family_signature", "surface_top_transition_lifecycle_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["transition_local_time_enabled", "transition_spinning_enabled", "transition_sun_flux_enabled", "transition_observer_enabled", "transition_finalization_enabled"],
+      "config_source_files": ["scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_ref"],
+      "reference_matrix_cases": ["geo_ecss_kapton_transition_lifecycle_hooks"]
+    },
+    {
+      "family_id": "top_top",
+      "metadata_keys": ["surface_top_top_route", "surface_top_top_entrypoint_mode", "surface_top_top_family_signature", "surface_top_top_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["base_preset", "adaptive_time_stepping", "total_duration_s", "surface-config", "surface"],
+      "config_source_files": ["Main/main.cpp", "Main/SurfaceScenarioLoader.cpp", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_pic_circuit", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["geo_ecss_kapton_top_top_surface_config"]
+    },
+    {
+      "family_id": "top_simulation",
+      "metadata_keys": ["surface_top_simulation_route", "surface_top_simulation_family_signature", "surface_top_simulation_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["runtime_route", "reference_family", "reference_matrix_case_id"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_object_layer_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_ref", "geo_ecss_kapton_pic_circuit"],
+      "reference_matrix_cases": ["geo_ecss_kapton_transition_lifecycle_hooks"]
+    },
+    {
+      "family_id": "top_plasma",
+      "metadata_keys": ["surface_top_plasma_route", "surface_top_plasma_family_signature", "surface_top_plasma_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["distribution_model", "runtime_route", "surface_pic_runtime"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_ref", "leo_ref_ram_facing"],
+      "reference_matrix_cases": ["geo_ecss_kapton_transition_lifecycle_hooks", "leo_ref_ram_facing_axisym_distribution"]
+    },
+    {
+      "family_id": "top_sc",
+      "metadata_keys": ["surface_top_sc_route", "surface_top_sc_family_signature", "surface_top_sc_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["enable_body_patch_circuit", "bodies", "patches", "interfaces"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_pic_circuit", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    },
+    {
+      "family_id": "top_grid",
+      "metadata_keys": ["surface_top_grid_route", "surface_top_grid_family_signature", "surface_top_grid_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["boundary_mappings", "body_boundary_groups", "patch_boundary_groups", "runtime_route"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_ref", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["geo_ecss_kapton_native_volume_hybrid_blend", "leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    },
+    {
+      "family_id": "top_default",
+      "metadata_keys": ["surface_top_default_route", "surface_top_default_family_signature", "surface_top_default_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["surface_instrument_set", "runtime_route", "reference_family", "reference_matrix_case_id"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_ref", "geo_ecss_kapton_pic_circuit"],
+      "reference_matrix_cases": ["geo_ecss_kapton_transition_lifecycle_hooks"]
+    },
+    {
+      "family_id": "vol_full_stack",
+      "metadata_keys": [
+        "surface_native_volume_parity_boundary_condition_family_signature",
+        "surface_native_volume_parity_active_boundary_condition_family_signature",
+        "surface_native_volume_parity_field_family_signature",
+        "surface_native_volume_parity_active_field_family_signature",
+        "surface_native_volume_parity_distribution_family_signature",
+        "surface_native_volume_parity_interaction_family_signature",
+        "surface_native_volume_active_interaction_family_signature",
+        "surface_native_volume_active_interaction_route"
+      ],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["enable_external_field_solver_bridge", "enable_external_volume_solver_bridge", "surface_native_volume_interaction_families", "native_volume_interaction_families"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_ref"],
+      "reference_matrix_cases": ["geo_ecss_kapton_native_volume_hybrid_blend", "geo_ecss_kapton_native_volume_external_bridge", "geo_ecss_kapton_native_volume_interaction_override"]
+    },
+    {
+      "family_id": "vol_bc_abstract",
+      "metadata_keys": ["surface_native_volume_bc_abstract_route", "surface_native_volume_bc_abstract_family_signature", "surface_native_volume_bc_abstract_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["surface_native_volume_boundary_condition_families", "native_volume_boundary_condition_families", "enable_external_field_solver_bridge", "enable_external_volume_solver_bridge"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/SurfaceScenarioLoader.cpp", "Main/main.cpp", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_ref"],
+      "reference_matrix_cases": ["geo_ecss_kapton_native_volume_hybrid_blend", "geo_ecss_kapton_native_volume_external_bridge"]
+    },
+    {
+      "family_id": "vol_field_abstract",
+      "metadata_keys": ["surface_native_volume_field_route", "surface_native_volume_field_family_signature", "surface_native_volume_field_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["surface_native_volume_field_families", "native_volume_field_families", "enable_external_field_solver_bridge", "enable_external_volume_solver_bridge"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/SurfaceScenarioLoader.cpp", "Main/main.cpp", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_ref"],
+      "reference_matrix_cases": ["geo_ecss_kapton_native_volume_hybrid_blend", "geo_ecss_kapton_native_volume_external_bridge", "geo_ecss_kapton_native_volume_field_override"]
+    },
+    {
+      "family_id": "vol_distrib_long_tail",
+      "metadata_keys": ["surface_native_volume_distribution_route", "surface_native_volume_distribution_family_signature", "surface_native_volume_distribution_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["surface_native_volume_distribution_families", "native_volume_distribution_families", "distribution_model"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/SurfaceScenarioLoader.cpp", "Main/main.cpp", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_ref"],
+      "reference_matrix_cases": ["geo_ecss_kapton_native_volume_distribution_override"]
+    },
+    {
+      "family_id": "vol_interact_long_tail",
+      "metadata_keys": ["surface_native_volume_interaction_long_tail_route", "surface_native_volume_interaction_long_tail_family_signature", "surface_native_volume_interaction_long_tail_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["surface_native_volume_interaction_families", "native_volume_interaction_families", "enable_external_field_solver_bridge", "enable_external_volume_solver_bridge"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "Main/SurfaceScenarioLoader.cpp", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_ref"],
+      "reference_matrix_cases": ["geo_ecss_kapton_native_volume_hybrid_blend", "geo_ecss_kapton_native_volume_external_bridge", "geo_ecss_kapton_native_volume_interaction_long_tail_override"]
+    },
+    {
+      "family_id": "vol_geom",
+      "metadata_keys": ["surface_native_volume_parity_geom_route", "surface_native_volume_parity_geom_family_signature", "surface_native_volume_parity_geom_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["enable_external_field_solver_bridge", "enable_external_volume_solver_bridge", "distribution_model"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_ref", "leo_ref_ram_facing"],
+      "reference_matrix_cases": ["geo_ecss_kapton_native_volume_hybrid_blend", "geo_ecss_kapton_native_volume_external_bridge", "leo_ref_ram_facing_axisym_distribution"]
+    },
+    {
+      "family_id": "vol_mesh",
+      "metadata_keys": ["surface_native_volume_parity_mesh_route", "surface_native_volume_parity_mesh_family_signature", "surface_native_volume_parity_mesh_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["enable_external_field_solver_bridge", "enable_external_volume_solver_bridge", "enable_body_patch_circuit", "interfaces"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_ref", "geo_ecss_kapton_pic_circuit"],
+      "reference_matrix_cases": ["geo_ecss_kapton_native_volume_hybrid_blend", "geo_ecss_kapton_native_volume_external_bridge"]
+    },
+    {
+      "family_id": "circ_circuit",
+      "metadata_keys": ["surface_circ_circuit_family_signature", "surface_circ_active_circuit_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["enable_body_patch_circuit", "bodies", "patches", "interfaces"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_pic_circuit", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    },
+    {
+      "family_id": "circ_circfield",
+      "metadata_keys": ["surface_circ_field_family_signature", "surface_circ_active_field_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["bodies", "patches", "interfaces"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json"],
+      "preset_names": ["geo_ecss_kapton_pic_circuit", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    },
+    {
+      "family_id": "circ_didv",
+      "metadata_keys": ["surface_circ_didv_family_signature", "surface_circ_active_didv_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["enable_body_patch_circuit", "shared_surface_global_coupled_iterations", "shared_surface_reference_blend"],
+      "config_source_files": ["scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_pic_circuit", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    },
+    {
+      "family_id": "solver_circuit",
+      "metadata_keys": ["surface_solver_circuit_family_signature", "surface_solver_active_circuit_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["coupling_mode", "convergence_policy"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_pic_circuit", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct", "leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    },
+    {
+      "family_id": "solver_util",
+      "metadata_keys": ["surface_solver_util_route", "surface_solver_util_family_signature", "surface_solver_util_active_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp", "scripts/run/surface_reference_matrix.json"],
+      "config_keys": ["coupling_mode", "convergence_policy", "volume_linear_solver_policy"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_pic_circuit", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct", "leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    },
+    {
+      "family_id": "solver_electromag",
+      "metadata_keys": ["surface_solver_electromag_family_signature", "surface_solver_active_electromag_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["volume_linear_solver_policy", "coupling_mode", "convergence_policy"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_surface_pic_direct", "leo_pic_circuit_ram_facing_hybrid"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct", "leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    },
+    {
+      "family_id": "solver_matter",
+      "metadata_keys": ["surface_solver_matter_family_signature", "surface_solver_active_matter_family_signature"],
+      "metadata_source_files": ["Toolkit/Surface Charging/src/DensePlasmaSurfaceCharging.cpp"],
+      "config_keys": ["surface_pic_runtime", "enable_live_pic_window", "enable_pic_calibration", "enable_live_pic_mcc"],
+      "config_source_files": ["documentation/contracts/config_schema_v1.json", "scripts/run/surface_reference_matrix.json", "Toolkit/Surface Charging/test/SurfaceCharging_smoke_test.cpp"],
+      "preset_names": ["geo_ecss_kapton_pic_circuit", "leo_pic_circuit_ram_facing"],
+      "reference_matrix_cases": ["geo_ecss_kapton_surface_pic_direct", "leo_pic_circuit_ram_facing_hybrid_multi_patch"]
+    }
+  ]
+}

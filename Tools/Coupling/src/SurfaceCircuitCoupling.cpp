@@ -1,8 +1,10 @@
 #include "../include/SurfaceCircuitCoupling.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 namespace SCDAT
 {
@@ -11,6 +13,61 @@ namespace Coupling
 namespace
 {
 constexpr double kTwoPi = 6.28318530717958647692;
+constexpr std::array<const char*, 9> kSupportedCircFamilies = {
+    "Circuit",
+    "ElecComponent",
+    "SurfaceComponent",
+    "RCCabsCirc",
+    "RLCCirc",
+    "SIN",
+    "PULSE",
+    "PWL",
+    "EXP",
+};
+constexpr std::array<const char*, 3> kSupportedCircFieldFamilies = {
+    "CircField",
+    "CurrentDistribution",
+    "DirCircField",
+};
+constexpr std::array<const char*, 12> kSupportedDidvFamilies = {
+    "DIDV",
+    "SurfDIDV",
+    "SurfDIDVFromCurrentVariation",
+    "SurfDIDVFromLocalCurrentVariation",
+    "SurfDIDVFromMatrices",
+    "WeightedSurfDIDV",
+    "MultipleSurfDIDV",
+    "MultipleDIDV",
+    "ReducableDIDV",
+    "RedDIDVFromSurfDIDV",
+    "RedDIDVFromRegDIDV",
+    "DIDVOnCirc",
+};
+
+template <typename Range>
+std::string joinFamilyRange(const Range& families)
+{
+    std::string signature;
+    bool first = true;
+    for (const auto& family : families)
+    {
+        if (!first)
+        {
+            signature += "+";
+        }
+        first = false;
+        signature += family;
+    }
+    return signature;
+}
+
+void appendUniqueFamily(std::vector<std::string>& families, const char* family)
+{
+    if (std::find(families.begin(), families.end(), family) == families.end())
+    {
+        families.emplace_back(family);
+    }
+}
 
 void accumulateDidvTotals(double weight, double current_a, double didv_a_per_v,
                           double& total_current_a, double& total_didv_a_per_v)
@@ -67,6 +124,33 @@ void accumulateSurfaceCompositions(
         }
         accumulateDidvTotals(surface.surface_weight, surface_current_a, surface_didv_a_per_v,
                              total_current_a, total_didv_a_per_v);
+    }
+}
+
+void accumulateNodeComposition(const CircuitDidvNodeComposition& node,
+                               double& total_current_a,
+                               double& total_didv_a_per_v)
+{
+    bool consumed_semantic_terms = false;
+    switch (node.aggregation_kind)
+    {
+    case CircuitDidvAggregationKind::DirectSum:
+        accumulateDirectTerms(node.terms, total_current_a, total_didv_a_per_v);
+        consumed_semantic_terms = true;
+        break;
+    case CircuitDidvAggregationKind::WeightedTerms:
+        accumulateWeightedTerms(node.weighted_terms, total_current_a, total_didv_a_per_v,
+                                consumed_semantic_terms);
+        break;
+    case CircuitDidvAggregationKind::MultiSurface:
+        accumulateSurfaceCompositions(node.surface_compositions, total_current_a,
+                                      total_didv_a_per_v, consumed_semantic_terms);
+        break;
+    }
+
+    if (!consumed_semantic_terms)
+    {
+        accumulateDirectTerms(node.terms, total_current_a, total_didv_a_per_v);
     }
 }
 
@@ -257,6 +341,89 @@ double evaluateExcitationValue(const CircuitExcitationDescriptor& excitation, do
 }
 } // namespace
 
+CircuitFamilyView resolveCircuitFamilyView(const CircuitFamilyRouteInput& input)
+{
+    CircuitFamilyView view;
+    view.circ_family_count = kSupportedCircFamilies.size();
+    view.circ_family_signature = joinFamilyRange(kSupportedCircFamilies);
+    view.circfield_family_count = kSupportedCircFieldFamilies.size();
+    view.circfield_family_signature = joinFamilyRange(kSupportedCircFieldFamilies);
+    view.didv_family_count = kSupportedDidvFamilies.size();
+    view.didv_family_signature = joinFamilyRange(kSupportedDidvFamilies);
+
+    std::vector<std::string> active_circ_families;
+    std::vector<std::string> active_circfield_families;
+    std::vector<std::string> active_didv_families;
+
+    const bool circuit_active = input.has_circuit_model || input.node_count > 0;
+    if (circuit_active)
+    {
+        appendUniqueFamily(active_circ_families, "Circuit");
+        appendUniqueFamily(active_circ_families, "ElecComponent");
+        appendUniqueFamily(active_circfield_families, "CircField");
+        appendUniqueFamily(active_circfield_families, "DirCircField");
+        appendUniqueFamily(active_didv_families, "DIDV");
+        appendUniqueFamily(active_didv_families, "SurfDIDV");
+    }
+    if (input.branch_count > 0 || input.patch_count > 0)
+    {
+        appendUniqueFamily(active_circ_families, "SurfaceComponent");
+    }
+    if (input.enable_body_patch_circuit || input.branch_count > 0)
+    {
+        appendUniqueFamily(active_circ_families, "RCCabsCirc");
+    }
+    if (input.enable_reference_current_balance)
+    {
+        appendUniqueFamily(active_circ_families, "RLCCirc");
+        appendUniqueFamily(active_circfield_families, "CurrentDistribution");
+        appendUniqueFamily(active_didv_families, "SurfDIDVFromCurrentVariation");
+    }
+    if (input.has_off_diagonal_coupling)
+    {
+        appendUniqueFamily(active_didv_families, "SurfDIDVFromLocalCurrentVariation");
+        appendUniqueFamily(active_didv_families, "DIDVOnCirc");
+    }
+    if (input.has_weighted_didv_terms)
+    {
+        appendUniqueFamily(active_didv_families, "WeightedSurfDIDV");
+    }
+    if (input.has_multi_surface_didv || input.patch_count > 1)
+    {
+        appendUniqueFamily(active_didv_families, "MultipleSurfDIDV");
+        appendUniqueFamily(active_didv_families, "MultipleDIDV");
+    }
+    if (input.has_matrix_didv)
+    {
+        appendUniqueFamily(active_didv_families, "SurfDIDVFromMatrices");
+    }
+    if (input.has_regular_reduction)
+    {
+        appendUniqueFamily(active_didv_families, "ReducableDIDV");
+        appendUniqueFamily(active_didv_families, "RedDIDVFromRegDIDV");
+    }
+    if (input.has_surface_reduction)
+    {
+        appendUniqueFamily(active_didv_families, "ReducableDIDV");
+        appendUniqueFamily(active_didv_families, "RedDIDVFromSurfDIDV");
+    }
+    if (input.has_dynamic_excitations)
+    {
+        appendUniqueFamily(active_circ_families, "SIN");
+        appendUniqueFamily(active_circ_families, "PULSE");
+        appendUniqueFamily(active_circ_families, "PWL");
+        appendUniqueFamily(active_circ_families, "EXP");
+    }
+
+    view.active_circ_family_count = active_circ_families.size();
+    view.active_circ_family_signature = joinFamilyRange(active_circ_families);
+    view.active_circfield_family_count = active_circfield_families.size();
+    view.active_circfield_family_signature = joinFamilyRange(active_circfield_families);
+    view.active_didv_family_count = active_didv_families.size();
+    view.active_didv_family_signature = joinFamilyRange(active_didv_families);
+    return view;
+}
+
 SurfaceCircuitAssemblyResult assembleSurfaceCircuit(const CircuitAssembly& assembly)
 {
     return assembleSurfaceCircuit(assembly, {});
@@ -400,28 +567,7 @@ CircuitDidvCompositionResult composeCircuitDidv(const CircuitDidvCompositionInpu
         const auto& node = input.nodes[node_index];
         double total_current_a = 0.0;
         double total_didv_a_per_v = 0.0;
-
-        bool consumed_semantic_terms = false;
-        switch (node.aggregation_kind)
-        {
-        case CircuitDidvAggregationKind::DirectSum:
-            accumulateDirectTerms(node.terms, total_current_a, total_didv_a_per_v);
-            consumed_semantic_terms = true;
-            break;
-        case CircuitDidvAggregationKind::WeightedTerms:
-            accumulateWeightedTerms(node.weighted_terms, total_current_a, total_didv_a_per_v,
-                                    consumed_semantic_terms);
-            break;
-        case CircuitDidvAggregationKind::MultiSurface:
-            accumulateSurfaceCompositions(node.surface_compositions, total_current_a,
-                                          total_didv_a_per_v, consumed_semantic_terms);
-            break;
-        }
-
-        if (!consumed_semantic_terms)
-        {
-            accumulateDirectTerms(node.terms, total_current_a, total_didv_a_per_v);
-        }
+        accumulateNodeComposition(node, total_current_a, total_didv_a_per_v);
 
         result.node_summaries[node_index] =
             CircuitDidvNodeSummary{total_current_a, total_didv_a_per_v};
@@ -440,6 +586,145 @@ CircuitDidvCompositionResult composeCircuitDidv(const CircuitDidvCompositionInpu
     }
 
     return result;
+}
+
+CircuitDidvCompositionInput composeSurfDidvFromMatrices(
+    const CircuitSurfDidvMatrixInput& input)
+{
+    CircuitDidvCompositionInput composition;
+    composition.nodes.resize(input.node_count);
+    composition.off_diagonal_entries = input.off_diagonal_entries;
+
+    for (const auto& term : input.terms)
+    {
+        if (term.node_index >= composition.nodes.size())
+        {
+            continue;
+        }
+        composition.nodes[term.node_index].terms.push_back(
+            CircuitDidvTerm{term.name, term.current_a, term.didv_a_per_v});
+    }
+
+    return composition;
+}
+
+ReducableCircuitDidv makeReducableCircuitDidv(const CircuitDidvCompositionInput& composition)
+{
+    ReducableCircuitDidv reducable;
+    reducable.route_kind = CircuitDidvRouteKind::DirectComposition;
+    reducable.composition = composition;
+    reducable.reduced_node_count = composition.nodes.size();
+    reducable.node_reduction_map.resize(composition.nodes.size());
+    for (std::size_t index = 0; index < composition.nodes.size(); ++index)
+    {
+        reducable.node_reduction_map[index] = index;
+    }
+    return reducable;
+}
+
+CircuitDidvCompositionInput reduceCircuitDidv(const ReducableCircuitDidv& reducable_didv)
+{
+    if (reducable_didv.composition.nodes.empty() ||
+        reducable_didv.node_reduction_map.empty() ||
+        reducable_didv.reduced_node_count == 0)
+    {
+        return reducable_didv.composition;
+    }
+
+    CircuitDidvCompositionInput reduced;
+    reduced.nodes.resize(reducable_didv.reduced_node_count);
+
+    const auto copy_summary_into_node = [](const CircuitDidvNodeComposition& source,
+                                           CircuitDidvNodeComposition& target,
+                                           const std::string& label) {
+        double total_current_a = 0.0;
+        double total_didv_a_per_v = 0.0;
+        accumulateNodeComposition(source, total_current_a, total_didv_a_per_v);
+        target.terms.push_back(CircuitDidvTerm{label, total_current_a, total_didv_a_per_v});
+        target.additional_rhs_a += source.additional_rhs_a;
+        target.additional_diagonal_a_per_v += source.additional_diagonal_a_per_v;
+    };
+
+    for (std::size_t node_index = 0;
+         node_index < reducable_didv.composition.nodes.size() &&
+         node_index < reducable_didv.node_reduction_map.size();
+         ++node_index)
+    {
+        const std::size_t reduced_index = reducable_didv.node_reduction_map[node_index];
+        if (reduced_index >= reduced.nodes.size())
+        {
+            continue;
+        }
+        copy_summary_into_node(reducable_didv.composition.nodes[node_index], reduced.nodes[reduced_index],
+                               "reduced_node_" + std::to_string(node_index));
+    }
+
+    for (const auto& entry : reducable_didv.composition.off_diagonal_entries)
+    {
+        if (entry.row_node >= reducable_didv.node_reduction_map.size() ||
+            entry.column_node >= reducable_didv.node_reduction_map.size())
+        {
+            continue;
+        }
+        const std::size_t reduced_row = reducable_didv.node_reduction_map[entry.row_node];
+        const std::size_t reduced_column =
+            reducable_didv.node_reduction_map[entry.column_node];
+        if (reduced_row >= reduced.nodes.size() || reduced_column >= reduced.nodes.size())
+        {
+            continue;
+        }
+        if (reduced_row == reduced_column)
+        {
+            reduced.nodes[reduced_row].additional_diagonal_a_per_v += entry.coefficient_a_per_v;
+            continue;
+        }
+
+        auto found = false;
+        for (auto& reduced_entry : reduced.off_diagonal_entries)
+        {
+            if (reduced_entry.row_node == reduced_row &&
+                reduced_entry.column_node == reduced_column)
+            {
+                reduced_entry.coefficient_a_per_v += entry.coefficient_a_per_v;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            reduced.off_diagonal_entries.push_back(
+                SurfaceCircuitLinearization::OffDiagonalEntry{
+                    reduced_row, reduced_column, entry.coefficient_a_per_v});
+        }
+    }
+
+    return reduced;
+}
+
+CircuitDidvCompositionInput reduceCircuitDidvFromSurfDidv(
+    const CircuitSurfDidvMatrixInput& input,
+    const std::vector<std::size_t>& node_reduction_map,
+    std::size_t reduced_node_count)
+{
+    ReducableCircuitDidv reducable;
+    reducable.route_kind = CircuitDidvRouteKind::ReducedSurfDidv;
+    reducable.composition = composeSurfDidvFromMatrices(input);
+    reducable.node_reduction_map = node_reduction_map;
+    reducable.reduced_node_count = reduced_node_count;
+    return reduceCircuitDidv(reducable);
+}
+
+CircuitDidvCompositionInput reduceCircuitDidvFromRegularDidv(
+    const CircuitDidvCompositionInput& input,
+    const std::vector<std::size_t>& node_reduction_map,
+    std::size_t reduced_node_count)
+{
+    ReducableCircuitDidv reducable;
+    reducable.route_kind = CircuitDidvRouteKind::ReducedRegularDidv;
+    reducable.composition = input;
+    reducable.node_reduction_map = node_reduction_map;
+    reducable.reduced_node_count = reduced_node_count;
+    return reduceCircuitDidv(reducable);
 }
 
 void SurfaceCircuitCoupling::clear()

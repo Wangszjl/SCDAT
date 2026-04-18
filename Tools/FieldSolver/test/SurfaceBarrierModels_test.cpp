@@ -91,6 +91,27 @@ TEST(SurfaceBarrierModelsTest, ScalerKindRoutingResolvesExpectedFamilies)
         SCDAT::FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
     EXPECT_EQ(fallback_kind,
               SCDAT::FieldSolver::SurfaceBarrierScalerKind::SecondaryRecollection);
+
+    material.setScalarProperty("surface_photo_barrier_scaler_kind", 7.0);
+    EXPECT_EQ(SCDAT::FieldSolver::resolveSurfaceBarrierScalerKind(
+                  material, "surface_photo_barrier_scaler_kind",
+                  SCDAT::FieldSolver::SurfaceBarrierScalerKind::VariableBarrier),
+              SCDAT::FieldSolver::SurfaceBarrierScalerKind::GlobalTempCurrent);
+    material.setScalarProperty("surface_photo_barrier_scaler_kind", 8.0);
+    EXPECT_EQ(SCDAT::FieldSolver::resolveSurfaceBarrierScalerKind(
+                  material, "surface_photo_barrier_scaler_kind",
+                  SCDAT::FieldSolver::SurfaceBarrierScalerKind::VariableBarrier),
+              SCDAT::FieldSolver::SurfaceBarrierScalerKind::SmoothedGlobalTempCurrent);
+    material.setScalarProperty("surface_photo_barrier_scaler_kind", 9.0);
+    EXPECT_EQ(SCDAT::FieldSolver::resolveSurfaceBarrierScalerKind(
+                  material, "surface_photo_barrier_scaler_kind",
+                  SCDAT::FieldSolver::SurfaceBarrierScalerKind::VariableBarrier),
+              SCDAT::FieldSolver::SurfaceBarrierScalerKind::CurrentVariation);
+    material.setScalarProperty("surface_photo_barrier_scaler_kind", 10.0);
+    EXPECT_EQ(SCDAT::FieldSolver::resolveSurfaceBarrierScalerKind(
+                  material, "surface_photo_barrier_scaler_kind",
+                  SCDAT::FieldSolver::SurfaceBarrierScalerKind::VariableBarrier),
+              SCDAT::FieldSolver::SurfaceBarrierScalerKind::LocalVariation);
 }
 
 TEST(SurfaceBarrierModelsTest, EmissionBarrierBundleRoutesConfiguredScalerFamilies)
@@ -143,6 +164,222 @@ TEST(SurfaceBarrierModelsTest, EmissionBarrierBundleRoutesConfiguredScalerFamili
               default_outputs.escaped_ion_secondary.scaling);
 }
 
+TEST(SurfaceBarrierModelsTest, AutomaticBarrierCurrentScalerSelectsExpectedInnerFamilies)
+{
+    SCDAT::Material::MaterialProperty material(13, SCDAT::Mesh::MaterialType::DIELECTRIC,
+                                               "automatic-routing");
+    material.setPhotoelectronTemperatureEv(2.0);
+    material.setWorkFunctionEv(4.5);
+    material.setScalarProperty("surface_automatic_fn_field_threshold_v_per_m", 5.0e6);
+    material.setScalarProperty("surface_automatic_lte_temperature_threshold_ev", 2.5);
+    material.setScalarProperty("surface_automatic_oml_gap_threshold_v", 1.0);
+    material.setScalarProperty("surface_automatic_oml_field_threshold_v_per_m", 2.0e5);
+
+    SCDAT::FieldSolver::SurfaceBarrierState fn_state;
+    fn_state.local_potential_v = 2.0;
+    fn_state.reference_potential_v = 0.0;
+    fn_state.normal_electric_field_v_per_m = 8.0e6;
+    fn_state.emission_temperature_ev = 1.5;
+
+    const auto fn_decision = SCDAT::FieldSolver::resolveSurfaceBarrierScalerDecision(
+        material, fn_state, "surface_photo_barrier_scaler_kind",
+        SCDAT::FieldSolver::SurfaceBarrierScalerKind::AutomaticBarrierCurrent);
+    EXPECT_EQ(fn_decision.configured_kind,
+              SCDAT::FieldSolver::SurfaceBarrierScalerKind::AutomaticBarrierCurrent);
+    EXPECT_EQ(fn_decision.resolved_kind,
+              SCDAT::FieldSolver::SurfaceBarrierScalerKind::FowlerNordheimCurrent);
+    EXPECT_EQ(fn_decision.resolved_family, "spis_fowler_nordheim_current_scaler_v1");
+
+    SCDAT::FieldSolver::SurfaceBarrierState lte_state;
+    lte_state.local_potential_v = 0.3;
+    lte_state.reference_potential_v = 0.0;
+    lte_state.normal_electric_field_v_per_m = 1.0e4;
+    lte_state.emission_temperature_ev = 3.0;
+
+    const auto lte_decision = SCDAT::FieldSolver::resolveSurfaceBarrierScalerDecision(
+        material, lte_state, "surface_photo_barrier_scaler_kind",
+        SCDAT::FieldSolver::SurfaceBarrierScalerKind::AutomaticBarrierCurrent);
+    EXPECT_EQ(lte_decision.resolved_kind,
+              SCDAT::FieldSolver::SurfaceBarrierScalerKind::LteOmlCurrent);
+
+    SCDAT::FieldSolver::SurfaceBarrierState variable_state;
+    variable_state.local_potential_v = 4.0;
+    variable_state.reference_potential_v = 0.0;
+    variable_state.normal_electric_field_v_per_m = 6.0e5;
+    variable_state.emission_temperature_ev = 1.2;
+
+    const auto variable_decision = SCDAT::FieldSolver::resolveSurfaceBarrierScalerDecision(
+        material, variable_state, "surface_photo_barrier_scaler_kind",
+        SCDAT::FieldSolver::SurfaceBarrierScalerKind::AutomaticBarrierCurrent);
+    EXPECT_EQ(variable_decision.resolved_kind,
+              SCDAT::FieldSolver::SurfaceBarrierScalerKind::VariableBarrier);
+}
+
+TEST(SurfaceBarrierModelsTest, MultipleCurrentScalerBlendsConfiguredInnerScalers)
+{
+    SCDAT::Material::MaterialProperty material(14, SCDAT::Mesh::MaterialType::DIELECTRIC,
+                                               "multiple-routing");
+    material.setPhotoelectronTemperatureEv(2.0);
+    material.setWorkFunctionEv(4.5);
+    material.setScalarProperty("surface_photo_barrier_scaler_kind", 6.0);
+    material.setScalarProperty("surface_photo_multiple_current_primary_scaler_kind", 1.0);
+    material.setScalarProperty("surface_photo_multiple_current_secondary_scaler_kind", 2.0);
+    material.setScalarProperty("surface_photo_multiple_current_tertiary_scaler_kind", 4.0);
+    material.setScalarProperty("surface_photo_multiple_current_primary_weight", 0.2);
+    material.setScalarProperty("surface_photo_multiple_current_secondary_weight", 0.3);
+    material.setScalarProperty("surface_photo_multiple_current_tertiary_weight", 0.5);
+
+    SCDAT::FieldSolver::SurfaceBarrierState state;
+    state.local_potential_v = 2.5;
+    state.reference_potential_v = 0.0;
+    state.normal_electric_field_v_per_m = 9.0e6;
+    state.emission_temperature_ev = 2.0;
+
+    const auto decision = SCDAT::FieldSolver::resolveSurfaceBarrierScalerDecision(
+        material, state, "surface_photo_barrier_scaler_kind",
+        SCDAT::FieldSolver::SurfaceBarrierScalerKind::VariableBarrier);
+    EXPECT_EQ(decision.configured_kind, SCDAT::FieldSolver::SurfaceBarrierScalerKind::MultipleCurrent);
+    EXPECT_NE(decision.resolved_family.find("spis_multiple_current_scaler_v1["),
+              std::string::npos);
+
+    const auto multiple = SCDAT::FieldSolver::evaluateConfiguredSurfaceBarrierScaler(
+        material, state, 2.0e-6, "surface_photo_barrier_scaler_kind",
+        SCDAT::FieldSolver::SurfaceBarrierScalerKind::VariableBarrier);
+    const auto variable = SCDAT::FieldSolver::selectSurfaceBarrierScaler(
+                              SCDAT::FieldSolver::SurfaceBarrierScalerKind::VariableBarrier)
+                              .evaluate(material, state, 2.0e-6);
+    const auto oml = SCDAT::FieldSolver::selectSurfaceBarrierScaler(
+                         SCDAT::FieldSolver::SurfaceBarrierScalerKind::OmlCurrent)
+                         .evaluate(material, state, 2.0e-6);
+    const auto fn = SCDAT::FieldSolver::selectSurfaceBarrierScaler(
+                        SCDAT::FieldSolver::SurfaceBarrierScalerKind::FowlerNordheimCurrent)
+                        .evaluate(material, state, 2.0e-6);
+    const double expected_scaling =
+        0.2 * variable.scaling + 0.3 * oml.scaling + 0.5 * fn.scaling;
+    const double expected_escaped_current =
+        0.2 * variable.escaped_current_a_per_m2 + 0.3 * oml.escaped_current_a_per_m2 +
+        0.5 * fn.escaped_current_a_per_m2;
+
+    ASSERT_TRUE(multiple.valid);
+    EXPECT_NEAR(multiple.scaling, expected_scaling, 1.0e-12);
+    EXPECT_NEAR(multiple.escaped_current_a_per_m2, expected_escaped_current, 1.0e-12);
+    EXPECT_NEAR(multiple.escaped_current_a_per_m2 + multiple.recollected_current_a_per_m2,
+                2.0e-6, 1.0e-12);
+}
+
+TEST(SurfaceBarrierModelsTest, GlobalTempCurrentScalerUsesConfiguredGlobalTemperature)
+{
+    SCDAT::Material::MaterialProperty material(15, SCDAT::Mesh::MaterialType::DIELECTRIC,
+                                               "global-temp");
+    material.setPhotoelectronTemperatureEv(1.5);
+    material.setScalarProperty("surface_photo_global_temp_ev", 8.0);
+    material.setScalarProperty("surface_photo_global_temp_scale", 1.0);
+
+    SCDAT::FieldSolver::SurfaceBarrierState state;
+    state.local_potential_v = 4.0;
+    state.reference_potential_v = 0.0;
+    state.emission_temperature_ev = 1.0;
+
+    const auto global_eval = SCDAT::FieldSolver::GlobalTempCurrentScaler("surface_photo")
+                                 .evaluate(material, state, 1.0e-6);
+    const auto variable_eval = SCDAT::FieldSolver::VariableBarrierScaler()
+                                   .evaluate(material, state, 1.0e-6);
+
+    ASSERT_TRUE(global_eval.valid);
+    ASSERT_TRUE(variable_eval.valid);
+    EXPECT_STREQ(SCDAT::FieldSolver::GlobalTempCurrentScaler("surface_photo").family(),
+                 "spis_global_temp_current_scaler_v1");
+    EXPECT_GT(global_eval.scaling, variable_eval.scaling);
+    EXPECT_LT(std::abs(global_eval.didv_a_per_m2_per_v /
+                       std::max(1.0e-18, global_eval.escaped_current_a_per_m2)),
+              std::abs(variable_eval.didv_a_per_m2_per_v /
+                       std::max(1.0e-18, variable_eval.escaped_current_a_per_m2)));
+}
+
+TEST(SurfaceBarrierModelsTest, SmoothedGlobalTempCurrentScalerBlendsLocalAndGlobalTemperature)
+{
+    SCDAT::Material::MaterialProperty material(16, SCDAT::Mesh::MaterialType::DIELECTRIC,
+                                               "smoothed-temp");
+    material.setPhotoelectronTemperatureEv(1.5);
+    material.setScalarProperty("surface_photo_global_temp_ev", 9.0);
+    material.setScalarProperty("surface_photo_smoothed_temp_weight", 0.25);
+
+    SCDAT::FieldSolver::SurfaceBarrierState state;
+    state.local_potential_v = 6.0;
+    state.reference_potential_v = 0.0;
+    state.emission_temperature_ev = 1.0;
+
+    const auto smooth_eval = SCDAT::FieldSolver::SmoothedGlobalTempCurrentScaler("surface_photo")
+                                 .evaluate(material, state, 1.0e-6);
+    const auto global_eval = SCDAT::FieldSolver::GlobalTempCurrentScaler("surface_photo")
+                                 .evaluate(material, state, 1.0e-6);
+    const auto variable_eval = SCDAT::FieldSolver::VariableBarrierScaler()
+                                   .evaluate(material, state, 1.0e-6);
+
+    ASSERT_TRUE(smooth_eval.valid);
+    EXPECT_GT(smooth_eval.scaling, variable_eval.scaling);
+    EXPECT_LT(smooth_eval.scaling, global_eval.scaling);
+}
+
+TEST(SurfaceBarrierModelsTest, CurrentVariationScalerUsesConfiguredGlobalReferenceState)
+{
+    SCDAT::Material::MaterialProperty material(17, SCDAT::Mesh::MaterialType::DIELECTRIC,
+                                               "current-variation");
+    material.setPhotoelectronTemperatureEv(2.0);
+    material.setScalarProperty("surface_photo_current_variation_base_scaler_kind", 1.0);
+    material.setScalarProperty("surface_photo_current_variation_reference_scaler_kind", 2.0);
+    material.setScalarProperty("surface_photo_current_variation_global_potential_v", 8.0);
+    material.setScalarProperty("surface_photo_current_variation_global_temperature_ev", 1.0);
+    material.setScalarProperty("surface_photo_current_variation_gain", 1.5);
+
+    SCDAT::FieldSolver::SurfaceBarrierState state;
+    state.local_potential_v = 1.0;
+    state.reference_potential_v = 0.0;
+    state.emission_temperature_ev = 2.0;
+
+    const auto variation_eval = SCDAT::FieldSolver::CurrentVariationScaler("surface_photo")
+                                    .evaluate(material, state, 1.0e-6);
+    const auto base_eval = SCDAT::FieldSolver::VariableBarrierScaler()
+                               .evaluate(material, state, 1.0e-6);
+
+    ASSERT_TRUE(variation_eval.valid);
+    EXPECT_STREQ(SCDAT::FieldSolver::CurrentVariationScaler("surface_photo").family(),
+                 "spis_current_variation_scaler_v1");
+    EXPECT_LT(variation_eval.scaling, base_eval.scaling);
+    EXPECT_TRUE(std::isfinite(variation_eval.didv_a_per_m2_per_v));
+}
+
+TEST(SurfaceBarrierModelsTest, LocalVariationScalerTracksLocalReferenceState)
+{
+    SCDAT::Material::MaterialProperty material(18, SCDAT::Mesh::MaterialType::DIELECTRIC,
+                                               "local-variation");
+    material.setPhotoelectronTemperatureEv(2.0);
+    material.setScalarProperty("surface_photo_current_variation_base_scaler_kind", 1.0);
+    material.setScalarProperty("surface_photo_current_variation_reference_scaler_kind", 1.0);
+    material.setScalarProperty("surface_photo_current_variation_gain", 0.5);
+    material.setScalarProperty("surface_photo_local_variation_gain", 1.0);
+    material.setScalarProperty("surface_photo_local_variation_potential_offset_v", 3.0);
+    material.setScalarProperty("surface_photo_local_variation_field_scale", 1.5);
+
+    SCDAT::FieldSolver::SurfaceBarrierState state;
+    state.local_potential_v = 1.0;
+    state.reference_potential_v = 0.0;
+    state.normal_electric_field_v_per_m = 2.0e5;
+    state.emission_temperature_ev = 2.0;
+
+    const auto global_variation = SCDAT::FieldSolver::CurrentVariationScaler("surface_photo")
+                                      .evaluate(material, state, 1.0e-6);
+    const auto local_variation = SCDAT::FieldSolver::LocalVariationScaler("surface_photo")
+                                     .evaluate(material, state, 1.0e-6);
+
+    ASSERT_TRUE(global_variation.valid);
+    ASSERT_TRUE(local_variation.valid);
+    EXPECT_STREQ(SCDAT::FieldSolver::LocalVariationScaler("surface_photo").family(),
+                 "spis_local_variation_scaler_v1");
+    EXPECT_NE(local_variation.scaling, global_variation.scaling);
+    EXPECT_TRUE(std::isfinite(local_variation.didv_a_per_m2_per_v));
+}
+
 TEST(SurfaceBarrierModelsTest, EmissionBarrierBundleProducesResolvedComponentScales)
 {
     SCDAT::Material::MaterialProperty material(3, SCDAT::Mesh::MaterialType::DIELECTRIC, "bundle");
@@ -179,6 +416,40 @@ TEST(SurfaceBarrierModelsTest, EmissionBarrierBundleProducesResolvedComponentSca
     EXPECT_GT(outputs.backscatter_scale, 0.0);
     EXPECT_GT(outputs.photo_emission_scale, 0.0);
     EXPECT_TRUE(outputs.escaped_photo.valid);
+}
+
+TEST(SurfaceBarrierModelsTest, FowlerNordheimScalerUsesUnifiedFnAliasParameters)
+{
+    SCDAT::Material::MaterialProperty material(19, SCDAT::Mesh::MaterialType::CONDUCTOR,
+                                               "fn-alias-routing");
+    material.setWorkFunctionEv(4.2);
+    material.setScalarProperty("fn_threshold_field_v_per_m", 5.0e6);
+    material.setScalarProperty("fn_decay_coefficient_v_per_m_ev_1p5", 1.0e5);
+    material.setScalarProperty("fn_effective_sheath_floor_m", 1.0e-6);
+
+    SCDAT::FieldSolver::SurfaceBarrierState state;
+    state.local_potential_v = 6.0;
+    state.reference_potential_v = 0.0;
+    state.barrier_potential_v = 0.0;
+    state.normal_electric_field_v_per_m = 1.0e5;
+    state.emission_temperature_ev = 2.0;
+
+    SCDAT::FieldSolver::FowlerNordheimCurrentScaler scaler;
+    const auto enabled = scaler.evaluate(material, state, 1.0e-6);
+
+    ASSERT_TRUE(enabled.valid);
+    EXPECT_GT(enabled.scaling, 0.0);
+
+    material.setScalarProperty("fn_threshold_field_v_per_m", 7.0e6);
+    const auto disabled = scaler.evaluate(material, state, 1.0e-6);
+
+    EXPECT_TRUE(disabled.valid);
+    EXPECT_DOUBLE_EQ(disabled.scaling, 0.0);
+
+    material.setScalarProperty("fn_threshold_field_v_per_m", 5.0e6);
+    material.setScalarProperty("fn_decay_coefficient_v_per_m_ev_1p5", 4.0e5);
+    const auto stronger_decay = scaler.evaluate(material, state, 1.0e-6);
+    EXPECT_LT(stronger_decay.scaling, enabled.scaling);
 }
 
 TEST(SurfaceBarrierModelsTest, BuildsBarrierInputsFromComponentBundle)

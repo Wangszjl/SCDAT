@@ -97,6 +97,36 @@ struct VolumeLinearSolverRouting
 VolumeLinearSolverRouting resolveVolumeLinearSolverRouting(
     const VolumeLinearSolverRoutingInput& input);
 
+struct SurfaceSolverFamilyRouteInput
+{
+    bool has_circuit_solver = false;
+    bool has_electromag_solver = false;
+    bool has_matter_solver = false;
+    bool use_dense_electromag_solver = false;
+    bool use_iterative_electromag_solver = false;
+    bool has_magnetic_field = false;
+    bool has_pic_particle_coupling = false;
+};
+
+struct SurfaceSolverFamilyView
+{
+    std::size_t circuit_family_count = 0;
+    std::size_t active_circuit_family_count = 0;
+    std::string circuit_family_signature;
+    std::string active_circuit_family_signature;
+    std::size_t electromag_family_count = 0;
+    std::size_t active_electromag_family_count = 0;
+    std::string electromag_family_signature;
+    std::string active_electromag_family_signature;
+    std::size_t matter_family_count = 0;
+    std::size_t active_matter_family_count = 0;
+    std::string matter_family_signature;
+    std::string active_matter_family_signature;
+};
+
+SurfaceSolverFamilyView resolveSurfaceSolverFamilyView(
+    const SurfaceSolverFamilyRouteInput& input);
+
 } // namespace Solver
 } // namespace SCDAT
 

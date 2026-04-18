@@ -94,6 +94,25 @@ unsigned int resolveSamplerSeed(const PicMccSurfaceSamplerConfig& config)
     return seed;
 }
 
+std::vector<std::string> resolveOrderedSourceKeys(const PicMccSurfaceSamplerConfig& config)
+{
+    std::vector<std::string> resolved;
+    resolved.reserve(config.source_keys.size());
+    for (const auto& raw_key : config.source_keys)
+    {
+        const auto source_key = Basic::trimAscii(raw_key);
+        if (source_key.empty())
+        {
+            continue;
+        }
+        if (std::find(resolved.begin(), resolved.end(), source_key) == resolved.end())
+        {
+            resolved.push_back(source_key);
+        }
+    }
+    return resolved;
+}
+
 double topologySignature(const PicMccSurfaceSamplerConfig& config)
 {
     double signature = static_cast<double>(config.linked_boundary_face_count);
@@ -582,6 +601,30 @@ PicMccCurrentSample sampleSingleWindow(const PicMccSurfaceSamplerConfig& config)
         sample.ion_collection_current_density_a_per_m2 +
         sample.emitted_electron_current_density_a_per_m2;
     sample.total_collisions = collision_handler.getStatistics().total_collisions;
+
+    const auto source_keys = resolveOrderedSourceKeys(config);
+    if (!source_keys.empty())
+    {
+        sample.source_resolved_samples.reserve(source_keys.size());
+        for (const auto& source_key : source_keys)
+        {
+            PicMccSourceResolvedSample source_sample;
+            source_sample.source_key = source_key;
+            sample.source_resolved_samples.push_back(std::move(source_sample));
+        }
+
+        if (sample.source_resolved_samples.size() == 1)
+        {
+            auto& source_sample = sample.source_resolved_samples.front();
+            source_sample.collected_current_density_a_per_m2 =
+                sample.electron_collection_current_density_a_per_m2 +
+                sample.ion_collection_current_density_a_per_m2;
+            source_sample.superparticle_count =
+                static_cast<double>(particle_manager->getAllParticles().size());
+            source_sample.strictly_attributed = true;
+        }
+    }
+
     sample.valid =
         executed_steps > 0 && std::isfinite(sample.net_collection_current_density_a_per_m2);
     return sample;
@@ -629,5 +672,3 @@ PicMccCurrentSample PicMccSurfaceCurrentSampler::sampleWithDerivative(
 } // namespace SurfaceCharging
 } // namespace Toolkit
 } // namespace SCDAT
-
-

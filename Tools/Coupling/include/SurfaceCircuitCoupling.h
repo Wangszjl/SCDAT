@@ -158,6 +158,37 @@ struct CircuitDidvNodeSummary
     double total_didv_a_per_v = 0.0;
 };
 
+enum class CircuitDidvRouteKind
+{
+    DirectComposition,
+    SurfMatrices,
+    ReducedSurfDidv,
+    ReducedRegularDidv,
+};
+
+struct CircuitSurfDidvMatrixTerm
+{
+    std::string name;
+    std::size_t node_index = 0;
+    double current_a = 0.0;
+    double didv_a_per_v = 0.0;
+};
+
+struct CircuitSurfDidvMatrixInput
+{
+    std::size_t node_count = 0;
+    std::vector<CircuitSurfDidvMatrixTerm> terms;
+    std::vector<SurfaceCircuitLinearization::OffDiagonalEntry> off_diagonal_entries;
+};
+
+struct ReducableCircuitDidv
+{
+    CircuitDidvRouteKind route_kind = CircuitDidvRouteKind::DirectComposition;
+    CircuitDidvCompositionInput composition;
+    std::vector<std::size_t> node_reduction_map;
+    std::size_t reduced_node_count = 0;
+};
+
 struct CircuitDidvCompositionResult
 {
     std::vector<CircuitDidvNodeSummary> node_summaries;
@@ -166,6 +197,19 @@ struct CircuitDidvCompositionResult
 };
 
 CircuitDidvCompositionResult composeCircuitDidv(const CircuitDidvCompositionInput& input);
+CircuitDidvCompositionInput composeSurfDidvFromMatrices(
+    const CircuitSurfDidvMatrixInput& input);
+ReducableCircuitDidv makeReducableCircuitDidv(const CircuitDidvCompositionInput& composition);
+CircuitDidvCompositionInput reduceCircuitDidv(
+    const ReducableCircuitDidv& reducable_didv);
+CircuitDidvCompositionInput reduceCircuitDidvFromSurfDidv(
+    const CircuitSurfDidvMatrixInput& input,
+    const std::vector<std::size_t>& node_reduction_map,
+    std::size_t reduced_node_count);
+CircuitDidvCompositionInput reduceCircuitDidvFromRegularDidv(
+    const CircuitDidvCompositionInput& input,
+    const std::vector<std::size_t>& node_reduction_map,
+    std::size_t reduced_node_count);
 
 struct CircuitKernelTopologyState
 {
@@ -227,6 +271,41 @@ struct SurfaceCircuitAssemblyResult
     std::vector<SurfaceCircuitBranch> branches;
     SurfaceCircuitKernelInput kernel_input;
 };
+
+struct CircuitFamilyRouteInput
+{
+    bool has_circuit_model = false;
+    bool enable_reference_current_balance = false;
+    bool enable_body_patch_circuit = false;
+    bool has_dynamic_excitations = false;
+    bool has_weighted_didv_terms = false;
+    bool has_multi_surface_didv = false;
+    bool has_matrix_didv = false;
+    bool has_regular_reduction = false;
+    bool has_surface_reduction = false;
+    bool has_off_diagonal_coupling = false;
+    std::size_t node_count = 0;
+    std::size_t patch_count = 0;
+    std::size_t branch_count = 0;
+};
+
+struct CircuitFamilyView
+{
+    std::size_t circ_family_count = 0;
+    std::size_t active_circ_family_count = 0;
+    std::string circ_family_signature;
+    std::string active_circ_family_signature;
+    std::size_t circfield_family_count = 0;
+    std::size_t active_circfield_family_count = 0;
+    std::string circfield_family_signature;
+    std::string active_circfield_family_signature;
+    std::size_t didv_family_count = 0;
+    std::size_t active_didv_family_count = 0;
+    std::string didv_family_signature;
+    std::string active_didv_family_signature;
+};
+
+CircuitFamilyView resolveCircuitFamilyView(const CircuitFamilyRouteInput& input);
 
 SurfaceCircuitAssemblyResult assembleSurfaceCircuit(const CircuitAssembly& assembly);
 SurfaceCircuitAssemblyResult assembleSurfaceCircuit(

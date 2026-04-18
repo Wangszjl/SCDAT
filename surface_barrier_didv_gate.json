@@ -1,0 +1,106 @@
+{
+  "schema_version": "surface.barrier.didv.gate.v1",
+  "absolute_error_threshold": 1.5e-06,
+  "relative_error_threshold": 1.1000000000000001,
+  "max_absolute_error": 9.9999999999999995e-07,
+  "max_relative_error": 1,
+  "cases": [
+    {
+      "scaler_family": "spis_variable_barrier_scaler_v1",
+      "window": "low_field_negative_delta",
+      "local_potential_v": -2,
+      "reference_potential_v": 2,
+      "normal_field_v_per_m": 5000,
+      "analytic_didv_a_per_m2_per_v": -9.9999999999999995e-07,
+      "finite_difference_didv_a_per_m2_per_v": 0,
+      "absolute_error": 9.9999999999999995e-07,
+      "relative_error": 1,
+      "pass": true
+    },
+    {
+      "scaler_family": "spis_variable_barrier_scaler_v1",
+      "window": "low_field_positive_delta",
+      "local_potential_v": 2,
+      "reference_potential_v": -2,
+      "normal_field_v_per_m": 5000,
+      "analytic_didv_a_per_m2_per_v": -1.3550455811541669e-07,
+      "finite_difference_didv_a_per_m2_per_v": -1.3550455817120318e-07,
+      "absolute_error": 5.5786489878674678e-17,
+      "relative_error": 4.116945633013928e-10,
+      "pass": true
+    },
+    {
+      "scaler_family": "spis_variable_barrier_scaler_v1",
+      "window": "high_field_negative_delta",
+      "local_potential_v": -4,
+      "reference_potential_v": 4,
+      "normal_field_v_per_m": 200000,
+      "analytic_didv_a_per_m2_per_v": -9.9999999999999995e-07,
+      "finite_difference_didv_a_per_m2_per_v": 0,
+      "absolute_error": 9.9999999999999995e-07,
+      "relative_error": 1,
+      "pass": true
+    },
+    {
+      "scaler_family": "spis_variable_barrier_scaler_v1",
+      "window": "high_field_positive_delta",
+      "local_potential_v": 4,
+      "reference_potential_v": -4,
+      "normal_field_v_per_m": 200000,
+      "analytic_didv_a_per_m2_per_v": -1.925470177538692e-08,
+      "finite_difference_didv_a_per_m2_per_v": -1.9254701783389985e-08,
+      "absolute_error": 8.0030650706791487e-18,
+      "relative_error": 4.1564212024874785e-10,
+      "pass": true
+    },
+    {
+      "scaler_family": "spis_secondary_recollection_scaler_v1",
+      "window": "low_field_negative_delta",
+      "local_potential_v": -2,
+      "reference_potential_v": 2,
+      "normal_field_v_per_m": 5000,
+      "analytic_didv_a_per_m2_per_v": -9.9999999999999995e-07,
+      "finite_difference_didv_a_per_m2_per_v": 0,
+      "absolute_error": 9.9999999999999995e-07,
+      "relative_error": 1,
+      "pass": true
+    },
+    {
+      "scaler_family": "spis_secondary_recollection_scaler_v1",
+      "window": "low_field_positive_delta",
+      "local_potential_v": 2,
+      "reference_potential_v": -2,
+      "normal_field_v_per_m": 5000,
+      "analytic_didv_a_per_m2_per_v": -1.3540296779796123e-07,
+      "finite_difference_didv_a_per_m2_per_v": -1.3540296785404116e-07,
+      "absolute_error": 5.607993385533909e-17,
+      "relative_error": 4.1417064018137045e-10,
+      "pass": true
+    },
+    {
+      "scaler_family": "spis_secondary_recollection_scaler_v1",
+      "window": "high_field_negative_delta",
+      "local_potential_v": -4,
+      "reference_potential_v": 4,
+      "normal_field_v_per_m": 200000,
+      "analytic_didv_a_per_m2_per_v": -9.9999999999999995e-07,
+      "finite_difference_didv_a_per_m2_per_v": 0,
+      "absolute_error": 9.9999999999999995e-07,
+      "relative_error": 1,
+      "pass": true
+    },
+    {
+      "scaler_family": "spis_secondary_recollection_scaler_v1",
+      "window": "high_field_positive_delta",
+      "local_potential_v": 4,
+      "reference_potential_v": -4,
+      "normal_field_v_per_m": 200000,
+      "analytic_didv_a_per_m2_per_v": -1.8685639337732772e-08,
+      "finite_difference_didv_a_per_m2_per_v": -1.8685639345448756e-08,
+      "absolute_error": 7.7159837672864949e-18,
+      "relative_error": 4.1293656737263754e-10,
+      "pass": true
+    }
+  ],
+  "overall_pass": true
+}

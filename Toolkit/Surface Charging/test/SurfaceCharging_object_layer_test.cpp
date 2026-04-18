@@ -197,6 +197,79 @@ TEST(SurfaceTransitionEngineTest, AppliesLocalTimeSpinningAndSunFluxEventChain)
     EXPECT_FALSE(nighttime_transition.pic_recalibration_requested);
 }
 
+TEST(SurfaceTransitionEngineTest, ExposesObserverFinalizationAndSunFluxIntensityObjectHooks)
+{
+    SurfaceAdvanceTransitionInput input;
+    input.has_circuit_model = true;
+    input.patch_count = 3;
+    input.status.time_s = 8.0 * 3600.0;
+    input.status.steps_completed = 4;
+    input.config.enable_pic_calibration = true;
+    input.config.pic_recalibration_interval_steps = 4;
+    input.config.surface_pic_runtime_kind =
+        SCDAT::Toolkit::SurfaceCharging::SurfacePicRuntimeKind::GraphCoupledSharedSurface;
+    input.config.material.setScalarProperty("shared_surface_global_coupled_iterations", 6.0);
+    input.config.material.setScalarProperty("transition_local_time_enabled", 1.0);
+    input.config.material.setScalarProperty("transition_local_time_base_hour", 0.0);
+    input.config.material.setScalarProperty("transition_local_time_daylight_start_hour", 6.0);
+    input.config.material.setScalarProperty("transition_local_time_daylight_end_hour", 18.0);
+    input.config.material.setScalarProperty("transition_spinning_enabled", 1.0);
+    input.config.material.setScalarProperty("transition_spin_period_s", 24.0 * 3600.0);
+    input.config.material.setScalarProperty("transition_sun_flux_enabled", 1.0);
+    input.config.material.setScalarProperty("transition_sun_flux_base_scale", 1.4);
+    input.config.material.setScalarProperty("transition_sun_flux_spin_amplitude", 0.1);
+    input.config.material.setScalarProperty("transition_observer_enabled", 1.0);
+    input.config.material.setScalarProperty("transition_observer_checkpoint_dt_s", 900.0);
+    input.config.material.setScalarProperty("transition_finalization_enabled", 1.0);
+    input.config.material.setScalarProperty("transition_finalization_trigger_time_s", 3600.0);
+    input.config.material.setScalarProperty("transition_finalization_duration_s", 1800.0);
+    input.config.material.setScalarProperty(
+        "transition_finalization_validity_renormalization", 0.25);
+
+    const auto transition = evaluateSurfaceAdvanceTransition(input);
+
+    EXPECT_TRUE(transition.observer.active);
+    EXPECT_GE(transition.observer.observed_transition_count, 3u);
+    EXPECT_DOUBLE_EQ(transition.observer.checkpoint_dt_s, 900.0);
+    EXPECT_GT(transition.observer.next_checkpoint_time_s, input.status.time_s);
+
+    EXPECT_TRUE(transition.finalization.active);
+    EXPECT_DOUBLE_EQ(transition.finalization.trigger_time_s, 3600.0);
+    EXPECT_DOUBLE_EQ(transition.finalization.duration_s, 1800.0);
+    EXPECT_DOUBLE_EQ(transition.finalization.validity_renormalization, 0.25);
+
+    EXPECT_TRUE(transition.sun_flux_intensity.active);
+    EXPECT_GT(transition.sun_flux_intensity.intensity_scale, 0.0);
+    EXPECT_GT(transition.sun_flux_intensity.normalized_scale, 0.0);
+    EXPECT_GT(transition.sun_flux_intensity.daylight_factor, 0.0);
+    EXPECT_GT(transition.sun_flux_intensity.spin_factor, 0.0);
+
+    EXPECT_EQ(transition.object_layer.interface_layer_family_count, 3u);
+    EXPECT_EQ(transition.object_layer.active_interface_layer_family_count, 3u);
+    EXPECT_EQ(transition.object_layer.interface_layer_family_signature,
+              "TransitionInterface+Transition+SimulationParamUpdater");
+    EXPECT_EQ(transition.object_layer.active_interface_layer_family_signature,
+              "TransitionInterface+Transition+SimulationParamUpdater");
+    EXPECT_EQ(transition.object_layer.supported_family_count, 15u);
+    EXPECT_EQ(transition.object_layer.supported_family_signature,
+              "LocalTimeTransition+SpinningSpacecraft+SunFluxUpdater+ConductivityEvolution+"
+              "SourceFluxUpdater+SimulationParamUpdater+"
+              "SheathOrPresheathPoissonBCUpdater+RCCabsSCUpdater+VcrossBfieldUpdater+"
+              "BasicEclipseExit+TransientArtificialSources+LangmuirProbeTransition+"
+              "TransitionObserver+Finalization+SunFluxIntensityUpdater");
+    EXPECT_EQ(transition.object_layer.active_family_count, 7u);
+    EXPECT_EQ(transition.object_layer.active_family_signature,
+              "LocalTimeTransition+SpinningSpacecraft+SunFluxUpdater+"
+              "SimulationParamUpdater+TransitionObserver+Finalization+"
+              "SunFluxIntensityUpdater");
+    EXPECT_EQ(transition.object_layer.lifecycle_family_count, 3u);
+    EXPECT_EQ(transition.object_layer.active_lifecycle_family_count, 3u);
+    EXPECT_EQ(transition.object_layer.lifecycle_family_signature,
+              "TransitionObserver+Finalization+SunFluxIntensityUpdater");
+    EXPECT_EQ(transition.object_layer.active_lifecycle_family_signature,
+              "TransitionObserver+Finalization+SunFluxIntensityUpdater");
+}
+
 TEST(SurfaceTransitionEngineTest, EvaluatesExtendedEventBundleWhenSunFluxIsDisabled)
 {
     SurfaceAdvanceTransitionInput input;
@@ -225,6 +298,62 @@ TEST(SurfaceTransitionEngineTest, EvaluatesExtendedEventBundleWhenSunFluxIsDisab
     EXPECT_TRUE(transition.extended_events.basic_eclipse_exit_active);
     EXPECT_TRUE(transition.extended_events.transient_artificial_sources_active);
     EXPECT_TRUE(transition.extended_events.langmuir_probe_transition_active);
+    EXPECT_EQ(transition.object_layer.active_interface_layer_family_count, 3u);
+    EXPECT_EQ(transition.object_layer.active_interface_layer_family_signature,
+              "TransitionInterface+Transition+SimulationParamUpdater");
+    EXPECT_EQ(transition.object_layer.active_family_count, 10u);
+    EXPECT_EQ(transition.object_layer.active_family_signature,
+              "ConductivityEvolution+SourceFluxUpdater+SimulationParamUpdater+"
+              "SheathOrPresheathPoissonBCUpdater+RCCabsSCUpdater+VcrossBfieldUpdater+"
+              "BasicEclipseExit+TransientArtificialSources+LangmuirProbeTransition+"
+              "TransitionObserver");
+    EXPECT_EQ(transition.object_layer.active_lifecycle_family_count, 1u);
+    EXPECT_EQ(transition.object_layer.active_lifecycle_family_signature,
+              "TransitionObserver");
+}
+
+TEST(SurfaceTransitionEngineTest, ExtendedEventBundleDefaultsToDisabled)
+{
+    SurfaceAdvanceTransitionInput input;
+
+    const auto transition = evaluateSurfaceAdvanceTransition(input);
+
+    EXPECT_FALSE(transition.extended_events.conductivity_evolution_active);
+    EXPECT_FALSE(transition.extended_events.source_flux_updater_active);
+    EXPECT_FALSE(transition.extended_events.simulation_param_updater_active);
+    EXPECT_FALSE(transition.extended_events.sheath_or_presheath_poisson_bc_updater_active);
+    EXPECT_FALSE(transition.extended_events.rccabs_sc_updater_active);
+    EXPECT_FALSE(transition.extended_events.vcross_bfield_updater_active);
+    EXPECT_FALSE(transition.extended_events.basic_eclipse_exit_active);
+    EXPECT_FALSE(transition.extended_events.transient_artificial_sources_active);
+    EXPECT_FALSE(transition.extended_events.langmuir_probe_transition_active);
+    EXPECT_EQ(transition.object_layer.active_interface_layer_family_count, 0u);
+    EXPECT_EQ(transition.object_layer.active_family_count, 0u);
+    EXPECT_EQ(transition.object_layer.active_lifecycle_family_count, 0u);
+    EXPECT_TRUE(transition.object_layer.active_interface_layer_family_signature.empty());
+    EXPECT_TRUE(transition.object_layer.active_family_signature.empty());
+    EXPECT_TRUE(transition.object_layer.active_lifecycle_family_signature.empty());
+}
+
+TEST(SurfaceTransitionEngineTest, EnablesSelectedExtendedEventsIndependently)
+{
+    SurfaceAdvanceTransitionInput input;
+    input.config.material.setScalarProperty(
+        "transition_sheath_or_presheath_poisson_bc_updater_enabled", 1.0);
+    input.config.material.setScalarProperty("transition_rccabs_sc_updater_enabled", 1.0);
+    input.config.material.setScalarProperty("transition_langmuir_probe_transition_enabled", 1.0);
+
+    const auto transition = evaluateSurfaceAdvanceTransition(input);
+
+    EXPECT_TRUE(transition.extended_events.sheath_or_presheath_poisson_bc_updater_active);
+    EXPECT_TRUE(transition.extended_events.rccabs_sc_updater_active);
+    EXPECT_TRUE(transition.extended_events.langmuir_probe_transition_active);
+    EXPECT_FALSE(transition.extended_events.conductivity_evolution_active);
+    EXPECT_FALSE(transition.extended_events.source_flux_updater_active);
+    EXPECT_FALSE(transition.extended_events.simulation_param_updater_active);
+    EXPECT_FALSE(transition.extended_events.vcross_bfield_updater_active);
+    EXPECT_FALSE(transition.extended_events.basic_eclipse_exit_active);
+    EXPECT_FALSE(transition.extended_events.transient_artificial_sources_active);
 }
 
 } // namespace

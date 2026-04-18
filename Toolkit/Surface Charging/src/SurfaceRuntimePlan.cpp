@@ -110,6 +110,12 @@ SurfaceRuntimePlan compileSurfaceRuntimePlan(const SurfaceChargingScenarioPreset
     SurfaceRuntimePlan plan = buildRuntimePlan(preset.config);
     plan.source_name = preset.name;
     plan.source_description = preset.description;
+    plan.top_top_entrypoint = preset.top_top_entrypoint;
+    plan.scheduled_steps = preset.steps;
+    plan.adaptive_time_stepping = preset.adaptive_time_stepping;
+    plan.total_duration_s = preset.total_duration_s;
+    plan.minimum_time_step_s = preset.minimum_time_step_s;
+    plan.maximum_time_step_s = preset.maximum_time_step_s;
     return plan;
 }
 

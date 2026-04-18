@@ -355,6 +355,75 @@ std::vector<int> parseIntegerArray(const std::string& array_text)
     return values;
 }
 
+std::vector<std::string> parseStringArray(const std::string& array_text)
+{
+    std::vector<std::string> values;
+    if (array_text.empty() || array_text.front() != '[')
+    {
+        return values;
+    }
+
+    std::size_t index = 1;
+    while (index < array_text.size())
+    {
+        index = skipWhitespace(array_text, index);
+        if (index >= array_text.size() || array_text[index] == ']')
+        {
+            break;
+        }
+        if (array_text[index] == ',')
+        {
+            ++index;
+            continue;
+        }
+        if (array_text[index] != '"')
+        {
+            ++index;
+            continue;
+        }
+
+        ++index;
+        std::string value;
+        bool escaped = false;
+        while (index < array_text.size())
+        {
+            const char ch = array_text[index++];
+            if (escaped)
+            {
+                switch (ch)
+                {
+                case 'n':
+                    value.push_back('\n');
+                    break;
+                case 'r':
+                    value.push_back('\r');
+                    break;
+                case 't':
+                    value.push_back('\t');
+                    break;
+                default:
+                    value.push_back(ch);
+                    break;
+                }
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+            if (ch == '"')
+            {
+                break;
+            }
+            value.push_back(ch);
+        }
+        values.push_back(std::move(value));
+    }
+    return values;
+}
+
 void applyUnifiedSolverConfigFromJsonObject(
     const std::string& text, SCDAT::Coupling::Contracts::SolverConfig& solver_config)
 {
@@ -490,6 +559,137 @@ bool hasExplicitMaterialDefinition(const std::string& object_text)
            extractNumberField(object_text, "secondary_electron_yield").has_value() ||
            extractNumberField(object_text, "mass_density_kg_per_m3").has_value() ||
            extractObjectField(object_text, "scalar_properties").has_value();
+}
+
+bool applySurfaceInteractorFamilySelection(const std::string& text,
+                                           SCDAT::Material::MaterialProperty& material)
+{
+    const auto token = normalizeToken(text);
+    if (token.empty())
+    {
+        return false;
+    }
+
+    const auto set_family_code = [&](double family_code) {
+        material.setScalarProperty("surface_interactor_family_code", family_code);
+        material.setScalarProperty("surface_interactor_use_multiple_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_tabulated_sey_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_erosion_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_reflection_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_yield_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_photoemission_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_induced_conduct_model", 0.0);
+    };
+
+    if (token == "spismaterialmodelsurfaceinteractorv1" || token == "materialmodel" ||
+        token == "material")
+    {
+        set_family_code(0.0);
+        return true;
+    }
+    if (token == "spismaterialdfsurfaceinteractorv1" || token == "materialdf")
+    {
+        set_family_code(1.0);
+        return true;
+    }
+    if (token == "spisgenericdfsurfaceinteractorv1" || token == "genericdf" ||
+        token == "generic")
+    {
+        set_family_code(2.0);
+        return true;
+    }
+    if (token == "spismaxwelliansurfaceinteractorv1" || token == "maxwellian")
+    {
+        set_family_code(3.0);
+        return true;
+    }
+    if (token == "spismaxwelliansurfaceinteractorwithrecollectionv1" ||
+        token == "maxwellianwithrecollection" || token == "maxwellianrecollection")
+    {
+        set_family_code(4.0);
+        return true;
+    }
+    if (token == "spismultiplesurfaceinteractorv1" || token == "multiple")
+    {
+        set_family_code(5.0);
+        return true;
+    }
+    if (token == "spismultiplemaxwelliansurfaceinteractorv1" ||
+        token == "multiplemaxwellian")
+    {
+        set_family_code(6.0);
+        return true;
+    }
+    if (token == "spisyieldsurfaceinteractorv1" || token == "yield")
+    {
+        set_family_code(7.0);
+        return true;
+    }
+    if (token == "spisreflectionsurfaceinteractorv1" || token == "reflection")
+    {
+        set_family_code(8.0);
+        return true;
+    }
+    if (token == "spiserosionsurfaceinteractorv1" || token == "erosion")
+    {
+        set_family_code(9.0);
+        return true;
+    }
+    if (token == "spisimprovedphotoemissionsurfaceinteractorv1" ||
+        token == "improvedphotoemission" || token == "photoemission" || token == "photoem")
+    {
+        set_family_code(10.0);
+        return true;
+    }
+    if (token == "spisbasicinducedconductsurfaceinteractorv1" ||
+        token == "basicinducedconduction" || token == "inducedconduction" ||
+        token == "inducedconduct")
+    {
+        set_family_code(11.0);
+        return true;
+    }
+    if (token == "spistabulatedseysurfaceinteractorv1" || token == "tabulatedsey" ||
+        token == "tabulatedsecondaryyield")
+    {
+        set_family_code(12.0);
+        return true;
+    }
+    if (token == "spisrecollectedseysurfaceinteractorv1" || token == "recollectedsey")
+    {
+        set_family_code(13.0);
+        return true;
+    }
+    if (token == "spisdefaultpeesurfaceinteractorv1" || token == "spisdefaultpeemodelv1" ||
+        token == "defaultpee" || token == "defaultpeemodel")
+    {
+        set_family_code(14.0);
+        return true;
+    }
+    if (token == "spisdefaultseeesurfaceinteractorv1" || token == "spisdefaultseeeymodelv1" ||
+        token == "defaultseee" || token == "defaultseeeymodel")
+    {
+        set_family_code(15.0);
+        return true;
+    }
+    if (token == "spisdefaultseepsurfaceinteractorv1" || token == "spisdefaultseepmodelv1" ||
+        token == "defaultseep" || token == "defaultseepmodel")
+    {
+        set_family_code(16.0);
+        return true;
+    }
+    if (token == "spisdefaulterosionsurfaceinteractorv1" ||
+        token == "spisdefaulterosionmodelv1" || token == "defaulterosion" ||
+        token == "defaulterosionmodel")
+    {
+        set_family_code(17.0);
+        return true;
+    }
+    if (token == "spisdevicesurfaceinteractorv1" || token == "device")
+    {
+        set_family_code(18.0);
+        return true;
+    }
+    return false;
 }
 
 std::optional<SCDAT::Toolkit::SurfaceCharging::SecondaryElectronEmissionModel>
@@ -673,6 +873,151 @@ parseVolumeLinearSolverPolicy(const std::string& text)
     return kRegistry.tryParse(text);
 }
 
+std::optional<SCDAT::FieldSolver::NativeVolumeBoundaryConditionFamily>
+parseNativeVolumeBoundaryConditionFamily(const std::string& text)
+{
+    using SCDAT::FieldSolver::NativeVolumeBoundaryConditionFamily;
+    using Registry = SCDAT::Basic::StringModelRegistry<NativeVolumeBoundaryConditionFamily>;
+    static const Registry kRegistry{
+        {"voltagedependentmbc", NativeVolumeBoundaryConditionFamily::VoltageDependentMBC},
+        {"voltage_dependent_mbc", NativeVolumeBoundaryConditionFamily::VoltageDependentMBC},
+        {"mixeddirichletfourierpoissonbc",
+         NativeVolumeBoundaryConditionFamily::MixedDirichletFourierPoissonBC},
+        {"mixed_dirichlet_fourier_poisson_bc",
+         NativeVolumeBoundaryConditionFamily::MixedDirichletFourierPoissonBC},
+        {"fourierpoissonbc", NativeVolumeBoundaryConditionFamily::FourierPoissonBC},
+        {"fourier_poisson_bc", NativeVolumeBoundaryConditionFamily::FourierPoissonBC},
+        {"surfdistribmatterbc", NativeVolumeBoundaryConditionFamily::SurfDistribMatterBC},
+        {"surf_distrib_matter_bc", NativeVolumeBoundaryConditionFamily::SurfDistribMatterBC},
+        {"onesurfdistribtestablematterbc",
+         NativeVolumeBoundaryConditionFamily::OneSurfDistribTestableMatterBC},
+        {"one_surf_distrib_testable_matter_bc",
+         NativeVolumeBoundaryConditionFamily::OneSurfDistribTestableMatterBC},
+        {"capacitivevoltagegenerator",
+         NativeVolumeBoundaryConditionFamily::CapacitiveVoltageGenerator},
+        {"capacitive_voltage_generator",
+         NativeVolumeBoundaryConditionFamily::CapacitiveVoltageGenerator},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::FieldSolver::NativeVolumeFieldFamily>
+parseNativeVolumeFieldFamily(const std::string& text)
+{
+    using SCDAT::FieldSolver::NativeVolumeFieldFamily;
+    using Registry = SCDAT::Basic::StringModelRegistry<NativeVolumeFieldFamily>;
+    static const Registry kRegistry{
+        {"uniformbfield", NativeVolumeFieldFamily::UniformBField},
+        {"uniform_b_field", NativeVolumeFieldFamily::UniformBField},
+        {"solenoidbfield", NativeVolumeFieldFamily::SolenoidBField},
+        {"solenoid_b_field", NativeVolumeFieldFamily::SolenoidBField},
+        {"dipolarbfield", NativeVolumeFieldFamily::DipolarBField},
+        {"dipolar_b_field", NativeVolumeFieldFamily::DipolarBField},
+        {"multipleefield", NativeVolumeFieldFamily::MultipleEField},
+        {"multiple_e_field", NativeVolumeFieldFamily::MultipleEField},
+        {"emfield", NativeVolumeFieldFamily::EMField},
+        {"em_field", NativeVolumeFieldFamily::EMField},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::FieldSolver::NativeVolumeDistributionFamily>
+parseNativeVolumeDistributionFamily(const std::string& text)
+{
+    using SCDAT::FieldSolver::NativeVolumeDistributionFamily;
+    using Registry = SCDAT::Basic::StringModelRegistry<NativeVolumeDistributionFamily>;
+    static const Registry kRegistry{
+        {"picvoldistrib", NativeVolumeDistributionFamily::PICVolDistrib},
+        {"pic_vol_distrib", NativeVolumeDistributionFamily::PICVolDistrib},
+        {"picvoldistribnoacc", NativeVolumeDistributionFamily::PICVolDistribNoAcc},
+        {"pic_vol_distrib_no_acc", NativeVolumeDistributionFamily::PICVolDistribNoAcc},
+        {"picvoldistribupdatable", NativeVolumeDistributionFamily::PICVolDistribUpdatable},
+        {"pic_vol_distrib_updatable", NativeVolumeDistributionFamily::PICVolDistribUpdatable},
+        {"smartpicvoldistrib", NativeVolumeDistributionFamily::SmartPICVolDistrib},
+        {"smart_pic_vol_distrib", NativeVolumeDistributionFamily::SmartPICVolDistrib},
+        {"compositevoldistrib", NativeVolumeDistributionFamily::CompositeVolDistrib},
+        {"composite_vol_distrib", NativeVolumeDistributionFamily::CompositeVolDistrib},
+        {"backtrackingvoldistrib", NativeVolumeDistributionFamily::BackTrackingVolDistrib},
+        {"back_tracking_vol_distrib", NativeVolumeDistributionFamily::BackTrackingVolDistrib},
+        {"backtrackingpiccompositevoldistrib",
+         NativeVolumeDistributionFamily::BacktrackingPICCompositeVolDistrib},
+        {"backtracking_pic_composite_vol_distrib",
+         NativeVolumeDistributionFamily::BacktrackingPICCompositeVolDistrib},
+        {"backtrackingboltzmanncompositevoldistrib",
+         NativeVolumeDistributionFamily::BacktrackingBoltzmannCompositeVolDistrib},
+        {"backtracking_boltzmann_composite_vol_distrib",
+         NativeVolumeDistributionFamily::BacktrackingBoltzmannCompositeVolDistrib},
+        {"voldistrib", NativeVolumeDistributionFamily::VolDistrib},
+        {"vol_distrib", NativeVolumeDistributionFamily::VolDistrib},
+        {"nonpicvoldistrib", NativeVolumeDistributionFamily::NonPICVolDistrib},
+        {"non_pic_vol_distrib", NativeVolumeDistributionFamily::NonPICVolDistrib},
+        {"analyticvoldistrib", NativeVolumeDistributionFamily::AnalyticVolDistrib},
+        {"analytic_vol_distrib", NativeVolumeDistributionFamily::AnalyticVolDistrib},
+        {"multiplevoldistrib", NativeVolumeDistributionFamily::MultipleVolDistrib},
+        {"multiple_vol_distrib", NativeVolumeDistributionFamily::MultipleVolDistrib},
+        {"localmaxwellvoldistrib", NativeVolumeDistributionFamily::LocalMaxwellVolDistrib},
+        {"local_maxwell_vol_distrib", NativeVolumeDistributionFamily::LocalMaxwellVolDistrib},
+        {"localmaxwellboltzmannvoldistrib",
+         NativeVolumeDistributionFamily::LocalMaxwellBoltzmannVolDistrib},
+        {"local_maxwell_boltzmann_vol_distrib",
+         NativeVolumeDistributionFamily::LocalMaxwellBoltzmannVolDistrib},
+        {"globalmaxwellboltzmannvoldistrib",
+         NativeVolumeDistributionFamily::GlobalMaxwellBoltzmannVolDistrib},
+        {"global_maxwell_boltzmann_vol_distrib",
+         NativeVolumeDistributionFamily::GlobalMaxwellBoltzmannVolDistrib},
+        {"picboltzmannvoldistrib", NativeVolumeDistributionFamily::PICBoltzmannVolDistrib},
+        {"pic_boltzmann_vol_distrib", NativeVolumeDistributionFamily::PICBoltzmannVolDistrib},
+        {"steadymaxwellboltzmannvoldistrib",
+         NativeVolumeDistributionFamily::SteadyMaxwellBoltzmannVolDistrib},
+        {"steady_maxwell_boltzmann_vol_distrib",
+         NativeVolumeDistributionFamily::SteadyMaxwellBoltzmannVolDistrib},
+        {"unlimitedglobalmaxwellboltzmannvoldistrib",
+         NativeVolumeDistributionFamily::UnlimitedGlobalMaxwellBoltzmannVolDistrib},
+        {"unlimited_global_maxwell_boltzmann_vol_distrib",
+         NativeVolumeDistributionFamily::UnlimitedGlobalMaxwellBoltzmannVolDistrib},
+        {"surfacelimitedglobalmaxwellboltzmannvoldistrib",
+         NativeVolumeDistributionFamily::SurfaceLimitedGlobalMaxwellBoltzmannVolDistrib},
+        {"surface_limited_global_maxwell_boltzmann_vol_distrib",
+         NativeVolumeDistributionFamily::SurfaceLimitedGlobalMaxwellBoltzmannVolDistrib},
+        {"trunckatedglobalmaxwellboltzmannvoldistrib",
+         NativeVolumeDistributionFamily::TrunckatedGlobalMaxwellBoltzmannVolDistrib},
+        {"trunckated_global_maxwell_boltzmann_vol_distrib",
+         NativeVolumeDistributionFamily::TrunckatedGlobalMaxwellBoltzmannVolDistrib},
+        {"truncatedglobalmaxwellboltzmannvoldistrib",
+         NativeVolumeDistributionFamily::TrunckatedGlobalMaxwellBoltzmannVolDistrib},
+        {"truncated_global_maxwell_boltzmann_vol_distrib",
+         NativeVolumeDistributionFamily::TrunckatedGlobalMaxwellBoltzmannVolDistrib},
+        {"implicitablevoldistrib", NativeVolumeDistributionFamily::ImplicitableVolDistrib},
+        {"implicitable_vol_distrib", NativeVolumeDistributionFamily::ImplicitableVolDistrib},
+        {"updatable", NativeVolumeDistributionFamily::Updatable},
+    };
+    return kRegistry.tryParse(text);
+}
+
+std::optional<SCDAT::FieldSolver::NativeVolumeInteractionFamily>
+parseNativeVolumeInteractionFamily(const std::string& text)
+{
+    using SCDAT::FieldSolver::NativeVolumeInteractionFamily;
+    using Registry = SCDAT::Basic::StringModelRegistry<NativeVolumeInteractionFamily>;
+    static const Registry kRegistry{
+        {"mccinteractor", NativeVolumeInteractionFamily::MCCInteractor},
+        {"mcc_interactor", NativeVolumeInteractionFamily::MCCInteractor},
+        {"cexinteractor", NativeVolumeInteractionFamily::CEXInteractor},
+        {"cex_interactor", NativeVolumeInteractionFamily::CEXInteractor},
+        {"photoionization", NativeVolumeInteractionFamily::PhotoIonization},
+        {"photo_ionization", NativeVolumeInteractionFamily::PhotoIonization},
+        {"trajectoryinteractionfromfield",
+         NativeVolumeInteractionFamily::TrajectoryInteractionFromField},
+        {"trajectory_interaction_from_field",
+         NativeVolumeInteractionFamily::TrajectoryInteractionFromField},
+        {"spinningspacecrafttrajectory",
+         NativeVolumeInteractionFamily::SpinningSpacecraftTrajectory},
+        {"spinning_spacecraft_trajectory",
+         NativeVolumeInteractionFamily::SpinningSpacecraftTrajectory},
+    };
+    return kRegistry.tryParse(text);
+}
+
 std::optional<SCDAT::Toolkit::PlasmaAnalysis::PlasmaEnvironmentModelKind>
 parsePlasmaEnvironmentModelKind(const std::string& text)
 {
@@ -707,6 +1052,75 @@ parsePlasmaDistributionModelKind(const std::string& text)
         {"multipopulationhybrid", PlasmaDistributionModelKind::MultiPopulationHybrid},
         {"multi_population_hybrid", PlasmaDistributionModelKind::MultiPopulationHybrid},
         {"hybrid", PlasmaDistributionModelKind::MultiPopulationHybrid},
+        {"multiplesurf", PlasmaDistributionModelKind::MultipleSurf},
+        {"multiple_surf", PlasmaDistributionModelKind::MultipleSurf},
+        {"multiple_surface", PlasmaDistributionModelKind::MultipleSurf},
+        {"localmodifiedpearsoniv", PlasmaDistributionModelKind::LocalModifiedPearsonIV},
+        {"local_modified_pearson_iv", PlasmaDistributionModelKind::LocalModifiedPearsonIV},
+        {"pearsoniv", PlasmaDistributionModelKind::LocalModifiedPearsonIV},
+        {"pearson_iv", PlasmaDistributionModelKind::LocalModifiedPearsonIV},
+        {"localtabulated", PlasmaDistributionModelKind::LocalTabulated},
+        {"local_tabulated", PlasmaDistributionModelKind::LocalTabulated},
+        {"localtabulatedsurfdistrib", PlasmaDistributionModelKind::LocalTabulated},
+        {"twoaxestabulatedvelocity", PlasmaDistributionModelKind::TwoAxesTabulatedVelocity},
+        {"two_axes_tabulated_velocity", PlasmaDistributionModelKind::TwoAxesTabulatedVelocity},
+        {"twoaxestabulatedvelocitysurfdistrib",
+         PlasmaDistributionModelKind::TwoAxesTabulatedVelocity},
+        {"axisymtabulatedvelocity", PlasmaDistributionModelKind::AxisymTabulatedVelocity},
+        {"axisym_tabulated_velocity", PlasmaDistributionModelKind::AxisymTabulatedVelocity},
+        {"axisymtabulatedvelocitysurfdistrib",
+         PlasmaDistributionModelKind::AxisymTabulatedVelocity},
+        {"globalmaxwellboltzmann", PlasmaDistributionModelKind::GlobalMaxwellBoltzmann},
+        {"global_maxwell_boltzmann", PlasmaDistributionModelKind::GlobalMaxwellBoltzmann},
+        {"globalmaxwellboltzmannsurfdistrib",
+         PlasmaDistributionModelKind::GlobalMaxwellBoltzmann},
+        {"globalmaxwellboltzmann2", PlasmaDistributionModelKind::GlobalMaxwellBoltzmann2},
+        {"global_maxwell_boltzmann2", PlasmaDistributionModelKind::GlobalMaxwellBoltzmann2},
+        {"globalmaxwellboltzmann2surfdistrib",
+         PlasmaDistributionModelKind::GlobalMaxwellBoltzmann2},
+        {"globalmaxwell", PlasmaDistributionModelKind::GlobalMaxwell},
+        {"global_maxwell", PlasmaDistributionModelKind::GlobalMaxwell},
+        {"globalmaxwellsurfdistrib", PlasmaDistributionModelKind::GlobalMaxwell},
+        {"localmaxwell", PlasmaDistributionModelKind::LocalMaxwell},
+        {"local_maxwell", PlasmaDistributionModelKind::LocalMaxwell},
+        {"localmaxwellsurfdistrib", PlasmaDistributionModelKind::LocalMaxwell},
+        {"localmaxwell2", PlasmaDistributionModelKind::LocalMaxwell2},
+        {"local_maxwell2", PlasmaDistributionModelKind::LocalMaxwell2},
+        {"localmaxwell2surfdistrib", PlasmaDistributionModelKind::LocalMaxwell2},
+        {"recollmaxwell", PlasmaDistributionModelKind::RecollMaxwell},
+        {"recoll_maxwell", PlasmaDistributionModelKind::RecollMaxwell},
+        {"recollmaxwellsurfdistrib", PlasmaDistributionModelKind::RecollMaxwell},
+        {"picsurf", PlasmaDistributionModelKind::PICSurf},
+        {"pic_surf", PlasmaDistributionModelKind::PICSurf},
+        {"picsurfdistrib", PlasmaDistributionModelKind::PICSurf},
+        {"nonpicsurf", PlasmaDistributionModelKind::NonPICSurf},
+        {"non_pic_surf", PlasmaDistributionModelKind::NonPICSurf},
+        {"nonpicsurfdistrib", PlasmaDistributionModelKind::NonPICSurf},
+        {"genericsurf", PlasmaDistributionModelKind::GenericSurf},
+        {"generic_surf", PlasmaDistributionModelKind::GenericSurf},
+        {"genericsurfdistrib", PlasmaDistributionModelKind::GenericSurf},
+        {"globalsurf", PlasmaDistributionModelKind::GlobalSurf},
+        {"global_surf", PlasmaDistributionModelKind::GlobalSurf},
+        {"globalsurfdistrib", PlasmaDistributionModelKind::GlobalSurf},
+        {"localgenericsurf", PlasmaDistributionModelKind::LocalGenericSurf},
+        {"local_generic_surf", PlasmaDistributionModelKind::LocalGenericSurf},
+        {"localgenericsurfdistrib", PlasmaDistributionModelKind::LocalGenericSurf},
+        {"testablesurf", PlasmaDistributionModelKind::TestableSurf},
+        {"testable_surf", PlasmaDistributionModelKind::TestableSurf},
+        {"testablesurfdistrib", PlasmaDistributionModelKind::TestableSurf},
+        {"testablefora", PlasmaDistributionModelKind::TestableForA},
+        {"testable_for_a", PlasmaDistributionModelKind::TestableForA},
+        {"testableforasurfdistrib", PlasmaDistributionModelKind::TestableForA},
+        {"maxwellianthruster", PlasmaDistributionModelKind::MaxwellianThruster},
+        {"maxwellian_thruster", PlasmaDistributionModelKind::MaxwellianThruster},
+        {"maxwellianthrustersurfdistrib", PlasmaDistributionModelKind::MaxwellianThruster},
+        {"uniformvelocity", PlasmaDistributionModelKind::UniformVelocity},
+        {"uniform_velocity", PlasmaDistributionModelKind::UniformVelocity},
+        {"fluid", PlasmaDistributionModelKind::Fluid},
+        {"fluidsurfdistrib", PlasmaDistributionModelKind::Fluid},
+        {"fowlernordheim", PlasmaDistributionModelKind::FowlerNordheim},
+        {"fowler_nordheim", PlasmaDistributionModelKind::FowlerNordheim},
+        {"fowlernordheimsurfdistrib", PlasmaDistributionModelKind::FowlerNordheim},
     };
     return kRegistry.tryParse(text);
 }
@@ -1284,6 +1698,14 @@ void applyMaterialFromJsonObject(const std::string& object_text,
     {
         material.setMassDensityKgPerM3(*value);
     }
+    if (const auto family = extractStringField(object_text, "surface_interactor_family"); family)
+    {
+        if (!applySurfaceInteractorFamilySelection(*family, material))
+        {
+            throw std::runtime_error("Unsupported surface_interactor_family in material json: " +
+                                     *family);
+        }
+    }
 
     if (const auto scalar_properties = extractObjectField(object_text, "scalar_properties");
         scalar_properties)
@@ -1427,12 +1849,17 @@ void applyStructuredTopologyFromJson(
     SCDAT::Toolkit::SurfaceCharging::SurfaceChargingConfig& config)
 {
     using SCDAT::Toolkit::SurfaceCharging::BodyBoundaryGroup;
+    using SCDAT::Toolkit::SurfaceCharging::SurfaceComparisonTargetConfig;
     using SCDAT::Toolkit::SurfaceCharging::ElectronCollectionModelKind;
     using SCDAT::Toolkit::SurfaceCharging::EmissionModelParameters;
     using SCDAT::Toolkit::SurfaceCharging::PatchBoundaryGroup;
     using SCDAT::Toolkit::SurfaceCharging::PatchInterfaceConfig;
     using SCDAT::Toolkit::SurfaceCharging::SecondaryElectronEmissionModel;
+    using SCDAT::Toolkit::SurfaceCharging::SurfacePotentialSweepMode;
+    using SCDAT::Toolkit::SurfaceCharging::SurfacePotentialSweepPoint;
     using SCDAT::Toolkit::SurfaceCharging::StructureBodyConfig;
+    using SCDAT::Toolkit::SurfaceCharging::SurfaceCircuitBranchConfig;
+    using SCDAT::Toolkit::SurfaceCharging::SurfaceCircuitNodeConfig;
     using SCDAT::Toolkit::SurfaceCharging::SurfaceBoundaryMapping;
     using SCDAT::Toolkit::SurfaceCharging::SurfacePatchConfig;
     using SCDAT::Toolkit::PlasmaAnalysis::PlasmaParameters;
@@ -1628,6 +2055,49 @@ void applyStructuredTopologyFromJson(
         config.interfaces = std::move(interfaces);
     }
 
+    if (const auto array_text = extractArrayField(config_scope, "surface_nodes"); array_text)
+    {
+        std::vector<SurfaceCircuitNodeConfig> nodes;
+        for (const auto& object_text : parseObjectArray(*array_text))
+        {
+            SurfaceCircuitNodeConfig node;
+            node.name = extractStringField(object_text, "name").value_or("");
+            node.area_m2 = extractNumberField(object_text, "area_m2").value_or(node.area_m2);
+            node.is_patch = extractBoolField(object_text, "is_patch").value_or(node.is_patch);
+            node.initial_potential_v =
+                extractNumberField(object_text, "initial_potential_v").value_or(
+                    node.initial_potential_v);
+            node.capacitance_f =
+                extractNumberField(object_text, "capacitance_f").value_or(node.capacitance_f);
+            node.fixed_potential =
+                extractBoolField(object_text, "fixed_potential").value_or(node.fixed_potential);
+            node.fixed_value_v =
+                extractNumberField(object_text, "fixed_value_v").value_or(node.fixed_value_v);
+            nodes.push_back(std::move(node));
+        }
+        config.surface_nodes = std::move(nodes);
+    }
+
+    if (const auto array_text = extractArrayField(config_scope, "surface_branches"); array_text)
+    {
+        std::vector<SurfaceCircuitBranchConfig> branches;
+        for (const auto& object_text : parseObjectArray(*array_text))
+        {
+            SurfaceCircuitBranchConfig branch;
+            branch.from_node = static_cast<std::size_t>(std::max(
+                0.0, std::floor(extractNumberField(object_text, "from_node").value_or(0.0) + 0.5)));
+            branch.to_node = static_cast<std::size_t>(std::max(
+                0.0, std::floor(extractNumberField(object_text, "to_node").value_or(0.0) + 0.5)));
+            branch.conductance_s =
+                extractNumberField(object_text, "conductance_s").value_or(branch.conductance_s);
+            branch.resistance_ohm =
+                extractNumberField(object_text, "resistance_ohm").value_or(branch.resistance_ohm);
+            branch.bias_v = extractNumberField(object_text, "bias_v").value_or(branch.bias_v);
+            branches.push_back(std::move(branch));
+        }
+        config.surface_branches = std::move(branches);
+    }
+
     if (const auto array_text = extractArrayField(config_scope, "body_boundary_groups"); array_text)
     {
         std::vector<BodyBoundaryGroup> groups;
@@ -1691,6 +2161,253 @@ void applyStructuredTopologyFromJson(
             mappings.push_back(std::move(mapping));
         }
         config.boundary_mappings = std::move(mappings);
+    }
+
+    if (const auto object_text = extractObjectField(config_scope, "spis_import"); object_text)
+    {
+        auto& spis_import = config.spis_import;
+        if (const auto value = extractStringField(*object_text, "case_root"); value)
+        {
+            spis_import.case_root = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "model_xml_path"); value)
+        {
+            spis_import.model_xml_path = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "study_root"); value)
+        {
+            spis_import.study_root = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "run_root"); value)
+        {
+            spis_import.run_root = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "global_parameters_path"); value)
+        {
+            spis_import.global_parameters_path = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "groups_path"); value)
+        {
+            spis_import.groups_path = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "circuit_path"); value)
+        {
+            spis_import.circuit_path = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "import_manifest_path"); value)
+        {
+            spis_import.import_manifest_path = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "scan_plan_path"); value)
+        {
+            spis_import.scan_plan_path = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "numkernel_output_root"); value)
+        {
+            spis_import.numkernel_output_root = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "case_name"); value)
+        {
+            spis_import.case_name = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "case_id"); value)
+        {
+            spis_import.case_id = *value;
+        }
+        if (const auto values = extractArrayField(*object_text, "source_keys"); values)
+        {
+            spis_import.source_keys = parseStringArray(*values);
+        }
+    }
+
+    if (const auto object_text = extractObjectField(config_scope, "potential_sweep"); object_text)
+    {
+        const auto mode_text =
+            lowerCase(extractStringField(*object_text, "mode").value_or(""));
+        if (mode_text == "pwl_timeline")
+        {
+            config.potential_sweep_mode = SurfacePotentialSweepMode::PwlTimeline;
+        }
+        else if (mode_text == "discrete_points")
+        {
+            config.potential_sweep_mode = SurfacePotentialSweepMode::DiscretePoints;
+        }
+        else if (!mode_text.empty() && mode_text != "none")
+        {
+            throw std::runtime_error("Unsupported potential_sweep.mode in surface config json: " +
+                                     mode_text);
+        }
+
+        if (const auto value = extractNumberField(*object_text, "active_point_index"); value)
+        {
+            config.active_potential_sweep_point_index =
+                static_cast<std::size_t>(std::max(0.0, std::floor(*value + 0.5)));
+        }
+
+        if (const auto points_text = extractArrayField(*object_text, "points"); points_text)
+        {
+            std::vector<SurfacePotentialSweepPoint> points;
+            for (const auto& point_text : parseObjectArray(*points_text))
+            {
+                SurfacePotentialSweepPoint point;
+                point.time_s = extractNumberField(point_text, "time_s").value_or(0.0);
+                point.value = extractNumberField(point_text, "value").value_or(
+                    extractNumberField(point_text, "potential_v").value_or(0.0));
+                point.label = extractStringField(point_text, "label").value_or("");
+                points.push_back(std::move(point));
+            }
+            config.potential_sweep_points = std::move(points);
+        }
+    }
+
+    if (const auto array_text = extractArrayField(config_scope, "circuit_waveform"); array_text)
+    {
+        std::vector<SCDAT::Coupling::CircuitExcitationDescriptor> waveforms;
+        for (const auto& object_text : parseObjectArray(*array_text))
+        {
+            SCDAT::Coupling::CircuitExcitationDescriptor waveform;
+            waveform.name = extractStringField(object_text, "name").value_or("");
+
+            const auto target_kind =
+                lowerCase(extractStringField(object_text, "target_kind").value_or("branchbias"));
+            if (target_kind == "branchbias" || target_kind == "branch_bias")
+            {
+                waveform.target_kind = SCDAT::Coupling::CircuitElementKind::BranchBias;
+            }
+            else if (target_kind == "branchcurrentsource" ||
+                     target_kind == "branch_current_source")
+            {
+                waveform.target_kind =
+                    SCDAT::Coupling::CircuitElementKind::BranchCurrentSource;
+            }
+            else if (target_kind == "branchconductance" || target_kind == "branch_conductance")
+            {
+                waveform.target_kind = SCDAT::Coupling::CircuitElementKind::BranchConductance;
+            }
+            else if (target_kind == "nodefixedpotential" ||
+                     target_kind == "node_fixed_potential")
+            {
+                waveform.target_kind =
+                    SCDAT::Coupling::CircuitElementKind::NodeFixedPotential;
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported circuit_waveform.target_kind: " +
+                                         target_kind);
+            }
+
+            waveform.target_index = static_cast<std::size_t>(std::max(
+                0.0, std::floor(extractNumberField(object_text, "target_index").value_or(0.0) + 0.5)));
+
+            const auto waveform_kind =
+                lowerCase(extractStringField(object_text, "waveform").value_or("constant"));
+            if (waveform_kind == "constant")
+            {
+                waveform.waveform = SCDAT::Coupling::CircuitExcitationWaveformKind::Constant;
+            }
+            else if (waveform_kind == "sin" || waveform_kind == "sinusoidal")
+            {
+                waveform.waveform = SCDAT::Coupling::CircuitExcitationWaveformKind::Sinusoidal;
+            }
+            else if (waveform_kind == "pulse")
+            {
+                waveform.waveform = SCDAT::Coupling::CircuitExcitationWaveformKind::Pulse;
+            }
+            else if (waveform_kind == "pwl" || waveform_kind == "piecewise_linear")
+            {
+                waveform.waveform =
+                    SCDAT::Coupling::CircuitExcitationWaveformKind::PiecewiseLinear;
+            }
+            else if (waveform_kind == "exp" || waveform_kind == "exponential")
+            {
+                waveform.waveform = SCDAT::Coupling::CircuitExcitationWaveformKind::Exponential;
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported circuit_waveform.waveform: " +
+                                         waveform_kind);
+            }
+
+            waveform.base_value = extractNumberField(object_text, "base_value").value_or(0.0);
+            waveform.amplitude = extractNumberField(object_text, "amplitude").value_or(0.0);
+            waveform.frequency_hz = extractNumberField(object_text, "frequency_hz").value_or(0.0);
+            waveform.phase_rad = extractNumberField(object_text, "phase_rad").value_or(0.0);
+            waveform.duty_cycle = extractNumberField(object_text, "duty_cycle").value_or(0.5);
+            waveform.start_time_s =
+                extractNumberField(object_text, "start_time_s").value_or(waveform.start_time_s);
+            waveform.end_time_s =
+                extractNumberField(object_text, "end_time_s").value_or(waveform.end_time_s);
+            waveform.enabled = extractBoolField(object_text, "enabled").value_or(true);
+            waveform.exponential_tau_s =
+                extractNumberField(object_text, "exponential_tau_s").value_or(0.0);
+            if (const auto points_text = extractArrayField(object_text, "pwl_points"); points_text)
+            {
+                for (const auto& point_text : parseObjectArray(*points_text))
+                {
+                    SCDAT::Coupling::CircuitExcitationPwlPoint point;
+                    point.time_s = extractNumberField(point_text, "time_s").value_or(0.0);
+                    point.value = extractNumberField(point_text, "value").value_or(0.0);
+                    waveform.pwl_points.push_back(std::move(point));
+                }
+            }
+            waveforms.push_back(std::move(waveform));
+        }
+        config.circuit_waveforms = std::move(waveforms);
+    }
+
+    if (const auto array_text = extractArrayField(config_scope, "comparison_targets"); array_text)
+    {
+        std::vector<SurfaceComparisonTargetConfig> targets;
+        for (const auto& object_text : parseObjectArray(*array_text))
+        {
+            SurfaceComparisonTargetConfig target;
+            target.name = extractStringField(object_text, "name").value_or("");
+            if (target.name.empty())
+            {
+                continue;
+            }
+            target.source_family = extractStringField(object_text, "source_family").value_or("");
+            target.source_pattern =
+                extractStringField(object_text, "source_pattern").value_or("");
+            target.unit = extractStringField(object_text, "unit").value_or("");
+            target.alignment_axis =
+                extractStringField(object_text, "alignment_axis").value_or("time_s");
+            target.source_key = extractStringField(object_text, "source_key").value_or("");
+            target.scdat_series_hint =
+                extractStringField(object_text, "scdat_series_hint").value_or("");
+            targets.push_back(std::move(target));
+        }
+        config.comparison_targets = std::move(targets);
+    }
+
+    if (const auto object_text = extractObjectField(config_scope, "spis_reference_output");
+        object_text)
+    {
+        auto& reference_output = config.spis_reference_output;
+        if (const auto value = extractStringField(*object_text, "output_root"); value)
+        {
+            reference_output.output_root = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "monitored_root"); value)
+        {
+            reference_output.monitored_root = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "extracted_root"); value)
+        {
+            reference_output.extracted_root = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "comparison_csv_path"); value)
+        {
+            reference_output.comparison_csv_path = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "comparison_summary_path"); value)
+        {
+            reference_output.comparison_summary_path = *value;
+        }
+        if (const auto value = extractStringField(*object_text, "comparison_json_path"); value)
+        {
+            reference_output.comparison_json_path = *value;
+        }
     }
 }
 
@@ -3027,6 +3744,12 @@ std::optional<std::string> extractObjectField(const std::string& text,
     return ::extractObjectField(text, key);
 }
 
+std::optional<std::string> extractArrayField(const std::string& text,
+                                             const std::string& key)
+{
+    return ::extractArrayField(text, key);
+}
+
 std::optional<std::string> extractStringField(const std::string& text,
                                               const std::string& key)
 {
@@ -3043,6 +3766,11 @@ std::optional<bool> extractBoolField(const std::string& text,
                                      const std::string& key)
 {
     return ::extractBoolField(text, key);
+}
+
+std::vector<std::string> parseStringArray(const std::string& array_text)
+{
+    return ::parseStringArray(array_text);
 }
 
 void applyUnifiedSolverConfigFromJsonObject(
@@ -3107,6 +3835,30 @@ parseVolumeLinearSolverPolicy(const std::string& text)
     return ::parseVolumeLinearSolverPolicy(text);
 }
 
+std::optional<SCDAT::FieldSolver::NativeVolumeBoundaryConditionFamily>
+parseNativeVolumeBoundaryConditionFamily(const std::string& text)
+{
+    return ::parseNativeVolumeBoundaryConditionFamily(text);
+}
+
+std::optional<SCDAT::FieldSolver::NativeVolumeFieldFamily>
+parseNativeVolumeFieldFamily(const std::string& text)
+{
+    return ::parseNativeVolumeFieldFamily(text);
+}
+
+std::optional<SCDAT::FieldSolver::NativeVolumeDistributionFamily>
+parseNativeVolumeDistributionFamily(const std::string& text)
+{
+    return ::parseNativeVolumeDistributionFamily(text);
+}
+
+std::optional<SCDAT::FieldSolver::NativeVolumeInteractionFamily>
+parseNativeVolumeInteractionFamily(const std::string& text)
+{
+    return ::parseNativeVolumeInteractionFamily(text);
+}
+
 std::optional<SCDAT::Toolkit::SurfaceCharging::SecondaryElectronEmissionModel>
 parseSecondaryElectronEmissionModel(const std::string& text)
 {
@@ -3117,6 +3869,12 @@ std::optional<SCDAT::Toolkit::SurfaceCharging::ElectronCollectionModelKind>
 parseElectronCollectionModelKind(const std::string& text)
 {
     return ::parseElectronCollectionModelKind(text);
+}
+
+std::optional<SCDAT::Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind>
+parsePlasmaDistributionModelKind(const std::string& text)
+{
+    return ::parsePlasmaDistributionModelKind(text);
 }
 
 void applyPlasmaParametersFromJsonObject(
@@ -3416,5 +4174,3 @@ int main(int argc, char* argv[])
         return 1;
     }
 }
-
-

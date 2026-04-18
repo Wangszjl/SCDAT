@@ -15,6 +15,7 @@ endif()
 include(GoogleTest)
 
 add_executable(SurfaceCharging_smoke_test SurfaceCharging_smoke_test.cpp)
+scdat_harden_build_target(SurfaceCharging_smoke_test)
 target_link_libraries(SurfaceCharging_smoke_test
     PRIVATE
         SCDAT::Toolkit::Surface_Charging
@@ -24,6 +25,7 @@ target_link_libraries(SurfaceCharging_smoke_test
 gtest_discover_tests(SurfaceCharging_smoke_test)
 
 add_executable(SurfaceCharging_object_layer_test SurfaceCharging_object_layer_test.cpp)
+scdat_harden_build_target(SurfaceCharging_object_layer_test)
 target_link_libraries(SurfaceCharging_object_layer_test
     PRIVATE
         SCDAT::Toolkit::Surface_Charging

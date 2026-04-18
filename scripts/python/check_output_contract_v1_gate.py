@@ -184,6 +184,84 @@ def normalize_path(text: str) -> Path:
     return Path(text).resolve()
 
 
+def _parse_non_negative_int(text: Any, sidecar_path: Path, key: str, errors: List[str]) -> int | None:
+    try:
+        value = int(str(text))
+    except (TypeError, ValueError):
+        errors.append(f"invalid_non_negative_integer:{sidecar_path}:{key}={text}")
+        return None
+    if value < 0:
+        errors.append(f"negative_integer:{sidecar_path}:{key}={value}")
+        return None
+    return value
+
+
+def validate_surface_source_resolved_metadata(
+    metadata: Dict[str, Any],
+    artifact_path: Path,
+) -> List[str]:
+    errors: List[str] = []
+    sidecar_path = metadata_sidecar_path(artifact_path)
+    source_key_count_raw = metadata.get("surface_source_resolved_source_key_count")
+    if source_key_count_raw is None:
+        return errors
+
+    source_key_count = _parse_non_negative_int(
+        source_key_count_raw, sidecar_path, "surface_source_resolved_source_key_count", errors
+    )
+    if source_key_count is None:
+        return errors
+
+    bookkeeping_mode = str(metadata.get("surface_source_resolved_bookkeeping_mode", "")).strip()
+    if not bookkeeping_mode:
+        errors.append(f"missing_source_resolved_bookkeeping_mode:{sidecar_path}")
+
+    for key in (
+        "surface_source_resolved_slot_count_complete",
+        "surface_source_resolved_strict_attribution_available",
+    ):
+        value = str(metadata.get(key, "")).strip().lower()
+        if value not in {"true", "false", "0", "1", "yes", "no"}:
+            errors.append(f"invalid_source_resolved_boolean:{sidecar_path}:{key}={value}")
+
+    for index in range(source_key_count):
+        source_key = str(metadata.get(f"surface_source_resolved_source_key_{index}", "")).strip()
+        if not source_key:
+            errors.append(f"missing_source_resolved_source_key:{sidecar_path}:{index}")
+
+    series_count_raw = metadata.get("surface_source_resolved_series_count")
+    if series_count_raw is not None:
+        series_count = _parse_non_negative_int(
+            series_count_raw, sidecar_path, "surface_source_resolved_series_count", errors
+        )
+        if series_count is not None:
+            for index in range(series_count):
+                series_name = str(metadata.get(f"surface_source_resolved_series_{index}", "")).strip()
+                if not series_name:
+                    errors.append(f"missing_source_resolved_series:{sidecar_path}:{index}")
+
+    missing_required_series_count_raw = metadata.get(
+        "surface_source_resolved_missing_required_series_count"
+    )
+    if missing_required_series_count_raw is not None:
+        missing_required_series_count = _parse_non_negative_int(
+            missing_required_series_count_raw,
+            sidecar_path,
+            "surface_source_resolved_missing_required_series_count",
+            errors,
+        )
+        if missing_required_series_count is not None:
+            for index in range(missing_required_series_count):
+                missing_series_name = str(
+                    metadata.get(f"surface_source_resolved_missing_required_series_{index}", "")
+                ).strip()
+                if not missing_series_name:
+                    errors.append(
+                        f"missing_source_resolved_missing_required_series:{sidecar_path}:{index}"
+                    )
+    return errors
+
+
 def validate_sidecar(
     artifact_format: str,
     artifact_path: Path,
@@ -1776,6 +1854,9 @@ def main() -> int:
                         extra_errors.extend(validate_plasma_diagnostics_artifact(metadata, artifact_path))
                         extra_errors.extend(validate_radiation_history_artifacts(metadata, artifact_path))
                         extra_errors.extend(validate_internal_drive_artifacts(metadata, artifact_path))
+                        extra_errors.extend(
+                            validate_surface_source_resolved_metadata(metadata, artifact_path)
+                        )
                         if extra_errors:
                             contract_artifact_status = "FAIL"
                             module_failures.extend(extra_errors)

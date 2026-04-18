@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 namespace SCDAT
 {
@@ -43,7 +44,17 @@ struct PicMccSurfaceSamplerConfig : public Collision::PicMccControlContract
     Particle::ResolvedSpectrum ion_spectrum;
     bool has_electron_spectrum = false;
     bool has_ion_spectrum = false;
+    std::vector<std::string> source_keys;
     Material::MaterialProperty material{2, Mesh::MaterialType::DIELECTRIC, "surface"};
+};
+
+struct PicMccSourceResolvedSample
+{
+    std::string source_key;
+    double collected_current_density_a_per_m2 = 0.0;
+    double superparticle_count = 0.0;
+    // True only when this slot is backed by an explicit source attribution path.
+    bool strictly_attributed = false;
 };
 
 struct PicMccCurrentSample : public Collision::PicMccTelemetryContract
@@ -64,6 +75,7 @@ struct PicMccCurrentSample : public Collision::PicMccTelemetryContract
     std::string deposition_kernel = "linear_segment_cloud";
     unsigned int seed_used = 0u;
     std::string sampling_policy_resolved = "deterministic";
+    std::vector<PicMccSourceResolvedSample> source_resolved_samples;
 };
 
 class PicMccSurfaceCurrentSampler
@@ -77,4 +89,3 @@ class PicMccSurfaceCurrentSampler
 } // namespace SurfaceCharging
 } // namespace Toolkit
 } // namespace SCDAT
-

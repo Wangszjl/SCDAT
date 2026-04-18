@@ -9,6 +9,13 @@
       "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
       "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
       "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_interactor_family": "spis_material_model_surface_interactor_v1",
+        "surface_interactor_supported_family_count": "19",
+        "surface_interactor_active_family_count": "1",
+        "surface_interactor_active_family_signature": "spis_material_model_surface_interactor_v1",
+        "surface_interactor_supported_family_signature": "spis_material_model_surface_interactor_v1+spis_material_df_surface_interactor_v1+spis_generic_df_surface_interactor_v1+spis_maxwellian_surface_interactor_v1+spis_maxwellian_surface_interactor_with_recollection_v1+spis_multiple_surface_interactor_v1+spis_multiple_maxwellian_surface_interactor_v1+spis_yield_surface_interactor_v1+spis_reflection_surface_interactor_v1+spis_erosion_surface_interactor_v1+spis_improved_photo_emission_surface_interactor_v1+spis_basic_induced_conduct_surface_interactor_v1+spis_tabulated_sey_surface_interactor_v1+spis_recollected_sey_surface_interactor_v1+spis_default_pee_model_v1+spis_default_seeey_model_v1+spis_default_seep_model_v1+spis_default_erosion_model_v1+spis_device_surface_interactor_v1"
+      },
       "required_benchmark_case_metric_ids": [
         "final_current_derivative_a_per_m2_per_v",
         "benchmark_patch_jnet_rmse_a_per_m2",
@@ -46,6 +53,9 @@
         "surface_solver_coupling_mode_resolved": "fieldparticleimplicit",
         "surface_solver_convergence_policy_resolved": "residualnormguarded",
         "surface_solver_deposition_scheme_resolved": "picwindowcic",
+        "surface_solver_util_route": "SurfacePic",
+        "surface_solver_util_family_signature": "SolverUtil+LeastSquare",
+        "surface_solver_util_active_family_signature": "SolverUtil+LeastSquare",
         "solver_coupling_mode": "field_particle_implicit",
         "solver_convergence_policy": "residual_norm_guarded",
         "solver_deposition_scheme": "pic_window_cic",
@@ -57,7 +67,87 @@
         "surface_pic_runtime_global_sheath_field_solve_mode": "explicit_global_sheath_field_linear_system_v2",
         "surface_pic_runtime_global_particle_bookkeeping_mode": "owned_global_particle_domain_state_v2",
         "surface_pic_runtime_global_particle_repository_bookkeeping_mode": "owned_global_particle_repository_state_v1",
-        "surface_pic_runtime_global_particle_repository_lifecycle_mode": "global_particle_transport_reservoir_lifecycle_v1"
+        "surface_pic_runtime_global_particle_repository_lifecycle_mode": "global_particle_transport_reservoir_lifecycle_v1",
+        "surface_util_route": "SurfacePic",
+        "surface_util_family_count": "15",
+        "surface_util_active_family_count": "15",
+        "surface_util_family_signature": "DistribFunc+Exception+Func+Instrument+io+List+Matrix+Monitor+OcTree+OcTreeMesh+Part+Phys+Sampler+Table+Vect",
+        "surface_util_active_family_signature": "DistribFunc+Exception+Func+io+List+Matrix+Monitor+Part+Phys+Sampler+Table+Vect+OcTree+OcTreeMesh+Instrument",
+        "surface_util_distrib_func_route": "SurfacePic",
+        "surface_util_distrib_func_family_count": "1",
+        "surface_util_distrib_func_active_family_count": "1",
+        "surface_util_distrib_func_family_signature": "DistribFunc",
+        "surface_util_distrib_func_active_family_signature": "DistribFunc",
+        "surface_util_exception_route": "SurfacePic",
+        "surface_util_exception_family_count": "1",
+        "surface_util_exception_active_family_count": "1",
+        "surface_util_exception_family_signature": "Exception",
+        "surface_util_exception_active_family_signature": "Exception",
+        "surface_util_instrument_route": "SurfacePic",
+        "surface_util_instrument_family_count": "1",
+        "surface_util_instrument_active_family_count": "1",
+        "surface_util_instrument_family_signature": "Instrument",
+        "surface_util_instrument_active_family_signature": "Instrument",
+        "surface_util_func_route": "SurfacePic",
+        "surface_util_func_family_count": "1",
+        "surface_util_func_active_family_count": "1",
+        "surface_util_func_family_signature": "Func",
+        "surface_util_func_active_family_signature": "Func",
+        "surface_util_sampler_route": "SurfacePic",
+        "surface_util_sampler_family_count": "1",
+        "surface_util_sampler_active_family_count": "1",
+        "surface_util_sampler_family_signature": "Sampler",
+        "surface_util_sampler_active_family_signature": "Sampler",
+        "surface_util_monitor_route": "SurfacePic",
+        "surface_util_monitor_family_count": "1",
+        "surface_util_monitor_active_family_count": "1",
+        "surface_util_monitor_family_signature": "Monitor",
+        "surface_util_monitor_active_family_signature": "Monitor",
+        "surface_util_io_route": "SurfacePic",
+        "surface_util_io_family_count": "1",
+        "surface_util_io_active_family_count": "1",
+        "surface_util_io_family_signature": "io",
+        "surface_util_io_active_family_signature": "io",
+        "surface_util_list_route": "SurfacePic",
+        "surface_util_list_family_count": "1",
+        "surface_util_list_active_family_count": "1",
+        "surface_util_list_family_signature": "List",
+        "surface_util_list_active_family_signature": "List",
+        "surface_util_part_route": "SurfacePic",
+        "surface_util_part_family_count": "1",
+        "surface_util_part_active_family_count": "1",
+        "surface_util_part_family_signature": "Part",
+        "surface_util_part_active_family_signature": "Part",
+        "surface_util_phys_route": "SurfacePic",
+        "surface_util_phys_family_count": "1",
+        "surface_util_phys_active_family_count": "1",
+        "surface_util_phys_family_signature": "Phys",
+        "surface_util_phys_active_family_signature": "Phys",
+        "surface_util_table_route": "SurfacePic",
+        "surface_util_table_family_count": "1",
+        "surface_util_table_active_family_count": "1",
+        "surface_util_table_family_signature": "Table",
+        "surface_util_table_active_family_signature": "Table",
+        "surface_util_matrix_route": "SurfacePic",
+        "surface_util_matrix_family_count": "1",
+        "surface_util_matrix_active_family_count": "1",
+        "surface_util_matrix_family_signature": "Matrix",
+        "surface_util_matrix_active_family_signature": "Matrix",
+        "surface_util_octree_route": "SurfacePic",
+        "surface_util_octree_family_count": "1",
+        "surface_util_octree_active_family_count": "1",
+        "surface_util_octree_family_signature": "OcTree",
+        "surface_util_octree_active_family_signature": "OcTree",
+        "surface_util_octree_mesh_route": "SurfacePic",
+        "surface_util_octree_mesh_family_count": "1",
+        "surface_util_octree_mesh_active_family_count": "1",
+        "surface_util_octree_mesh_family_signature": "OcTreeMesh",
+        "surface_util_octree_mesh_active_family_signature": "OcTreeMesh",
+        "surface_util_vect_route": "SurfacePic",
+        "surface_util_vect_family_count": "1",
+        "surface_util_vect_active_family_count": "1",
+        "surface_util_vect_family_signature": "Vect",
+        "surface_util_vect_active_family_signature": "Vect"
       },
       "min_benchmark_case_reference_dataset_count": 2,
       "require_benchmark_case_curve_relative_rmse": true,
@@ -211,6 +301,21 @@
         "surface_pic_strategy": "SurfacePicHybridReference",
         "surface_pic_runtime": "graph_coupled_shared_surface",
         "surface_solver_deposition_scheme_resolved": "picwindowcic",
+        "surface_circ_circuit_family_signature": "Circuit+ElecComponent+SurfaceComponent+RCCabsCirc+RLCCirc+SIN+PULSE+PWL+EXP",
+        "surface_circ_active_circuit_family_signature": "Circuit+ElecComponent+SurfaceComponent+RCCabsCirc+RLCCirc",
+        "surface_circ_field_family_signature": "CircField+CurrentDistribution+DirCircField",
+        "surface_circ_active_field_family_signature": "CircField+DirCircField+CurrentDistribution",
+        "surface_circ_didv_family_signature": "DIDV+SurfDIDV+SurfDIDVFromCurrentVariation+SurfDIDVFromLocalCurrentVariation+SurfDIDVFromMatrices+WeightedSurfDIDV+MultipleSurfDIDV+MultipleDIDV+ReducableDIDV+RedDIDVFromSurfDIDV+RedDIDVFromRegDIDV+DIDVOnCirc",
+        "surface_circ_active_didv_family_signature": "DIDV+SurfDIDV+SurfDIDVFromCurrentVariation",
+        "surface_solver_circuit_family_signature": "CircSolve",
+        "surface_solver_active_circuit_family_signature": "CircSolve",
+        "surface_solver_util_route": "SurfacePicHybrid",
+        "surface_solver_util_family_signature": "SolverUtil+LeastSquare",
+        "surface_solver_util_active_family_signature": "SolverUtil+LeastSquare",
+        "surface_solver_electromag_family_signature": "AbstractEMSolver+PoissonSolver+PotPoissonSolver+ConjGrad3DUnstructPoissonSolver+PoissonMagnetostaticSolver",
+        "surface_solver_active_electromag_family_signature": "AbstractEMSolver+PoissonSolver+PotPoissonSolver",
+        "surface_solver_matter_family_signature": "ParticlePusher+PICPusher+CrossTetrahedron+CrossTetraUniformEnoB+CrossTetraUniformEwithB+CrossTetraUniformEAndB+CrossTetraUniformEwithDichotomy+CrossTetraVaryingE+AnalyticalCrossTetra",
+        "surface_solver_active_matter_family_signature": "ParticlePusher+PICPusher+CrossTetrahedron+CrossTetraUniformEnoB",
         "solver_deposition_scheme": "pic_window_cic",
         "solver_collision_set": "surface_pic_v1",
         "solver_physics_process_set": "surface_process_core_v1",
@@ -487,7 +592,545 @@
           }
         ]
       }
+    },
+    {
+      "case_label": "geo_ecss_kapton_axisym_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_axisym_tabulated_velocity_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "axisym_tabulated_velocity"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_global_maxwell_boltzmann_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_global_maxwell_boltzmann_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "global_maxwell_boltzmann"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_global_maxwell_boltzmann2_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_global_maxwell_boltzmann2_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "global_maxwell_boltzmann2"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_global_maxwell_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_global_maxwell_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "global_maxwell"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_local_maxwell_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_local_maxwell_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "local_maxwell"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_local_maxwell2_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_local_maxwell2_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "local_maxwell2"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_recoll_maxwell_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_recoll_maxwell_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "recoll_maxwell"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_pic_surf_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_pic_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "pic_surf"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_non_pic_surf_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_nonpic_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "non_pic_surf"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_generic_surf_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_generic_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "generic_surf"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_global_surf_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_global_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "global_surf"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_local_generic_surf_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_local_generic_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "local_generic_surf"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_testable_surf_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_testable_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "testable_surf"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_testable_for_a_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_testable_for_a_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "testable_for_a"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_maxwellian_thruster_distribution",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_maxwellian_thruster_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "maxwellian_thruster"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_surf_mesh_structured_topology",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_surf_mesh_route": "structured_topology",
+        "surface_surf_mesh_family_count": "2",
+        "surface_surf_mesh_active_family_count": "2",
+        "surface_surf_mesh_family_signature": "SurfMesh+ThreeDUnstructSurfMesh",
+        "surface_surf_mesh_active_family_signature": "SurfMesh+ThreeDUnstructSurfMesh",
+        "surface_surf_mesh_body_boundary_group_count": "1",
+        "surface_surf_mesh_patch_boundary_group_count": "1",
+        "surface_surf_mesh_boundary_mapping_count": "1"
+      },
+      "config_overrides": {
+        "bodies": [
+          { "id": "body", "area_m2": 1.0e-2, "floating": true, "initial_potential_v": 0.0, "capacitance_f": 1.0e-10 }
+        ],
+        "patches": [
+          { "id": "patch", "body_id": "body", "area_m2": 5.0e-3, "initial_potential_v": 0.0, "capacitance_f": 0.0 }
+        ],
+        "body_boundary_groups": [
+          { "id": "bg_body", "body_id": "body", "external_group_name": "body_group", "boundary_face_ids": [1, 2] }
+        ],
+        "patch_boundary_groups": [
+          { "id": "bg_patch", "patch_id": "patch", "external_group_name": "patch_group", "boundary_face_ids": [10, 11] }
+        ],
+        "boundary_mappings": [
+          { "node_id": "patch", "boundary_group_id": "bg_patch", "required": true }
+        ]
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_transition_lifecycle_hooks",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_transition_event_local_time_enabled": "1",
+        "surface_transition_event_spinning_enabled": "1",
+        "surface_transition_event_sun_flux_enabled": "1",
+        "surface_transition_observer_active_latest": "1",
+        "surface_transition_sun_flux_intensity_active_latest": "1",
+        "surface_transition_finalization_active_latest": "1",
+        "surface_top_simulation_route": "SCDATUnified",
+        "surface_top_simulation_family_count": "5",
+        "surface_top_simulation_active_family_count": "4",
+        "surface_top_simulation_family_signature": "Simulation+PlasmaScSimulation+SimulationFromUIParams+SimulationListener+BundleAPI_SimulationInit",
+        "surface_top_simulation_active_family_signature": "Simulation+SimulationFromUIParams+BundleAPI_SimulationInit+PlasmaScSimulation",
+        "surface_top_plasma_route": "SCDATUnified",
+        "surface_top_plasma_family_count": "7",
+        "surface_top_plasma_active_family_count": "5",
+        "surface_top_plasma_family_signature": "Plasma+Environment+ExtendedEnvironment+TimeDependentEnvironment+BiMaxwellianEnvironment+MeshedPlasma+MmfPlasma",
+        "surface_top_plasma_active_family_signature": "Plasma+Environment+BiMaxwellianEnvironment+ExtendedEnvironment+TimeDependentEnvironment",
+        "surface_top_sc_route": "SCDATUnified",
+        "surface_top_sc_family_count": "4",
+        "surface_top_sc_active_family_count": "2",
+        "surface_top_sc_family_signature": "SC+InteractSC+RCCabsSC+RLCSC",
+        "surface_top_sc_active_family_signature": "SC+RCCabsSC",
+        "surface_top_grid_route": "SCDATUnified",
+        "surface_top_grid_family_count": "2",
+        "surface_top_grid_active_family_count": "1",
+        "surface_top_grid_family_signature": "Grid+InteractGrid",
+        "surface_top_grid_active_family_signature": "Grid",
+        "surface_top_default_route": "SCDATUnified",
+        "surface_top_default_family_count": "25",
+        "surface_top_default_active_family_count": "16",
+        "surface_top_default_family_signature": "ActiveZone+Common+Credits+Distribution+Duplicable+Field+GlobalParameter+InstrumentParameter+Interactor+Listener+LocalParameter+MaterialProperty+Mesh+NamedObject+ObjectWithBoundaries+ObjectWithTemperature+Parameter+PlasmaIO+ScalableObject+SimulationObject+Solver+SpisDefaultPartTypes+SpisDefaultSampling+ThermalElement+ThreadManager",
+        "surface_top_default_active_family_signature": "Common+Distribution+Field+GlobalParameter+Interactor+LocalParameter+MaterialProperty+Mesh+NamedObject+Parameter+ScalableObject+SimulationObject+Solver+ObjectWithTemperature+ThermalElement+Listener"
+      },
+      "config_overrides": {
+        "surface_material": {
+          "scalar_properties": {
+            "transition_local_time_enabled": 1.0,
+            "transition_local_time_base_hour": 0.0,
+            "transition_local_time_daylight_start_hour": 6.0,
+            "transition_local_time_daylight_end_hour": 18.0,
+            "transition_spinning_enabled": 1.0,
+            "transition_spin_period_s": 86400.0,
+            "transition_sun_flux_enabled": 1.0,
+            "transition_sun_flux_base_scale": 1.2,
+            "transition_sun_flux_spin_amplitude": 0.1,
+            "transition_observer_enabled": 1.0,
+            "transition_observer_checkpoint_dt_s": 900.0,
+            "transition_finalization_enabled": 1.0,
+            "transition_finalization_trigger_time_s": 0.0,
+            "transition_finalization_duration_s": 600.0,
+            "transition_finalization_validity_renormalization": 0.25
+          }
+        }
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_top_top_surface_config",
+      "preset": "geo_ecss_kapton_pic_circuit",
+      "expected_reference_family": "surface_pic_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_top_top_route": "SurfacePic",
+        "surface_top_top_entrypoint_mode": "preset_catalog",
+        "surface_top_top_family_count": "5",
+        "surface_top_top_active_family_count": "3",
+        "surface_top_top_family_signature": "Scenario+PotentialSweep+UIInvokable+SpisTopMenu+NumTopFromUI",
+        "surface_top_top_active_family_signature": "Scenario+UIInvokable+SpisTopMenu"
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_native_volume_hybrid_blend",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_native_volume_parity_mode": "hybrid_blend",
+        "surface_native_volume_parity_boundary_condition_count": "3",
+        "surface_native_volume_parity_boundary_condition_family_count": "6",
+        "surface_native_volume_parity_boundary_condition_family_signature": "VoltageDependentMBC+MixedDirichletFourierPoissonBC+FourierPoissonBC+SurfDistribMatterBC+OneSurfDistribTestableMatterBC+CapacitiveVoltageGenerator",
+        "surface_native_volume_parity_active_boundary_condition_family_count": "6",
+        "surface_native_volume_parity_active_boundary_condition_family_signature": "VoltageDependentMBC+MixedDirichletFourierPoissonBC+FourierPoissonBC+SurfDistribMatterBC+OneSurfDistribTestableMatterBC+CapacitiveVoltageGenerator",
+        "surface_native_volume_bc_abstract_route": "hybrid_blend",
+        "surface_native_volume_bc_abstract_family_count": "5",
+        "surface_native_volume_bc_abstract_active_family_count": "5",
+        "surface_native_volume_bc_abstract_family_signature": "BC+DirichletPoissonBC+MatterBC+TestableMatterBC+VoltageGenerator",
+        "surface_native_volume_bc_abstract_active_family_signature": "BC+DirichletPoissonBC+MatterBC+TestableMatterBC+VoltageGenerator",
+        "surface_native_volume_field_route": "hybrid_blend",
+        "surface_native_volume_field_family_count": "9",
+        "surface_native_volume_field_active_family_count": "9",
+        "surface_native_volume_field_family_signature": "VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField",
+        "surface_native_volume_field_active_family_signature": "VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField",
+        "surface_native_volume_parity_field_family_count": "5",
+        "surface_native_volume_parity_field_family_signature": "UniformBField+SolenoidBField+DipolarBField+MultipleEField+EMField",
+        "surface_native_volume_parity_active_field_family_count": "5",
+        "surface_native_volume_parity_active_field_family_signature": "UniformBField+SolenoidBField+DipolarBField+MultipleEField+EMField",
+        "surface_native_volume_parity_geom_route": "hybrid_blend",
+        "surface_native_volume_parity_geom_family_count": "7",
+        "surface_native_volume_parity_geom_family_signature": "Geom+CartesianSystem+CylindricalSystem+SphericalSystem+CoordinateSystemTools+ThreeDCartesianGeom+TwoThreeDAxisymGeom",
+        "surface_native_volume_parity_geom_active_family_signature": "Geom+CoordinateSystemTools+CartesianSystem+ThreeDCartesianGeom",
+        "surface_native_volume_parity_mesh_route": "hybrid_blend",
+        "surface_native_volume_parity_mesh_family_count": "5",
+        "surface_native_volume_parity_mesh_family_signature": "VolMesh+ThreeDUnstructVolMesh+ThreeDUnstructVolMeshWithViewFactor+DisplayVolMesh+Centring",
+        "surface_native_volume_parity_mesh_active_family_signature": "VolMesh+ThreeDUnstructVolMesh+Centring+DisplayVolMesh",
+        "surface_native_volume_parity_distribution_channel_count": "3",
+        "surface_native_volume_parity_distribution_family_count": "8",
+        "surface_native_volume_parity_distribution_family_signature": "PICVolDistrib+PICVolDistribNoAcc+PICVolDistribUpdatable+SmartPICVolDistrib+CompositeVolDistrib+BackTrackingVolDistrib+BacktrackingPICCompositeVolDistrib+BacktrackingBoltzmannCompositeVolDistrib",
+        "surface_native_volume_parity_interaction_route": "hybrid_blend",
+        "surface_native_volume_active_interaction_route": "hybrid_blend",
+        "surface_native_volume_parity_interaction_family_count": "5",
+        "surface_native_volume_parity_interaction_family_signature": "MCCInteractor+CEXInteractor+PhotoIonization+TrajectoryInteractionFromField+SpinningSpacecraftTrajectory",
+        "surface_native_volume_parity_interactor_count": "5",
+        "surface_native_volume_active_interaction_family_count": "5",
+        "surface_native_volume_active_interaction_family_signature": "MCCInteractor+CEXInteractor+PhotoIonization+TrajectoryInteractionFromField+SpinningSpacecraftTrajectory",
+        "surface_native_volume_interaction_long_tail_route": "hybrid_blend",
+        "surface_native_volume_interaction_long_tail_family_count": "5",
+        "surface_native_volume_interaction_long_tail_active_family_count": "5",
+        "surface_native_volume_interaction_long_tail_family_signature": "VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor",
+        "surface_native_volume_interaction_long_tail_active_family_signature": "VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor"
+      },
+      "config_overrides": {
+        "enable_external_field_solver_bridge": true
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_native_volume_external_bridge",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_native_volume_parity_mode": "external_bridge",
+        "surface_native_volume_parity_boundary_condition_count": "3",
+        "surface_native_volume_parity_boundary_condition_family_count": "6",
+        "surface_native_volume_parity_boundary_condition_family_signature": "VoltageDependentMBC+MixedDirichletFourierPoissonBC+FourierPoissonBC+SurfDistribMatterBC+OneSurfDistribTestableMatterBC+CapacitiveVoltageGenerator",
+        "surface_native_volume_parity_active_boundary_condition_family_count": "6",
+        "surface_native_volume_parity_active_boundary_condition_family_signature": "VoltageDependentMBC+MixedDirichletFourierPoissonBC+FourierPoissonBC+SurfDistribMatterBC+OneSurfDistribTestableMatterBC+CapacitiveVoltageGenerator",
+        "surface_native_volume_field_route": "external_bridge",
+        "surface_native_volume_field_family_count": "9",
+        "surface_native_volume_field_active_family_count": "9",
+        "surface_native_volume_field_family_signature": "VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField",
+        "surface_native_volume_field_active_family_signature": "VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField",
+        "surface_native_volume_parity_field_family_count": "5",
+        "surface_native_volume_parity_field_family_signature": "UniformBField+SolenoidBField+DipolarBField+MultipleEField+EMField",
+        "surface_native_volume_parity_active_field_family_count": "5",
+        "surface_native_volume_parity_active_field_family_signature": "UniformBField+SolenoidBField+DipolarBField+MultipleEField+EMField",
+        "surface_native_volume_parity_distribution_channel_count": "3",
+        "surface_native_volume_parity_distribution_family_count": "8",
+        "surface_native_volume_parity_distribution_family_signature": "PICVolDistrib+PICVolDistribNoAcc+PICVolDistribUpdatable+SmartPICVolDistrib+CompositeVolDistrib+BackTrackingVolDistrib+BacktrackingPICCompositeVolDistrib+BacktrackingBoltzmannCompositeVolDistrib",
+        "surface_native_volume_parity_interaction_route": "external_bridge",
+        "surface_native_volume_active_interaction_route": "external_bridge",
+        "surface_native_volume_parity_interaction_family_count": "5",
+        "surface_native_volume_parity_interaction_family_signature": "MCCInteractor+CEXInteractor+PhotoIonization+TrajectoryInteractionFromField+SpinningSpacecraftTrajectory",
+        "surface_native_volume_parity_interactor_count": "5",
+        "surface_native_volume_active_interaction_family_count": "5",
+        "surface_native_volume_active_interaction_family_signature": "MCCInteractor+CEXInteractor+PhotoIonization+TrajectoryInteractionFromField+SpinningSpacecraftTrajectory",
+        "surface_native_volume_interaction_long_tail_route": "external_bridge",
+        "surface_native_volume_interaction_long_tail_family_count": "5",
+        "surface_native_volume_interaction_long_tail_active_family_count": "5",
+        "surface_native_volume_interaction_long_tail_family_signature": "VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor",
+        "surface_native_volume_interaction_long_tail_active_family_signature": "VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor"
+      },
+      "config_overrides": {
+        "enable_external_volume_solver_bridge": true
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_native_volume_field_override",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_native_volume_parity_mode": "native_minimal",
+        "surface_native_volume_parity_field_route": "config_override",
+        "surface_native_volume_parity_field_family_count": "3",
+        "surface_native_volume_parity_field_family_signature": "UniformBField+DipolarBField+EMField",
+        "surface_native_volume_parity_active_field_family_count": "3",
+        "surface_native_volume_parity_active_field_family_signature": "UniformBField+DipolarBField+EMField",
+        "surface_native_volume_field_route": "config_override",
+        "surface_native_volume_field_family_count": "9",
+        "surface_native_volume_field_active_family_count": "9",
+        "surface_native_volume_field_family_signature": "VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField",
+        "surface_native_volume_field_active_family_signature": "VolField+ScalVolField+VectVolField+EField+DirVectVolField+DirEField+PotEField+PotVectVolField+BField"
+      },
+      "config_overrides": {
+        "surface_native_volume_field_families": [
+          "uniform_b_field",
+          "dipolar_b_field",
+          "em_field"
+        ]
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_native_volume_distribution_override",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_native_volume_distribution_route": "config_override",
+        "surface_native_volume_distribution_family_count": "14",
+        "surface_native_volume_distribution_active_family_count": "7",
+        "surface_native_volume_distribution_family_signature": "VolDistrib+NonPICVolDistrib+AnalyticVolDistrib+MultipleVolDistrib+LocalMaxwellVolDistrib+LocalMaxwellBoltzmannVolDistrib+GlobalMaxwellBoltzmannVolDistrib+PICBoltzmannVolDistrib+SteadyMaxwellBoltzmannVolDistrib+UnlimitedGlobalMaxwellBoltzmannVolDistrib+SurfaceLimitedGlobalMaxwellBoltzmannVolDistrib+TrunckatedGlobalMaxwellBoltzmannVolDistrib+ImplicitableVolDistrib+Updatable",
+        "surface_native_volume_distribution_active_family_signature": "VolDistrib+NonPICVolDistrib+AnalyticVolDistrib+GlobalMaxwellBoltzmannVolDistrib+ImplicitableVolDistrib+Updatable+PICBoltzmannVolDistrib"
+      },
+      "config_overrides": {
+        "surface_native_volume_distribution_families": [
+          "global_maxwell_boltzmann_vol_distrib",
+          "analytic_vol_distrib",
+          "pic_boltzmann_vol_distrib"
+        ]
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_native_volume_interaction_override",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_native_volume_parity_mode": "native_minimal",
+        "surface_native_volume_parity_interaction_route": "config_override",
+        "surface_native_volume_active_interaction_route": "config_override",
+        "surface_native_volume_parity_interaction_family_count": "3",
+        "surface_native_volume_parity_interaction_family_signature": "MCCInteractor+PhotoIonization+SpinningSpacecraftTrajectory",
+        "surface_native_volume_parity_interactor_count": "3",
+        "surface_native_volume_active_interaction_family_count": "3",
+        "surface_native_volume_active_interaction_family_signature": "MCCInteractor+PhotoIonization+SpinningSpacecraftTrajectory",
+        "surface_native_volume_interaction_long_tail_route": "config_override",
+        "surface_native_volume_interaction_long_tail_family_count": "5",
+        "surface_native_volume_interaction_long_tail_active_family_count": "5",
+        "surface_native_volume_interaction_long_tail_family_signature": "VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor",
+        "surface_native_volume_interaction_long_tail_active_family_signature": "VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor"
+      },
+      "config_overrides": {
+        "surface_native_volume_interaction_families": [
+          "mcc_interactor",
+          "photo_ionization",
+          "spinning_spacecraft_trajectory"
+        ]
+      }
+    },
+    {
+      "case_label": "geo_ecss_kapton_native_volume_interaction_long_tail_override",
+      "preset": "geo_ecss_kapton_ref",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "geo_ecss_kapton_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-GEO",
+      "expected_metadata_values": {
+        "surface_native_volume_parity_mode": "native_minimal",
+        "surface_native_volume_interaction_long_tail_route": "config_override",
+        "surface_native_volume_interaction_long_tail_family_count": "5",
+        "surface_native_volume_interaction_long_tail_active_family_count": "5",
+        "surface_native_volume_interaction_long_tail_family_signature": "VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor",
+        "surface_native_volume_interaction_long_tail_active_family_signature": "VolInteractor+VolInteractModel+VolInteractionAlongTrajectory+ElasticCollisions+ConstantIonizationInteractor"
+      },
+      "config_overrides": {
+        "surface_native_volume_interaction_families": [
+          "mcc_interactor",
+          "photo_ionization",
+          "spinning_spacecraft_trajectory"
+        ]
+      }
+    },
+    {
+      "case_label": "leo_ref_ram_facing_axisym_distribution",
+      "preset": "leo_ref_ram_facing",
+      "expected_reference_family": "geo_leo_mat_reference_family",
+      "expected_reference_matrix_case_id": "leo_ram_facing_2000s",
+      "expected_boundary_observer_contract_id": "surface-pic-boundary-observer-v1",
+      "expected_benchmark_reference_source_resolved": "C-LEO-RAM",
+      "expected_metadata_values": {
+        "surface_distribution_family": "spis_axisym_tabulated_velocity_surface_flux_v1"
+      },
+      "config_overrides": {
+        "distribution_model": "axisym_tabulated_velocity"
+      }
     }
   ]
 }
-

@@ -141,5 +141,42 @@ TEST(SurfaceSolverFacadeTest, ResolveVolumeLinearSolverRoutingHonorsPolicyHints)
     EXPECT_EQ(iterative_only_routing.solver_mode, "iterative");
 }
 
+TEST(SurfaceSolverFacadeTest, ResolveSurfaceSolverFamilyViewBuildsSupportedAndActiveSignatures)
+{
+    SurfaceSolverFamilyRouteInput input;
+    input.has_circuit_solver = true;
+    input.has_electromag_solver = true;
+    input.has_matter_solver = true;
+    input.use_dense_electromag_solver = true;
+    input.use_iterative_electromag_solver = true;
+    input.has_magnetic_field = false;
+    input.has_pic_particle_coupling = true;
+
+    const auto view = resolveSurfaceSolverFamilyView(input);
+
+    EXPECT_EQ(view.circuit_family_count, 1u);
+    EXPECT_EQ(view.circuit_family_signature, "CircSolve");
+    EXPECT_EQ(view.active_circuit_family_count, 1u);
+    EXPECT_EQ(view.active_circuit_family_signature, "CircSolve");
+
+    EXPECT_EQ(view.electromag_family_count, 5u);
+    EXPECT_EQ(view.electromag_family_signature,
+              "AbstractEMSolver+PoissonSolver+PotPoissonSolver+"
+              "ConjGrad3DUnstructPoissonSolver+PoissonMagnetostaticSolver");
+    EXPECT_EQ(view.active_electromag_family_count, 4u);
+    EXPECT_EQ(view.active_electromag_family_signature,
+              "AbstractEMSolver+PoissonSolver+PotPoissonSolver+"
+              "ConjGrad3DUnstructPoissonSolver");
+
+    EXPECT_EQ(view.matter_family_count, 9u);
+    EXPECT_EQ(view.matter_family_signature,
+              "ParticlePusher+PICPusher+CrossTetrahedron+CrossTetraUniformEnoB+"
+              "CrossTetraUniformEwithB+CrossTetraUniformEAndB+"
+              "CrossTetraUniformEwithDichotomy+CrossTetraVaryingE+AnalyticalCrossTetra");
+    EXPECT_EQ(view.active_matter_family_count, 4u);
+    EXPECT_EQ(view.active_matter_family_signature,
+              "ParticlePusher+PICPusher+CrossTetrahedron+CrossTetraUniformEnoB");
+}
+
 } // namespace Solver
 } // namespace SCDAT

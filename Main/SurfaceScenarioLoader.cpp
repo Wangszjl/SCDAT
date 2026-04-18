@@ -3,10 +3,12 @@
 #include "SurfaceScenarioCatalog.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace SCDAT
 {
@@ -19,12 +21,15 @@ namespace detail
 std::string readTextFile(const std::filesystem::path& path);
 std::optional<std::string> extractObjectField(const std::string& text,
                                               const std::string& key);
+std::optional<std::string> extractArrayField(const std::string& text,
+                                             const std::string& key);
 std::optional<std::string> extractStringField(const std::string& text,
                                               const std::string& key);
 std::optional<double> extractNumberField(const std::string& text,
                                          const std::string& key);
 std::optional<bool> extractBoolField(const std::string& text,
                                      const std::string& key);
+std::vector<std::string> parseStringArray(const std::string& array_text);
 
 void applyUnifiedSolverConfigFromJsonObject(
     const std::string& text,
@@ -49,10 +54,20 @@ std::optional<Toolkit::SurfaceCharging::SurfaceBenchmarkMode>
 parseSurfaceBenchmarkMode(const std::string& text);
 std::optional<Toolkit::SurfaceCharging::VolumeLinearSolverPolicy>
 parseVolumeLinearSolverPolicy(const std::string& text);
+std::optional<FieldSolver::NativeVolumeBoundaryConditionFamily>
+parseNativeVolumeBoundaryConditionFamily(const std::string& text);
+std::optional<FieldSolver::NativeVolumeFieldFamily>
+parseNativeVolumeFieldFamily(const std::string& text);
+std::optional<FieldSolver::NativeVolumeDistributionFamily>
+parseNativeVolumeDistributionFamily(const std::string& text);
+std::optional<FieldSolver::NativeVolumeInteractionFamily>
+parseNativeVolumeInteractionFamily(const std::string& text);
 std::optional<Toolkit::SurfaceCharging::SecondaryElectronEmissionModel>
 parseSecondaryElectronEmissionModel(const std::string& text);
 std::optional<Toolkit::SurfaceCharging::ElectronCollectionModelKind>
 parseElectronCollectionModelKind(const std::string& text);
+std::optional<Toolkit::PlasmaAnalysis::PlasmaDistributionModelKind>
+parsePlasmaDistributionModelKind(const std::string& text);
 
 void applyPlasmaParametersFromJsonObject(const std::string& object_text,
                                          Toolkit::PlasmaAnalysis::PlasmaParameters& target);
@@ -63,6 +78,8 @@ const Material::MaterialProperty*
 resolveMaterialAliasOrName(const std::string& text);
 void applyMaterialFromJsonObject(const std::string& object_text,
                                  Material::MaterialProperty& material);
+bool applySurfaceInteractorFamilySelection(const std::string& text,
+                                           Material::MaterialProperty& material);
 void applyStructuredTopologyFromJson(const std::string& config_scope,
                                      Toolkit::SurfaceCharging::SurfaceChargingConfig& config);
 bool applySpectrumFromJsonObject(const std::string& spectrum_text,
@@ -77,6 +94,159 @@ namespace
 namespace fs = std::filesystem;
 
 } // namespace
+
+namespace detail
+{
+
+std::string normalizeInteractorFamilyToken(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (const unsigned char ch : text)
+    {
+        if (std::isalnum(ch))
+        {
+            normalized.push_back(static_cast<char>(ch));
+        }
+    }
+    return normalized;
+}
+
+bool applySurfaceInteractorFamilySelection(const std::string& text,
+                                           Material::MaterialProperty& material)
+{
+    const auto token = normalizeInteractorFamilyToken(text);
+    if (token.empty())
+    {
+        return false;
+    }
+
+    const auto set_family_code = [&](double family_code) {
+        material.setScalarProperty("surface_interactor_family_code", family_code);
+        material.setScalarProperty("surface_interactor_use_multiple_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_tabulated_sey_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_erosion_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_reflection_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_yield_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_photoemission_model", 0.0);
+        material.setScalarProperty("surface_interactor_use_induced_conduct_model", 0.0);
+    };
+
+    if (token == "spismaterialmodelsurfaceinteractorv1" || token == "materialmodel" ||
+        token == "material")
+    {
+        set_family_code(0.0);
+        return true;
+    }
+    if (token == "spismaterialdfsurfaceinteractorv1" || token == "materialdf")
+    {
+        set_family_code(1.0);
+        return true;
+    }
+    if (token == "spisgenericdfsurfaceinteractorv1" || token == "genericdf" ||
+        token == "generic")
+    {
+        set_family_code(2.0);
+        return true;
+    }
+    if (token == "spismaxwelliansurfaceinteractorv1" || token == "maxwellian")
+    {
+        set_family_code(3.0);
+        return true;
+    }
+    if (token == "spismaxwelliansurfaceinteractorwithrecollectionv1" ||
+        token == "maxwellianwithrecollection" || token == "maxwellianrecollection")
+    {
+        set_family_code(4.0);
+        return true;
+    }
+    if (token == "spismultiplesurfaceinteractorv1" || token == "multiple")
+    {
+        set_family_code(5.0);
+        return true;
+    }
+    if (token == "spismultiplemaxwelliansurfaceinteractorv1" ||
+        token == "multiplemaxwellian")
+    {
+        set_family_code(6.0);
+        return true;
+    }
+    if (token == "spisyieldsurfaceinteractorv1" || token == "yield")
+    {
+        set_family_code(7.0);
+        return true;
+    }
+    if (token == "spisreflectionsurfaceinteractorv1" || token == "reflection")
+    {
+        set_family_code(8.0);
+        return true;
+    }
+    if (token == "spiserosionsurfaceinteractorv1" || token == "erosion")
+    {
+        set_family_code(9.0);
+        return true;
+    }
+    if (token == "spisimprovedphotoemissionsurfaceinteractorv1" ||
+        token == "improvedphotoemission" || token == "photoemission" || token == "photoem")
+    {
+        set_family_code(10.0);
+        return true;
+    }
+    if (token == "spisbasicinducedconductsurfaceinteractorv1" ||
+        token == "basicinducedconduction" || token == "inducedconduction" ||
+        token == "inducedconduct")
+    {
+        set_family_code(11.0);
+        return true;
+    }
+    if (token == "spistabulatedseysurfaceinteractorv1" || token == "tabulatedsey" ||
+        token == "tabulatedsecondaryyield")
+    {
+        set_family_code(12.0);
+        return true;
+    }
+    if (token == "spisrecollectedseysurfaceinteractorv1" || token == "recollectedsey")
+    {
+        set_family_code(13.0);
+        return true;
+    }
+    if (token == "spisdefaultpeesurfaceinteractorv1" || token == "spisdefaultpeemodelv1" ||
+        token == "defaultpee" || token == "defaultpeemodel")
+    {
+        set_family_code(14.0);
+        return true;
+    }
+    if (token == "spisdefaultseeesurfaceinteractorv1" || token == "spisdefaultseeeymodelv1" ||
+        token == "defaultseee" || token == "defaultseeeymodel")
+    {
+        set_family_code(15.0);
+        return true;
+    }
+    if (token == "spisdefaultseepsurfaceinteractorv1" || token == "spisdefaultseepmodelv1" ||
+        token == "defaultseep" || token == "defaultseepmodel")
+    {
+        set_family_code(16.0);
+        return true;
+    }
+    if (token == "spisdefaulterosionsurfaceinteractorv1" ||
+        token == "spisdefaulterosionmodelv1" || token == "defaulterosion" ||
+        token == "defaulterosionmodel")
+    {
+        set_family_code(17.0);
+        return true;
+    }
+    if (token == "spisdevicesurfaceinteractorv1" || token == "device")
+    {
+        set_family_code(18.0);
+        return true;
+    }
+    return false;
+}
+
+} // namespace detail
 
 Toolkit::SurfaceCharging::SurfaceChargingScenarioPreset
 SurfaceScenarioLoader::loadFromJson(const std::filesystem::path& json_path,
@@ -270,6 +440,113 @@ SurfaceScenarioLoader::loadFromJson(const std::filesystem::path& json_path,
     apply_path("external_surface_volume_projection_path",
                preset.config.external_surface_volume_projection_path);
 
+    auto native_volume_boundary_condition_families =
+        detail::extractArrayField(config_scope,
+                                  "surface_native_volume_boundary_condition_families");
+    if (!native_volume_boundary_condition_families)
+    {
+        native_volume_boundary_condition_families =
+            detail::extractArrayField(config_scope,
+                                      "native_volume_boundary_condition_families");
+    }
+    if (native_volume_boundary_condition_families)
+    {
+        preset.config.native_volume_boundary_condition_families.clear();
+        for (const auto& family_text :
+             detail::parseStringArray(*native_volume_boundary_condition_families))
+        {
+            const auto parsed =
+                detail::parseNativeVolumeBoundaryConditionFamily(family_text);
+            if (!parsed)
+            {
+                throw std::runtime_error(
+                    "Unsupported native_volume_boundary_condition_families entry in "
+                    "surface config json: " +
+                    family_text);
+            }
+            preset.config.native_volume_boundary_condition_families.push_back(*parsed);
+        }
+    }
+
+    auto native_volume_field_families =
+        detail::extractArrayField(config_scope, "surface_native_volume_field_families");
+    if (!native_volume_field_families)
+    {
+        native_volume_field_families =
+            detail::extractArrayField(config_scope, "native_volume_field_families");
+    }
+    if (native_volume_field_families)
+    {
+        preset.config.native_volume_field_families.clear();
+        for (const auto& family_text : detail::parseStringArray(*native_volume_field_families))
+        {
+            const auto parsed = detail::parseNativeVolumeFieldFamily(family_text);
+            if (!parsed)
+            {
+                throw std::runtime_error(
+                    "Unsupported native_volume_field_families entry in surface config json: " +
+                    family_text);
+            }
+            preset.config.native_volume_field_families.push_back(*parsed);
+        }
+    }
+
+    auto native_volume_distribution_families =
+        detail::extractArrayField(config_scope,
+                                  "surface_native_volume_distribution_families");
+    if (!native_volume_distribution_families)
+    {
+        native_volume_distribution_families =
+            detail::extractArrayField(config_scope,
+                                      "native_volume_distribution_families");
+    }
+    if (native_volume_distribution_families)
+    {
+        preset.config.native_volume_distribution_families.clear();
+        for (const auto& family_text :
+             detail::parseStringArray(*native_volume_distribution_families))
+        {
+            const auto parsed =
+                detail::parseNativeVolumeDistributionFamily(family_text);
+            if (!parsed)
+            {
+                throw std::runtime_error(
+                    "Unsupported native_volume_distribution_families entry in "
+                    "surface config json: " +
+                    family_text);
+            }
+            preset.config.native_volume_distribution_families.push_back(*parsed);
+        }
+    }
+
+    auto native_volume_interaction_families =
+        detail::extractArrayField(config_scope,
+                                  "surface_native_volume_interaction_families");
+    if (!native_volume_interaction_families)
+    {
+        native_volume_interaction_families =
+            detail::extractArrayField(config_scope,
+                                      "native_volume_interaction_families");
+    }
+    if (native_volume_interaction_families)
+    {
+        preset.config.native_volume_interaction_families.clear();
+        for (const auto& family_text :
+             detail::parseStringArray(*native_volume_interaction_families))
+        {
+            const auto parsed =
+                detail::parseNativeVolumeInteractionFamily(family_text);
+            if (!parsed)
+            {
+                throw std::runtime_error(
+                    "Unsupported native_volume_interaction_families entry in "
+                    "surface config json: " +
+                    family_text);
+            }
+            preset.config.native_volume_interaction_families.push_back(*parsed);
+        }
+    }
+
     auto runtime_route = detail::extractStringField(config_scope, "surface_runtime_route");
     if (!runtime_route)
     {
@@ -426,6 +703,24 @@ SurfaceScenarioLoader::loadFromJson(const std::filesystem::path& json_path,
         preset.config.electron_collection_model = *parsed_model;
     }
 
+    auto distribution_model = detail::extractStringField(config_scope, "distribution_model");
+    if (!distribution_model)
+    {
+        distribution_model = detail::extractStringField(config_scope, "plasma_distribution_model");
+    }
+    if (distribution_model)
+    {
+        const auto parsed_distribution_model =
+            detail::parsePlasmaDistributionModelKind(*distribution_model);
+        if (!parsed_distribution_model)
+        {
+            throw std::runtime_error(
+                "Unsupported distribution_model in surface config json: " +
+                *distribution_model);
+        }
+        preset.config.distribution_model = *parsed_distribution_model;
+    }
+
     auto plasma_text = detail::extractObjectField(config_scope, "plasma_model");
     if (!plasma_text)
     {
@@ -489,6 +784,18 @@ SurfaceScenarioLoader::loadFromJson(const std::filesystem::path& json_path,
         else
         {
             preset.config.material = *resolved;
+        }
+    }
+    if (const auto interactor_family =
+            detail::extractStringField(config_scope, "surface_interactor_family");
+        interactor_family)
+    {
+        if (!detail::applySurfaceInteractorFamilySelection(*interactor_family,
+                                                           preset.config.material))
+        {
+            throw std::runtime_error(
+                "Unsupported surface_interactor_family in surface config json: " +
+                *interactor_family);
         }
     }
 

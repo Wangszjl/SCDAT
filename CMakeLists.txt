@@ -31,6 +31,36 @@ option(ENABLE_SUPERLU "Enable SuperLU-backed sparse direct solver path" OFF)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}" "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+
+add_custom_target(scdat_output_dirs
+    COMMAND
+        ${CMAKE_COMMAND} -E make_directory
+        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+        "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+    COMMENT "Ensuring shared runtime/library output directories exist"
+)
+
+if(CMAKE_GENERATOR MATCHES "Ninja")
+    set_property(GLOBAL PROPERTY JOB_POOLS scdat_link_pool=1)
+endif()
+
+function(scdat_harden_build_target target_name)
+    if(NOT TARGET "${target_name}")
+        message(FATAL_ERROR "scdat_harden_build_target called for unknown target: ${target_name}")
+    endif()
+
+    get_target_property(_target_type "${target_name}" TYPE)
+    if(_target_type STREQUAL "INTERFACE_LIBRARY")
+        return()
+    endif()
+
+    add_dependencies("${target_name}" scdat_output_dirs)
+
+    if(CMAKE_GENERATOR MATCHES "Ninja")
+        set_property(TARGET "${target_name}" PROPERTY JOB_POOL_LINK scdat_link_pool)
+    endif()
+endfunction()
 
 # ------------------------------------------------------------------------------
 # 全局头文件搜索路径（让所有子模块互相可见）
@@ -164,6 +194,38 @@ if(BUILD_TESTING)
             --output-root ${CMAKE_BINARY_DIR}/surface_reference_matrix_gate
             --report-json ${CMAKE_BINARY_DIR}/surface_reference_matrix_gate.json
             --report-md ${CMAKE_BINARY_DIR}/surface_reference_matrix_gate.md
+    )
+
+    add_test(
+        NAME SurfaceFamilyCoverageGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_surface_family_coverage_gate.py
+            --project-root ${CMAKE_SOURCE_DIR}
+            --matrix ${CMAKE_SOURCE_DIR}/scripts/run/surface_spis_family_coverage_matrix.json
+            --reference-matrix ${CMAKE_SOURCE_DIR}/scripts/run/surface_reference_matrix.json
+            --output-root ${CMAKE_BINARY_DIR}/surface_family_coverage_gate
+    )
+    set_tests_properties(
+        SurfaceFamilyCoverageGate
+        PROPERTIES DEPENDS "SurfaceReferenceMatrixGate"
+    )
+
+    add_test(
+        NAME SurfaceAlignmentSealoffGate
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/python/check_surface_round26_sealoff.py
+            --project-root ${CMAKE_SOURCE_DIR}
+            --coverage-matrix ${CMAKE_SOURCE_DIR}/scripts/run/surface_spis_family_coverage_matrix.json
+            --coverage-gate ${CMAKE_BINARY_DIR}/surface_family_coverage_gate/surface_family_coverage_gate.json
+            --reference-gate ${CMAKE_BINARY_DIR}/surface_reference_matrix_gate.json
+            --contract-catalog ${CMAKE_SOURCE_DIR}/documentation/contracts/kernel_contract_catalog_v1.json
+            --output-root ${CMAKE_BINARY_DIR}/surface_round26_sealoff
+    )
+    set_tests_properties(
+        SurfaceAlignmentSealoffGate
+        PROPERTIES DEPENDS "KernelContractCatalogGate;SurfaceFamilyCoverageGate"
     )
 
     add_test(
@@ -404,7 +466,9 @@ if(BUILD_TESTING)
             --report-md ${CMAKE_BINARY_DIR}/vacuum_arc_cross_platform_consistency.md
     )
 
+    add_subdirectory(Tools/Basic/test)
     add_subdirectory(Tools/Geometry/test)
+    add_subdirectory(Tools/Mesh/test)
     add_subdirectory(Tools/Coupling/test)
     add_subdirectory(Tools/Diagnostics/test)
     add_subdirectory(Tools/FieldSolver/test)

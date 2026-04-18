@@ -35,6 +35,50 @@ const char* distributionModelName(
         return "maxwellian_projected";
     case PlasmaDistributionModelKind::WakeAnisotropic:
         return "wake_anisotropic";
+    case PlasmaDistributionModelKind::MultipleSurf:
+        return "multiple_surf";
+    case PlasmaDistributionModelKind::LocalModifiedPearsonIV:
+        return "local_modified_pearson_iv";
+    case PlasmaDistributionModelKind::LocalTabulated:
+        return "local_tabulated";
+    case PlasmaDistributionModelKind::TwoAxesTabulatedVelocity:
+        return "two_axes_tabulated_velocity";
+    case PlasmaDistributionModelKind::GlobalMaxwellBoltzmann:
+        return "global_maxwell_boltzmann";
+    case PlasmaDistributionModelKind::GlobalMaxwellBoltzmann2:
+        return "global_maxwell_boltzmann2";
+    case PlasmaDistributionModelKind::GlobalMaxwell:
+        return "global_maxwell";
+    case PlasmaDistributionModelKind::LocalMaxwell:
+        return "local_maxwell";
+    case PlasmaDistributionModelKind::LocalMaxwell2:
+        return "local_maxwell2";
+    case PlasmaDistributionModelKind::RecollMaxwell:
+        return "recoll_maxwell";
+    case PlasmaDistributionModelKind::PICSurf:
+        return "pic_surf";
+    case PlasmaDistributionModelKind::NonPICSurf:
+        return "non_pic_surf";
+    case PlasmaDistributionModelKind::GenericSurf:
+        return "generic_surf";
+    case PlasmaDistributionModelKind::GlobalSurf:
+        return "global_surf";
+    case PlasmaDistributionModelKind::LocalGenericSurf:
+        return "local_generic_surf";
+    case PlasmaDistributionModelKind::TestableSurf:
+        return "testable_surf";
+    case PlasmaDistributionModelKind::TestableForA:
+        return "testable_for_a";
+    case PlasmaDistributionModelKind::MaxwellianThruster:
+        return "maxwellian_thruster";
+    case PlasmaDistributionModelKind::UniformVelocity:
+        return "uniform_velocity";
+    case PlasmaDistributionModelKind::Fluid:
+        return "fluid";
+    case PlasmaDistributionModelKind::FowlerNordheim:
+        return "fowler_nordheim";
+    case PlasmaDistributionModelKind::AxisymTabulatedVelocity:
+        return "axisym_tabulated_velocity";
     case PlasmaDistributionModelKind::MultiPopulationHybrid:
     default:
         return "multi_population_hybrid";

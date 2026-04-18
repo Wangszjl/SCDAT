@@ -75,6 +75,7 @@
 | 新增能力 gate 证据刷新 | `R11` 子集 gate 与全量 `surface_reference_matrix` gate 均已 `PASS`（见 `build/round11_surface_reference_matrix_gate/*` 与 `build/surface_reference_matrix_gate/*`） | `R11-F` |
 
 - `Round 11` 封板结论：`R11-A/B/C/D/E/F` 全部完成，且 `build/round11_surface_reference_matrix_gate/surface_reference_matrix_gate.json` 与 `build/surface_reference_matrix_gate.json` 均为 `PASS`。
+- `Round 18` 封板结论：关键单测集合、`build/surface_reference_matrix_gate_subset/surface_reference_matrix_gate.json`、`build/surface_reference_matrix_gate_full/surface_reference_matrix_gate.json`、`build/config_schema_v1_gate/config_schema_v1_gate.json`、`build/kernel_contract_catalog_gate.json` 与 `build/benchmark_case_matrix_gate.json` 均为 `PASS`，Surface 主线按当前 gate 口径完成收口。
 
 ## 7. 本文档更新策略
 

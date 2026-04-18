@@ -3,6 +3,41 @@
 ## Overview
 This module hosts the SCDAT surface charging framework.
 
+The primary workflow of this module is the native SCDAT surface path:
+
+- native modeling
+- native configuration
+- native simulation startup
+- native CSV / metadata / artifact output
+
+`SPIS import` support exists, but it should be understood as an optional external adapter and
+comparison workflow rather than the default center of the module.
+
+Recommended reading order:
+
+1. [docs/native_surface_architecture_overview.md](./docs/native_surface_architecture_overview.md)
+2. [docs/native_surface_mainline_workflow.md](./docs/native_surface_mainline_workflow.md)
+3. [docs/architecture.md](./docs/architecture.md)
+4. [docs/spis_import_compute_workflow.md](./docs/spis_import_compute_workflow.md)
+5. [docs/native_surface_build_verification_notes.md](./docs/native_surface_build_verification_notes.md)
+
+Minimal native runnable example:
+
+```powershell
+cmake --build build --target SCDAT --config Debug
+build/bin/SCDAT.exe surface-config scripts/run/surface_config_minimal_example.json
+```
+
+Expected output:
+
+- `results/surface_config_minimal_example.csv`
+
+Current object-layer verification status:
+
+- `SurfaceCharging_object_layer_test`
+- `10/10` tests passing in the current workspace after CMake output/link hardening and a
+  `--clean-first` rebuild
+
 It now supports two long-lived routes:
 
 - `SCDATUnified`

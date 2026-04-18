@@ -1,5 +1,23 @@
 # SCDAT Surface Charging Architecture
 
+## Reading Guide
+
+This document focuses on runtime architecture and kernel layering.
+
+For the native project-facing workflow, read these first:
+
+- [native_surface_architecture_overview.md](./native_surface_architecture_overview.md)
+- [native_surface_mainline_workflow.md](./native_surface_mainline_workflow.md)
+
+For the optional SPIS adapter and comparison path, read:
+
+- [spis_import_compute_workflow.md](./spis_import_compute_workflow.md)
+
+That distinction matters:
+
+- native modeling / configuration / simulation / output is the primary project workflow
+- `SPIS import` is an auxiliary adapter and benchmarking path, not the architectural center
+
 ## Alignment State
 The runtime is now organized around a neutral-named unified surface kernel:
 

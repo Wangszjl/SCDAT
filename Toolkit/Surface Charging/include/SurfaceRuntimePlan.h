@@ -36,6 +36,12 @@ struct SurfaceRuntimePlan
     bool external_volume_solver_bridge_enabled = false;
     std::string source_name;
     std::string source_description;
+    std::string top_top_entrypoint = "direct_config";
+    std::size_t scheduled_steps = 0;
+    bool adaptive_time_stepping = false;
+    double total_duration_s = 0.0;
+    double minimum_time_step_s = 0.0;
+    double maximum_time_step_s = 0.0;
 };
 
 SurfaceRuntimePlan compileSurfaceRuntimePlan(const SurfaceChargingConfig& config);

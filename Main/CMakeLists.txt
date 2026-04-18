@@ -42,6 +42,7 @@ add_executable(SCDAT
     "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/SurfaceScenarioLoader.cpp"
 )
+scdat_harden_build_target(SCDAT)
 
 target_link_libraries(SCDAT PRIVATE ${_SCDAT_LINK_LIBS})
 target_include_directories(SCDAT PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -55,6 +56,7 @@ foreach(_src IN LISTS _extra_mains)
     set(_tgt "SCDAT_${_suffix}")
 
     add_executable(${_tgt} "${_src}")
+    scdat_harden_build_target(${_tgt})
     target_link_libraries(${_tgt} PRIVATE ${_SCDAT_LINK_LIBS})
     if(_suffix STREQUAL "mesh_export")
         # MinGW static link order is sensitive; append Geometry after Mesh consumers.

@@ -3,6 +3,7 @@
 #include "../../Material/include/MaterialProperty.h"
 #include "../../Particle/include/SurfaceDistributionFunction.h"
 
+#include <string>
 #include <vector>
 
 namespace SCDAT
@@ -94,6 +95,12 @@ enum class SurfaceBarrierScalerKind
         OmlCurrent = 2,
         LteOmlCurrent = 3,
         FowlerNordheimCurrent = 4,
+        AutomaticBarrierCurrent = 5,
+        MultipleCurrent = 6,
+        GlobalTempCurrent = 7,
+        SmoothedGlobalTempCurrent = 8,
+        CurrentVariation = 9,
+        LocalVariation = 10,
 };
 
 class SecondaryRecollectionScaler final : public BarrierCurrentScaler
@@ -141,10 +148,99 @@ class FowlerNordheimCurrentScaler final : public BarrierCurrentScaler
                                                                             double emitted_current_a_per_m2) const override;
 };
 
+class AutomaticBarrierCurrentScaler final : public BarrierCurrentScaler
+{
+  public:
+    const char* family() const override;
+    SurfaceBarrierEvaluation evaluate(const Material::MaterialProperty& material,
+                                      const SurfaceBarrierState& state,
+                                      double emitted_current_a_per_m2) const override;
+};
+
+class MultipleCurrentScaler final : public BarrierCurrentScaler
+{
+  public:
+    explicit MultipleCurrentScaler(std::string property_scope = {});
+    const char* family() const override;
+    SurfaceBarrierEvaluation evaluate(const Material::MaterialProperty& material,
+                                      const SurfaceBarrierState& state,
+                                      double emitted_current_a_per_m2) const override;
+
+  private:
+    std::string property_scope_;
+};
+
+class GlobalTempCurrentScaler final : public BarrierCurrentScaler
+{
+  public:
+    explicit GlobalTempCurrentScaler(std::string property_scope = {});
+    const char* family() const override;
+    SurfaceBarrierEvaluation evaluate(const Material::MaterialProperty& material,
+                                      const SurfaceBarrierState& state,
+                                      double emitted_current_a_per_m2) const override;
+
+  private:
+    std::string property_scope_;
+};
+
+class SmoothedGlobalTempCurrentScaler final : public BarrierCurrentScaler
+{
+  public:
+    explicit SmoothedGlobalTempCurrentScaler(std::string property_scope = {});
+    const char* family() const override;
+    SurfaceBarrierEvaluation evaluate(const Material::MaterialProperty& material,
+                                      const SurfaceBarrierState& state,
+                                      double emitted_current_a_per_m2) const override;
+
+  private:
+    std::string property_scope_;
+};
+
+class CurrentVariationScaler final : public BarrierCurrentScaler
+{
+  public:
+    explicit CurrentVariationScaler(std::string property_scope = {});
+    const char* family() const override;
+    SurfaceBarrierEvaluation evaluate(const Material::MaterialProperty& material,
+                                      const SurfaceBarrierState& state,
+                                      double emitted_current_a_per_m2) const override;
+
+  private:
+    std::string property_scope_;
+};
+
+class LocalVariationScaler final : public BarrierCurrentScaler
+{
+  public:
+    explicit LocalVariationScaler(std::string property_scope = {});
+    const char* family() const override;
+    SurfaceBarrierEvaluation evaluate(const Material::MaterialProperty& material,
+                                      const SurfaceBarrierState& state,
+                                      double emitted_current_a_per_m2) const override;
+
+  private:
+    std::string property_scope_;
+};
+
+struct SurfaceBarrierScalerDecision
+{
+    SurfaceBarrierScalerKind configured_kind = SurfaceBarrierScalerKind::VariableBarrier;
+    SurfaceBarrierScalerKind resolved_kind = SurfaceBarrierScalerKind::VariableBarrier;
+    std::string configured_family = "spis_variable_barrier_scaler_v1";
+    std::string resolved_family = "spis_variable_barrier_scaler_v1";
+};
+
 SurfaceBarrierScalerKind resolveSurfaceBarrierScalerKind(
         const Material::MaterialProperty& material, const char* property_key,
         SurfaceBarrierScalerKind fallback_kind);
+SurfaceBarrierScalerDecision resolveSurfaceBarrierScalerDecision(
+    const Material::MaterialProperty& material, const SurfaceBarrierState& state,
+    const char* property_key, SurfaceBarrierScalerKind fallback_kind);
 const BarrierCurrentScaler& selectSurfaceBarrierScaler(SurfaceBarrierScalerKind kind);
+SurfaceBarrierEvaluation evaluateConfiguredSurfaceBarrierScaler(
+    const Material::MaterialProperty& material, const SurfaceBarrierState& state,
+    double emitted_current_a_per_m2, const char* property_key,
+    SurfaceBarrierScalerKind fallback_kind);
 
 SurfaceEmissionBarrierInputs makeSurfaceEmissionBarrierInputs(
     const SurfaceEmissionBarrierComponentInputs& components);
